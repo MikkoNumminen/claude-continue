@@ -10,7 +10,7 @@ from dataclasses import fields
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import __version__, action, launchd, schedule, watch
+from . import __version__, action, doctor, launchd, schedule, watch
 from .ccusage import CcusageUnavailable, get_active_block
 from .config import Config, resolve
 from .lock import AlreadyRunning
@@ -147,6 +147,21 @@ def cmd_status(args) -> int:
     return 0
 
 
+def cmd_doctor(args) -> int:
+    cfg = resolve(build_overrides(args))
+    checks = doctor.run_checks(cfg)
+    symbol = {doctor.OK: "✓", doctor.WARN: "!", doctor.FAIL: "✗"}
+    for c in checks:
+        print("%s %-9s %s" % (symbol[c.status], c.name, c.detail))
+    worst = doctor.worst_status(checks)
+    print("")
+    if worst == doctor.FAIL:
+        print("Some checks FAILED — fix the above before relying on the agent.")
+        return 1
+    print("Ready, with warnings." if worst == doctor.WARN else "All checks passed.")
+    return 0
+
+
 def cmd_watch(args) -> int:
     cfg = resolve(build_overrides(args))
     logger = get_logger()
@@ -236,6 +251,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_status = sub.add_parser("status", help="show the active window + what would fire")
     add_action_args(p_status)
     p_status.set_defaults(func=cmd_status)
+
+    p_doctor = sub.add_parser("doctor", help="preflight: check ccusage, node, iTerm2, the agent, config")
+    add_action_args(p_doctor)
+    p_doctor.set_defaults(func=cmd_doctor)
 
     p_watch = sub.add_parser("watch", help="run the self-rescheduling loop (foreground)")
     add_action_args(p_watch)

@@ -48,6 +48,9 @@ pip install -e .
 ## Usage
 
 ```bash
+# Will it actually work here? Check ccusage, node, iTerm2, the agent, config.
+claude-continue doctor
+
 # What's the current window, and what would fire?
 claude-continue status
 
@@ -77,6 +80,22 @@ Active window:
 Action: send 'continue' to 1 session(s):
   - ✳ Claude Code (claude)
 ```
+
+### `doctor` example
+
+```
+✓ python    Python 3.9.6
+✓ ccusage   active window resets 2026-06-14T09:00:00+03:00 (in 3h 02m)
+✓ node      /Users/you/.nvm/.../bin/node (launchd PATH will include …)
+✓ iterm2    /Applications/iTerm.app present
+! agent     not installed (run `claude-continue install` to run unattended)
+✓ config    action=filter ['claude', '✳'], trigger=ccusage auto, buffer=90s
+✓ targets   1 session(s) currently match: ✳ Claude Code (claude)
+
+Ready, with warnings.
+```
+
+`doctor` exits non-zero if any check fails, so it doubles as a CI/health probe.
 
 ## Choosing what fires
 
