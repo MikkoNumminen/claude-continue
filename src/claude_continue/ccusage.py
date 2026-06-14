@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
 import subprocess
 
 from . import osenv
@@ -36,8 +35,9 @@ class CcusageUnavailable(Exception):
 
 def _command() -> list[str]:
     override = os.environ.get(CMD_ENV)
-    argv = shlex.split(override) if override else list(DEFAULT_CMD)
-    # resolve npx (and on Windows wrap the .cmd shim) so it runs without a shell
+    # split_command is platform-aware (POSIX shlex would eat backslashes in a
+    # Windows override path); resolve_argv then wraps any .cmd shim.
+    argv = osenv.split_command(override) if override else list(DEFAULT_CMD)
     return osenv.resolve_argv(argv)
 
 

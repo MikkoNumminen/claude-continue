@@ -75,8 +75,11 @@ class TestExec(unittest.TestCase):
 
 
 class TestBroadcastRouting(unittest.TestCase):
+    # iTerm broadcast is macOS's resume path — force the platform so these run
+    # the same everywhere (on Linux/Windows the default resume raises instead).
     def test_routes_to_iterm_with_expected_kwargs(self):
-        with mock.patch("claude_continue.action.iterm.broadcast", return_value=["s"]) as bc:
+        with _ForcePlatform("macos"), \
+             mock.patch("claude_continue.action.iterm.broadcast", return_value=["s"]) as bc:
             out = perform(Config(text="continue", session="Job"), dry_run=True)
         self.assertEqual(out, ["s"])
         _, kwargs = bc.call_args
@@ -84,7 +87,8 @@ class TestBroadcastRouting(unittest.TestCase):
         self.assertTrue(kwargs["dry_run"])
 
     def test_broadcast_runtimeerror_becomes_actionerror(self):
-        with mock.patch("claude_continue.action.iterm.broadcast", side_effect=RuntimeError("iTerm2 not running")):
+        with _ForcePlatform("macos"), \
+             mock.patch("claude_continue.action.iterm.broadcast", side_effect=RuntimeError("iTerm2 not running")):
             with self.assertRaises(ActionError):
                 perform(Config(), dry_run=False)
 
