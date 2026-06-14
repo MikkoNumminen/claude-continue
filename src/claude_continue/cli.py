@@ -191,13 +191,16 @@ def cmd_once(args) -> int:
             return 1
         target = schedule.next_target(block, cfg.buffer)
 
-    if getattr(args, "dry_run", False):
-        logger.info("would wait until %s, then fire -> %s", _fmt(target), action.perform(cfg, dry_run=True))
-        return 0
-
-    logger.info("waiting until %s ...", _fmt(target))
-    watch._sleep_until(target, clock=_utc_now, sleep=time.sleep, stop=lambda: False)
-    fired = action.perform(cfg, dry_run=False)
+    try:
+        if getattr(args, "dry_run", False):
+            logger.info("would wait until %s, then fire -> %s", _fmt(target), action.perform(cfg, dry_run=True))
+            return 0
+        logger.info("waiting until %s ...", _fmt(target))
+        watch._sleep_until(target, clock=_utc_now, sleep=time.sleep, stop=lambda: False)
+        fired = action.perform(cfg, dry_run=False)
+    except action.ActionError as e:
+        logger.error("%s", e)
+        return 1
     logger.info("fired -> %s", fired or "(no matching sessions)")
     return 0
 
@@ -206,7 +209,11 @@ def cmd_fire(args) -> int:
     cfg = resolve(build_overrides(args))
     logger = get_logger()
     dry = bool(getattr(args, "dry_run", False))
-    fired = action.perform(cfg, dry_run=dry)
+    try:
+        fired = action.perform(cfg, dry_run=dry)
+    except action.ActionError as e:
+        logger.error("%s", e)
+        return 1
     logger.info("%s -> %s", "would fire" if dry else "fired", fired or "(no matching sessions)")
     return 0
 
@@ -215,15 +222,19 @@ def cmd_install(args) -> int:
     overrides = build_overrides(args)
     cfg = resolve(overrides)
     program_args = [_resolve_binary(), "watch"] + overrides_to_argv(overrides)
-    plist = launchd.install(
-        program_args,
-        path_value=launchd.node_path_value(cfg.node_path),
-        stdout=cfg.log_path,
-    )
+    path_value = launchd.node_path_value(cfg.node_path)
+    try:
+        plist = launchd.install(program_args, path_value=path_value, stdout=cfg.log_path)
+    except (RuntimeError, ValueError) as e:
+        print("install failed: %s" % e)
+        return 1
     print("installed launchd agent: %s" % plist)
     print("  program: %s" % " ".join(program_args))
     print("  logs:    %s" % (cfg.log_path or launchd.LOG_PATH))
     print("  check:   launchctl print %s" % launchd._service())
+    node = shutil.which("node") or shutil.which("npx")
+    if node and launchd.is_volatile_node_dir(node) and "/opt/homebrew/bin" not in path_value and "/usr/local/bin" not in path_value.split(":")[:3]:
+        print("  note:    node is a version-pinned path; re-run `claude-continue install` after upgrading node")
     return 0
 
 

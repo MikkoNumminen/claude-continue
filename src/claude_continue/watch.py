@@ -43,9 +43,21 @@ def _fmt(dt: datetime) -> str:
 @dataclass
 class _Plan:
     kind: str  # "fire" | "poll"
-    target: datetime = None
-    block: Block = None
+    target: datetime | None = None
+    block: Block | None = None
     reason: str = ""
+
+
+def _fire(cfg, perform, logger):
+    """Perform the action, never letting a failure crash the daemon.
+
+    Returns the list of acted-on targets, or None if the fire failed (logged).
+    """
+    try:
+        return perform(cfg, dry_run=False)
+    except Exception as e:  # noqa: BLE001 - a failed fire must degrade, not crash
+        logger.warning("fire failed: %s", e)
+        return None
 
 
 def _next_plan(cfg: Config, now: datetime, get_block, logger) -> _Plan:
@@ -81,9 +93,13 @@ def _sleep_until(target: datetime, *, clock, sleep, stop, slice_s: int = 60) -> 
 
 
 def _verify_and_retry(cfg, old_block, *, clock, sleep, get_block, perform, logger, stop) -> None:
-    """After firing, confirm the window rolled; retry if ccusage was early."""
+    """After firing, confirm the window rolled; retry if ccusage was early.
+
+    Verification happens at the top of each iteration, so *every* re-fire —
+    including the last one before giving up — gets checked.
+    """
     attempts = 0
-    while attempts < cfg.retry_cap:
+    while True:
         delay = cfg.verify_delay if attempts == 0 else cfg.retry_interval
         if _sleep_until(clock() + timedelta(seconds=delay), clock=clock, sleep=sleep, stop=stop) == "stopped":
             return
@@ -98,15 +114,13 @@ def _verify_and_retry(cfg, old_block, *, clock, sleep, get_block, perform, logge
         if new_block.reset_at > old_block.reset_at:
             logger.info("window rolled: next reset %s", _fmt(new_block.reset_at))
             return
+        if attempts >= cfg.retry_cap:
+            logger.warning("still on the old window after %d retries; re-arming on next cycle", cfg.retry_cap)
+            return
         attempts += 1
-        logger.warning(
-            "still on the old window after firing (attempt %d/%d) — re-firing",
-            attempts,
-            cfg.retry_cap,
-        )
-        fired = perform(cfg, dry_run=False)
-        logger.info("re-fired -> %s", fired or "(no matching sessions)")
-    logger.warning("gave up confirming the roll after %d retries; re-arming on next cycle", cfg.retry_cap)
+        logger.warning("still on the old window (retry %d/%d) — re-firing", attempts, cfg.retry_cap)
+        fired = _fire(cfg, perform, logger)
+        logger.info("re-fired -> %s", fired if fired is not None else "(fire failed)")
 
 
 def run(
@@ -175,15 +189,19 @@ def run(
             if _sleep_until(plan.target, clock=clock, sleep=sleep, stop=stop) == "stopped":
                 break
 
-            fired = perform(cfg, dry_run=False)
+            fired = _fire(cfg, perform, logger)
             fires += 1
-            logger.info("fired -> %s", fired or "(no matching sessions)")
+            if fired is None:
+                logger.warning("fire failed; re-arming on next cycle")
+            else:
+                logger.info("fired -> %s", fired or "(no matching sessions)")
             if plan.block is not None:
                 last_fired_block_id = plan.block.id
-                _verify_and_retry(
-                    cfg, plan.block, clock=clock, sleep=sleep, get_block=get_block,
-                    perform=perform, logger=logger, stop=stop,
-                )
+                if fired is not None:
+                    _verify_and_retry(
+                        cfg, plan.block, clock=clock, sleep=sleep, get_block=get_block,
+                        perform=perform, logger=logger, stop=stop,
+                    )
 
             if max_fires is not None and fires >= max_fires:
                 logger.info("max_fires=%d reached; exiting", max_fires)

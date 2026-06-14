@@ -6,6 +6,7 @@ import _support  # noqa: F401
 from _support import FakeClock, utc
 
 from claude_continue import watch
+from claude_continue.ccusage import CcusageUnavailable
 from claude_continue.config import Config
 from claude_continue.model import Block
 
@@ -143,6 +144,61 @@ class TestWatchLoop(unittest.TestCase):
                   stop=lambda: fc.now() > T0 + timedelta(hours=3), use_lock=False)
         # 1 initial fire + retry_cap (6) re-fires, then dedupe → no further fires
         self.assertEqual(len(fired), 7)
+
+    def test_verify_ccusage_unavailable_after_fire_assumes_ok(self):
+        # fire succeeds, but the post-fire ccusage check errors -> assume ok, no re-fire
+        T0 = utc(2026, 6, 14, 6)
+        fc = FakeClock(T0 - timedelta(minutes=1))
+        fired = []
+        st = {"fired": False}
+
+        def gb(timeout=30):
+            if st["fired"]:
+                raise CcusageUnavailable("boom")
+            return block(1, T0)
+
+        def perform(c, dry_run=False):
+            fired.append(fc.now())
+            st["fired"] = True
+            return ["s"]
+
+        watch.run(cfg(), clock=fc.now, sleep=fc.sleep, get_block=gb, perform=perform,
+                  stop=lambda: False, use_lock=False, max_fires=1)
+        self.assertEqual(len(fired), 1)
+
+    def test_verify_none_after_fire_stops(self):
+        # fire succeeds, post-fire check shows no active window -> nothing to confirm, no re-fire
+        T0 = utc(2026, 6, 14, 6)
+        fc = FakeClock(T0 - timedelta(minutes=1))
+        fired = []
+        st = {"fired": False}
+
+        def gb(timeout=30):
+            return None if st["fired"] else block(1, T0)
+
+        def perform(c, dry_run=False):
+            fired.append(fc.now())
+            st["fired"] = True
+            return ["s"]
+
+        watch.run(cfg(), clock=fc.now, sleep=fc.sleep, get_block=gb, perform=perform,
+                  stop=lambda: False, use_lock=False, max_fires=1)
+        self.assertEqual(len(fired), 1)
+
+    def test_fire_failure_does_not_crash_daemon(self):
+        # perform raising must NOT propagate out of run(); the loop just re-arms
+        T0 = utc(2026, 6, 14, 6)
+        fc = FakeClock(T0 - timedelta(minutes=1))
+
+        def gb(timeout=30):
+            return block(1, T0)
+
+        def perform(c, dry_run=False):
+            raise RuntimeError("iTerm2 not running")
+
+        # should complete normally (max_fires reached after the failed fire), no exception
+        watch.run(cfg(), clock=fc.now, sleep=fc.sleep, get_block=gb, perform=perform,
+                  stop=lambda: False, use_lock=False, max_fires=1)
 
     def test_ccusage_unavailable_falls_to_poll(self):
         from claude_continue.ccusage import CcusageUnavailable

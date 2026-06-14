@@ -106,4 +106,9 @@ def resolve(overrides: dict | None = None, *, config_path: Path = CONFIG_PATH) -
             if key in valid and value is not None:
                 setattr(cfg, key, value)
 
+    # A blank exec_cmd is "unset", not "run nothing" — otherwise it's truthy and
+    # would route the action to the (empty) exec path.
+    if cfg.exec_cmd is not None and not cfg.exec_cmd.strip():
+        cfg.exec_cmd = None
+
     return cfg

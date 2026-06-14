@@ -72,4 +72,8 @@ def get_active_block(timeout: float = 30.0) -> Block | None:
     except json.JSONDecodeError as e:
         raise CcusageUnavailable(f"ccusage produced non-JSON output: {e}") from e
 
-    return active_block_from_payload(payload)
+    try:
+        return active_block_from_payload(payload)
+    except (KeyError, ValueError, TypeError) as e:
+        # ccusage changed its JSON shape (renamed/removed fields, bad timestamp)
+        raise CcusageUnavailable(f"unexpected ccusage JSON shape: {e}") from e

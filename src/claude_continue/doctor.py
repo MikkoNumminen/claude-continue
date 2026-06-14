@@ -12,11 +12,12 @@ from __future__ import annotations
 
 import os
 import platform
+import shlex
 import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from . import iterm
+from . import action as action_mod
 from . import launchd as launchd_mod
 from . import schedule
 from .ccusage import CcusageUnavailable, get_active_block
@@ -59,11 +60,18 @@ def _check_ccusage(cfg: Config, probe, now) -> Check:
 
 def _check_node(cfg: Config, which) -> Check:
     node = which("node") or which("npx")
-    if node:
-        return Check("node", OK, "%s (launchd PATH will include %s)" % (node, os.path.dirname(node)))
-    if cfg.at or cfg.every_hours:
-        return Check("node", WARN, "node/npx not found — only needed for ccusage auto-detect")
-    return Check("node", FAIL, "node/npx not found on PATH — ccusage auto-detect won't work")
+    if not node:
+        if cfg.at or cfg.every_hours:
+            return Check("node", WARN, "node/npx not found — only needed for ccusage auto-detect")
+        return Check("node", FAIL, "node/npx not found on PATH — ccusage auto-detect won't work")
+    stable_present = any(
+        os.path.exists(os.path.join(d, "node")) for d in ("/opt/homebrew/bin", "/usr/local/bin")
+    )
+    if stable_present:
+        return Check("node", OK, "%s (a stable node dir will be on the launchd PATH)" % node)
+    if launchd_mod.is_volatile_node_dir(node):
+        return Check("node", WARN, "%s is version-pinned — re-run `claude-continue install` after upgrading node" % node)
+    return Check("node", OK, "%s (launchd PATH will include %s)" % (node, os.path.dirname(node)))
 
 
 def _check_iterm(cfg: Config, exists) -> Check:
@@ -107,9 +115,18 @@ def _check_config(cfg: Config) -> Check:
     return Check("config", OK, "action=%s, trigger=%s, buffer=%ds" % (action, trigger, cfg.buffer))
 
 
-def _check_action(cfg: Config, preview) -> Check:
+def _check_action(cfg: Config, preview, which) -> Check:
     if cfg.exec_cmd:
-        return Check("targets", OK, "would run: %s" % cfg.exec_cmd)
+        try:
+            argv = shlex.split(cfg.exec_cmd)
+        except ValueError as e:
+            return Check("targets", FAIL, "exec command does not parse: %s" % e)
+        if not argv:
+            return Check("targets", FAIL, "exec command is empty")
+        found = which(argv[0])
+        if not found:
+            return Check("targets", WARN, "exec binary %r not found on PATH (must be on launchd's PATH too)" % argv[0])
+        return Check("targets", OK, "would run: %s (%s)" % (cfg.exec_cmd, found))
     try:
         names = preview()
     except Exception as e:  # noqa: BLE001 - doctor must never raise
@@ -132,14 +149,9 @@ def run_checks(
     """Run every preflight check and return the ordered list of results."""
     now = now or (lambda: datetime.now(timezone.utc))
     launchd_status = launchd_status or launchd_mod.status
-
-    def _default_preview():
-        return iterm.broadcast(
-            cfg.text, cfg.filter, skip_busy=cfg.skip_busy, session=cfg.session,
-            dry_run=True, all_sessions=cfg.all_sessions, force=cfg.force, timeout=float(cfg.timeout),
-        )
-
-    action_preview = action_preview or _default_preview
+    # Delegate the preview to the real action layer so it stays identical to what
+    # would actually fire (dry-run never sends keystrokes).
+    action_preview = action_preview or (lambda: action_mod.perform(cfg, dry_run=True))
 
     return [
         _check_python(),
@@ -148,7 +160,7 @@ def run_checks(
         _check_iterm(cfg, iterm_exists),
         _check_launchd(launchd_status),
         _check_config(cfg),
-        _check_action(cfg, action_preview),
+        _check_action(cfg, action_preview, which),
     ]
 
 

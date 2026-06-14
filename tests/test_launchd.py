@@ -2,6 +2,7 @@ import os
 import plistlib
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import _support  # noqa: F401
 
@@ -38,6 +39,23 @@ class TestRenderPlist(unittest.TestCase):
         # uses the real environment's node if present; otherwise still well-formed
         pv = launchd.node_path_value()
         self.assertIn("/usr/bin", pv)
+
+    def test_node_path_extra_first_and_deduped(self):
+        with mock.patch("claude_continue.launchd.shutil.which", return_value="/fake/nvm/bin/node"), \
+             mock.patch("claude_continue.launchd.os.path.exists", return_value=False):
+            pv = launchd.node_path_value(extra="/usr/bin")
+        parts = pv.split(":")
+        self.assertEqual(parts[0], "/usr/bin")          # extra goes first
+        self.assertEqual(parts.count("/usr/bin"), 1)    # and is not duplicated
+        self.assertIn("/fake/nvm/bin", parts)           # node's dir is included
+
+    def test_xml_escape_rejects_control_chars(self):
+        with self.assertRaises(ValueError):
+            launchd.render_plist(["/bin/cc", "watch", "--text", "a\x07b"], path_value="/usr/bin")
+
+    def test_is_volatile_node_dir(self):
+        self.assertTrue(launchd.is_volatile_node_dir("/Users/x/.nvm/versions/node/v22.0.0/bin/node"))
+        self.assertFalse(launchd.is_volatile_node_dir("/opt/homebrew/bin/node"))
 
 
 class TestTemplateNoDrift(unittest.TestCase):

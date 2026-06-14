@@ -90,23 +90,30 @@ class TestIndividualChecks(unittest.TestCase):
         self.assertEqual(c.status, OK)
         self.assertIn("every 5h", c.detail)
 
-    def test_action_exec(self):
-        c = doctor._check_action(Config(exec_cmd="claude -p go"), preview=lambda: [])
+    def test_action_exec_found(self):
+        c = doctor._check_action(Config(exec_cmd="claude -p go"), preview=lambda: [],
+                                 which=lambda n: "/bin/" + n)
         self.assertEqual(c.status, OK)
         self.assertIn("would run", c.detail)
 
+    def test_action_exec_binary_missing_warns(self):
+        c = doctor._check_action(Config(exec_cmd="nope -p go"), preview=lambda: [],
+                                 which=lambda n: None)
+        self.assertEqual(c.status, WARN)
+        self.assertIn("not found on PATH", c.detail)
+
     def test_action_no_matches_warns(self):
-        c = doctor._check_action(Config(), preview=lambda: [])
+        c = doctor._check_action(Config(), preview=lambda: [], which=lambda n: None)
         self.assertEqual(c.status, WARN)
 
     def test_action_matches_ok(self):
-        c = doctor._check_action(Config(), preview=lambda: ["sess A"])
+        c = doctor._check_action(Config(), preview=lambda: ["sess A"], which=lambda n: None)
         self.assertEqual(c.status, OK)
 
     def test_action_preview_error_warns(self):
         def boom():
             raise RuntimeError("osascript died")
-        c = doctor._check_action(Config(), preview=boom)
+        c = doctor._check_action(Config(), preview=boom, which=lambda n: None)
         self.assertEqual(c.status, WARN)
         self.assertIn("could not query", c.detail)
 

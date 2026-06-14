@@ -63,6 +63,14 @@ $program_args
 
 
 def _xml_escape(s: str) -> str:
+    for ch in s:
+        # XML 1.0 forbids C0 control chars (except tab/newline/CR) even in text;
+        # one would produce a plist launchd can't parse. Reject with a clear error.
+        if ord(ch) < 0x20 and ch not in "\t\n\r":
+            raise ValueError(
+                "value contains a control character (0x%02x) that cannot go in a plist: %r"
+                % (ord(ch), s)
+            )
     return (
         s.replace("&", "&amp;")
         .replace("<", "&lt;")
@@ -71,12 +79,26 @@ def _xml_escape(s: str) -> str:
     )
 
 
+def is_volatile_node_dir(path: str) -> bool:
+    """True if the node bin dir is a version-pinned location (nvm/fnm/asdf/n)
+    that disappears on a node upgrade — so the baked plist PATH would go stale."""
+    markers = ("/.nvm/versions/node/", "/.fnm/", "/.asdf/installs/nodejs/", "/n/versions/node/")
+    return any(m in path for m in markers)
+
+
 def node_path_value(extra: str | None = None) -> str:
     """Build a PATH that includes node's bin dir (nvm node is NOT on launchd's
-    default PATH, so ``npx ccusage`` would fail silently without this)."""
+    default PATH, so ``npx ccusage`` would fail silently without this).
+
+    Prefers a stable location (Homebrew / /usr/local) over a version-pinned one
+    when node is reachable through both, so the baked PATH survives node upgrades.
+    """
     node = shutil.which("node") or shutil.which("npx")
     node_dir = os.path.dirname(node) if node else ""
-    parts = [extra, node_dir, "/usr/bin", "/bin", "/usr/sbin", "/sbin", "/usr/local/bin"]
+    stable = [d for d in ("/opt/homebrew/bin", "/usr/local/bin") if os.path.exists(os.path.join(d, "node"))]
+    # version-pinned dir goes last among node candidates (still included as a fallback)
+    node_candidates = stable + ([node_dir] if node_dir else [])
+    parts = [extra] + node_candidates + ["/usr/bin", "/bin", "/usr/sbin", "/sbin", "/usr/local/bin"]
     seen = []
     for p in parts:
         if p and p not in seen:
@@ -105,8 +127,14 @@ def _service() -> str:
     return "%s/%s" % (_domain(), LABEL)
 
 
-def _run(cmd, check=False):
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+def _run(cmd, check=False, timeout=15):
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        if check:
+            raise RuntimeError("timed out after %ss: %s" % (timeout, " ".join(cmd)))
+        # synthesize a failed result so ignore-errors callers don't crash on a wedged launchd
+        return subprocess.CompletedProcess(cmd, 124, "", "timed out after %ss" % timeout)
     if check and proc.returncode != 0:
         raise RuntimeError(
             "command failed (%d): %s\n%s" % (proc.returncode, " ".join(cmd), proc.stderr.strip())
@@ -128,6 +156,11 @@ def install(program_args, *, path_value=None, stdout=None, stderr=None) -> str:
     if boot.returncode != 0:
         legacy = _run(["launchctl", "load", "-w", str(PLIST_PATH)])
         if legacy.returncode != 0:
+            # don't leave a half-installed plist that launchctl never accepted
+            try:
+                PLIST_PATH.unlink()
+            except OSError:
+                pass
             raise RuntimeError(
                 "failed to load agent:\nbootstrap: %s\nload: %s"
                 % (boot.stderr.strip(), legacy.stderr.strip())

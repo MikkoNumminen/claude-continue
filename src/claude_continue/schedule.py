@@ -8,6 +8,7 @@ Two strategies:
 
 from __future__ import annotations
 
+import math
 from datetime import datetime, timedelta
 
 from .model import Block
@@ -47,14 +48,17 @@ def fixed_target(
         if every_hours <= 0:
             raise ValueError("every_hours must be positive")
         hh, mm = parse_hhmm(anchor or "00:00")
-        base = local_now.replace(hour=hh, minute=mm, second=0, microsecond=0)
-        if base > local_now:
-            base -= timedelta(days=1)
-        step = timedelta(hours=every_hours)
-        target = base
-        while target <= local_now:
-            target += step
-        return target
+        # Step from a FIXED wall-clock epoch (anchor HH:MM on a constant date),
+        # using naive-local arithmetic, so the cadence is one continuous H-hour
+        # grid that never restarts at the daily anchor. Re-anchoring per call-day
+        # would inject an extra, off-schedule fire whenever H doesn't divide 24.
+        step_seconds = every_hours * 3600.0
+        now_naive = local_now.replace(tzinfo=None)
+        ref_naive = datetime(2000, 1, 1, hh, mm)
+        elapsed = (now_naive - ref_naive).total_seconds()
+        steps = math.floor(elapsed / step_seconds) + 1  # first grid point strictly after now
+        target_naive = ref_naive + timedelta(seconds=steps * step_seconds)
+        return target_naive.astimezone()  # interpret as local wall clock
 
     raise ValueError("fixed_target requires either `at` or `every_hours`")
 

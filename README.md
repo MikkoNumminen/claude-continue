@@ -125,6 +125,10 @@ claude-continue watch --exec "claude -p 'resume the migration' --permission-mode
 - **Fixed schedule:** if you pass `--at HH:MM` or `--every H [--anchor HH:MM]`,
   that schedule is used instead of ccusage — useful for anchoring windows to your
   working hours, or when Node/ccusage isn't available.
+  - `--every H` fires on a single continuous H-hour grid (constant gaps, no
+    day-boundary glitch). When `H` divides 24 (1, 2, 3, 4, 6, 8, 12) the
+    `--anchor HH:MM` time is hit every day; otherwise the cadence stays regular
+    but the wall-clock times shift across days.
 
 ## Configuration
 
