@@ -182,6 +182,17 @@ def cmd_doctor(args) -> int:
     return 0
 
 
+def cmd_gui(args) -> int:
+    from . import gui  # gui module is import-safe; tkinter is imported inside run()
+    try:
+        gui.run()
+    except ImportError as e:
+        print("GUI unavailable — tkinter is not installed: %s" % e)
+        print("  (install Python's Tk support, or use `claude-continue watch`)")
+        return 1
+    return 0
+
+
 def cmd_watch(args) -> int:
     cfg = resolve(build_overrides(args))
     logger = get_logger()
@@ -287,6 +298,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_watch = sub.add_parser("watch", help="run the self-rescheduling loop (foreground)")
     add_action_args(p_watch)
     p_watch.set_defaults(func=cmd_watch)
+
+    p_gui = sub.add_parser("gui", help="open a one-button toggle window (Tkinter)")
+    p_gui.set_defaults(func=cmd_gui)
 
     p_once = sub.add_parser("once", help="wait for the next reset, fire once, exit")
     add_action_args(p_once, dry_run=True)

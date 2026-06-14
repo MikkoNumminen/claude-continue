@@ -10,7 +10,16 @@ from claude_continue.ccusage import CcusageUnavailable
 from claude_continue.config import Config
 from claude_continue.model import Block
 
-logging.disable(logging.CRITICAL)
+
+def setUpModule():
+    # Silence watch's log output for these tests — but scoped to this module and
+    # restored after, so it doesn't leak into other modules (e.g. the GUI tests
+    # whose fire-tap relies on logging being enabled).
+    logging.disable(logging.CRITICAL)
+
+
+def tearDownModule():
+    logging.disable(logging.NOTSET)
 
 
 def block(idx, end):

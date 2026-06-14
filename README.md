@@ -67,6 +67,9 @@ claude-continue status
 # Run the loop in the foreground (Ctrl-C to stop)
 claude-continue watch
 
+# Or a one-button window: press to start watching, press again to stop
+claude-continue gui
+
 # Install as a launchd agent — runs unattended, survives reboots
 claude-continue install
 claude-continue uninstall          # add --purge to also delete the plist
@@ -106,6 +109,22 @@ Ready, with warnings.
 ```
 
 `doctor` exits non-zero if any check fails, so it doubles as a CI/health probe.
+
+## GUI
+
+`claude-continue gui` opens a tiny Tkinter window: one button toggles watching
+on/off, with a live "next reset · in 2h13m" countdown and a last-fired indicator.
+It watches **only while the window is open** — closing it stops the watch (no
+agent is installed). Tkinter ships with Python, so there are no extra
+dependencies; for an unattended, survives-reboot setup use `install` instead.
+
+```
+┌──────── claude-continue ────────┐
+│            ●  WATCHING           │
+│   next reset 19:00 · in 2h13m    │
+│        [  ⏹  Stop watching  ]    │
+└──────────────────────────────────┘
+```
 
 ## Choosing what fires
 
