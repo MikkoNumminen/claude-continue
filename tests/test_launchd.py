@@ -78,7 +78,9 @@ class TestRenderPlist(unittest.TestCase):
 class TestTemplateNoDrift(unittest.TestCase):
     def test_embedded_matches_reference_file(self):
         ref = Path(__file__).resolve().parents[1] / "templates" / "com.mikko.claude-continue.plist.tmpl"
-        self.assertEqual(ref.read_text(), launchd.PLIST_TEMPLATE.template)
+        # normalise EOLs: a CRLF checkout on Windows must still match the embedded
+        # template (Python normalises source-literal newlines to \n).
+        self.assertEqual(ref.read_text().replace("\r\n", "\n"), launchd.PLIST_TEMPLATE.template)
 
 
 if __name__ == "__main__":

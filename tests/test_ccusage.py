@@ -1,14 +1,28 @@
 import os
+import sys
 import tempfile
 import unittest
 
 import _support  # noqa: F401
 from _support import FIXTURES
 
-from claude_continue import ccusage
+from claude_continue import ccusage  # noqa: F401
 from claude_continue.ccusage import CcusageUnavailable, _command, get_active_block
 
 ENV = "CLAUDE_CONTINUE_CCUSAGE_CMD"
+
+# Cross-platform stand-ins for the canned-output shell commands (no cat/false/echo,
+# which don't exist on Windows). Everything is quoted — split_command strips the
+# quotes, so the -c code (which contains spaces) survives as a single argv token.
+_DUMP = "import sys;sys.stdout.write(open(sys.argv[1]).read())"
+
+
+def _dump_file(path):
+    return '"%s" -c "%s" "%s"' % (sys.executable, _DUMP, path)
+
+
+def _exit(code):
+    return '"%s" -c "%s"' % (sys.executable, "import sys;sys.exit(%d)" % code)
 
 
 class TestCommand(unittest.TestCase):
@@ -27,10 +41,10 @@ class TestCommand(unittest.TestCase):
         self.assertIn("ccusage", cmd)
         self.assertIn("--offline", cmd)
 
-    def test_env_override_is_shlex_split(self):
+    def test_env_override_is_split(self):
         os.environ[ENV] = "cat some file.json"
         cmd = _command()
-        self.assertEqual(cmd[-2:], ["some", "file.json"])  # shlex split preserved
+        self.assertEqual(cmd[-2:], ["some", "file.json"])  # split preserved
         self.assertIn("cat", os.path.basename(cmd[0]))
 
 
@@ -48,22 +62,26 @@ class TestGetActiveBlock(unittest.TestCase):
         os.environ[ENV] = cmd
 
     def test_success_returns_block(self):
-        self._set("cat %s" % os.path.join(FIXTURES, "active.json"))
+        self._set(_dump_file(os.path.join(FIXTURES, "active.json")))
         block = get_active_block()
         self.assertIsNotNone(block)
         self.assertTrue(block.is_active)
 
     def test_idle_returns_none(self):
-        self._set("cat %s" % os.path.join(FIXTURES, "idle.json"))
+        self._set(_dump_file(os.path.join(FIXTURES, "idle.json")))
         self.assertIsNone(get_active_block())
 
     def test_nonzero_exit_raises(self):
-        self._set("false")
+        self._set(_exit(1))
         with self.assertRaises(CcusageUnavailable):
             get_active_block()
 
     def test_non_json_raises(self):
-        self._set("echo notjson")
+        fd, path = tempfile.mkstemp(suffix=".txt")
+        with os.fdopen(fd, "w") as f:
+            f.write("notjson")
+        self.addCleanup(os.unlink, path)
+        self._set(_dump_file(path))
         with self.assertRaises(CcusageUnavailable):
             get_active_block()
 
@@ -78,7 +96,7 @@ class TestGetActiveBlock(unittest.TestCase):
         with os.fdopen(fd, "w") as f:
             f.write('{"blocks": [{"isGap": false, "isActive": true}]}')
         self.addCleanup(os.unlink, path)
-        self._set("cat %s" % path)
+        self._set(_dump_file(path))
         with self.assertRaises(CcusageUnavailable):
             get_active_block()
 
