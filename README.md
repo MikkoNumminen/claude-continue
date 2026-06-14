@@ -141,8 +141,7 @@ Then it launches like any Mac app (double-click / Spotlight) — no terminal, no
 `pip`. It still uses `npx ccusage` for reset detection and iTerm2 for the action,
 so Node and iTerm2 remain runtime requirements (same as the CLI). The build is
 arm64/x86 matching the machine you build on; PyInstaller can't cross-compile, so
-build on the architecture you'll run. (Windows users: use `pip` + `claude-continue
-gui` for now — a bundled `.exe` would need a Windows build.)
+build on the architecture you'll run.
 
 The app is only **ad-hoc signed** (not Developer-ID signed or notarized). A copy
 you build and run on the same machine just works, but a copy you *download or
@@ -150,6 +149,27 @@ copy to another Mac* gets quarantined and Gatekeeper will block first launch
 ("cannot be opened because Apple cannot check it for malware"). To clear it:
 right-click → Open the first time, or `xattr -dr com.apple.quarantine
 claude-continue.app`.
+
+### Standalone Windows .exe (no Python required)
+
+Build it **on a Windows machine** (PyInstaller can't cross-compile from macOS),
+in PowerShell from the repo root. Building needs Python ≥ 3.9 on PATH; the
+resulting exe needs no Python to run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File packaging\build-windows.ps1
+.\dist\claude-continue.exe          # run it (or double-click in Explorer)
+```
+
+It builds in a throwaway venv (never touching your system Python) and produces a
+single `dist\claude-continue.exe` that opens the GUI, built `--windowed` so no
+console window flashes up behind it. The exe is actually the full
+`claude-continue` (double-click opens the GUI; `claude-continue.exe doctor` /
+`status` / `watch` work too), but because it's `--windowed` it doesn't attach to
+a console, so for CLI text output prefer the `pip install`. Same runtime deps as
+the CLI: Node (`npx ccusage`) for reset detection, and PowerShell for the
+optional `--keystroke` action. Windows SmartScreen may warn on an unsigned exe
+the first time — choose "More info → Run anyway".
 
 ## Choosing what fires
 
