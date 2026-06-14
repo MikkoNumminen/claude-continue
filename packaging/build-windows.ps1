@@ -1,3 +1,5 @@
+#Requires -Version 5.1
+
 <#
 Build a standalone, double-clickable claude-continue.exe (no Python required to run).
 
@@ -7,6 +9,10 @@ console window flashes up behind the Tk toggle).
 
 Usage (from the repo root):
     powershell -ExecutionPolicy Bypass -File packaging\build-windows.ps1
+    powershell -ExecutionPolicy Bypass -File packaging\build-windows.ps1 -OneDir
+
+-OneDir builds a dist\claude-continue\ folder instead of one .exe: faster startup
+and fewer antivirus false-positives, at the cost of being a directory not a file.
 
 This is the Windows counterpart of the macOS build (packaging/build-macos.sh);
 both bundle the same packaging/claude_continue_app.py entry point.
@@ -18,6 +24,12 @@ headless, or `--keystroke` via PowerShell) remain system dependencies - same
 as the CLI. Only Python + the package are baked into the exe.
 #>
 
+[CmdletBinding()]
+param(
+    [switch]$OneDir
+)
+
+Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 # Repo root = the parent of this script's directory, regardless of where it's run from.
@@ -77,24 +89,30 @@ Write-Host "==> installing PyInstaller $PyInstallerVersion + the package"
 if ($LASTEXITCODE -ne 0) { throw "dependency install failed (exit $LASTEXITCODE)" }
 
 Write-Host "==> building $AppName.exe"
-# --onefile             : one self-contained .exe (vs the macOS .app bundle) - easiest to hand to someone.
+# --onefile (default)   : one self-contained .exe (vs the macOS .app bundle) - easiest to hand to someone.
+#   (-OneDir switch)    : a dist\<name>\ folder instead - faster startup, fewer AV false-positives.
 # --windowed            : GUI subsystem, so no console window appears behind the Tk toggle.
 # --collect-submodules  : belt-and-suspenders so every claude_continue.* module is bundled even if
 #                         only reached via a lazy intra-package import (e.g. `from . import action`).
 # Run PyInstaller as a module so we don't depend on the Scripts dir being on PATH.
+$ModeFlag = if ($OneDir) { "--onedir" } else { "--onefile" }
 & $VenvPython -m PyInstaller `
-    --noconfirm --clean --windowed --onefile `
+    --noconfirm --clean --windowed $ModeFlag `
     --name $AppName `
     --collect-submodules claude_continue `
     (Join-Path "packaging" "claude_continue_app.py")
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed (exit $LASTEXITCODE)" }
 
-$Exe = Join-Path $Repo (Join-Path "dist" "$AppName.exe")
+$Exe = if ($OneDir) {
+    Join-Path $Repo (Join-Path "dist" (Join-Path $AppName "$AppName.exe"))
+} else {
+    Join-Path $Repo (Join-Path "dist" "$AppName.exe")
+}
 if (-not (Test-Path $Exe)) { throw "build reported success but $Exe is missing" }
 
 Write-Host ""
 Write-Host "==> built: $Exe"
-Write-Host "    run it:   .\dist\$AppName.exe   (or double-click it in Explorer)"
+Write-Host "    run it:   $Exe   (or double-click it in Explorer)"
 Write-Host ""
 Write-Host "    Note: the entry point routes through the CLI, so the exe is also a full"
 Write-Host "    claude-continue (double-click -> GUI). But --windowed exes don't attach"
