@@ -114,6 +114,11 @@ def _resolve_binary() -> str:
 
 
 # --- subcommands -------------------------------------------------------------
+#
+# Output convention: state/setup commands (status, doctor, install, uninstall)
+# print to stdout; action-performing commands (watch, once, fire) use the logger
+# so each line is timestamped — it matters *when* something fired, and these are
+# the commands that may run unattended / under cron / under launchd.
 
 def cmd_status(args) -> int:
     cfg = resolve(build_overrides(args))
@@ -233,7 +238,7 @@ def cmd_install(args) -> int:
     print("  logs:    %s" % (cfg.log_path or launchd.LOG_PATH))
     print("  check:   launchctl print %s" % launchd._service())
     node = shutil.which("node") or shutil.which("npx")
-    if node and launchd.is_volatile_node_dir(node) and "/opt/homebrew/bin" not in path_value and "/usr/local/bin" not in path_value.split(":")[:3]:
+    if node and launchd.is_volatile_node_dir(node) and not launchd.stable_node_dir():
         print("  note:    node is a version-pinned path; re-run `claude-continue install` after upgrading node")
     return 0
 

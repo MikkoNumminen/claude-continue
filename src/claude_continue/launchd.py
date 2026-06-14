@@ -79,11 +79,24 @@ def _xml_escape(s: str) -> str:
     )
 
 
+STABLE_NODE_DIRS = ("/opt/homebrew/bin", "/usr/local/bin")
+
+
 def is_volatile_node_dir(path: str) -> bool:
     """True if the node bin dir is a version-pinned location (nvm/fnm/asdf/n)
     that disappears on a node upgrade — so the baked plist PATH would go stale."""
     markers = ("/.nvm/versions/node/", "/.fnm/", "/.asdf/installs/nodejs/", "/n/versions/node/")
     return any(m in path for m in markers)
+
+
+def stable_node_dir() -> str | None:
+    """A non-version-pinned bin dir that actually contains ``node`` (Homebrew /
+    /usr/local), or None. Single source of truth for "is a stable node dir
+    available" — used by node_path_value, doctor, and the install warning."""
+    for d in STABLE_NODE_DIRS:
+        if os.path.exists(os.path.join(d, "node")):
+            return d
+    return None
 
 
 def node_path_value(extra: str | None = None) -> str:
@@ -95,9 +108,9 @@ def node_path_value(extra: str | None = None) -> str:
     """
     node = shutil.which("node") or shutil.which("npx")
     node_dir = os.path.dirname(node) if node else ""
-    stable = [d for d in ("/opt/homebrew/bin", "/usr/local/bin") if os.path.exists(os.path.join(d, "node"))]
-    # version-pinned dir goes last among node candidates (still included as a fallback)
-    node_candidates = stable + ([node_dir] if node_dir else [])
+    stable = stable_node_dir()
+    # stable dir goes first; the version-pinned dir stays as a fallback
+    node_candidates = ([stable] if stable else []) + ([node_dir] if node_dir else [])
     parts = [extra] + node_candidates + ["/usr/bin", "/bin", "/usr/sbin", "/sbin", "/usr/local/bin"]
     seen = []
     for p in parts:

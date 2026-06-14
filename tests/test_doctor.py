@@ -1,5 +1,6 @@
 import unittest
 from datetime import timedelta
+from unittest import mock
 
 import _support  # noqa: F401
 from _support import utc
@@ -44,10 +45,24 @@ class TestIndividualChecks(unittest.TestCase):
         self.assertEqual(c.status, OK)
         self.assertIn("not needed", c.detail)
 
-    def test_node_found(self):
-        c = doctor._check_node(Config(), which=lambda n: "/opt/node/bin/node" if n == "node" else None)
+    def test_node_found_no_stable_dir(self):
+        # force "no stable node dir" so the result doesn't depend on the test machine
+        with mock.patch("claude_continue.doctor.launchd_mod.stable_node_dir", return_value=None):
+            c = doctor._check_node(Config(), which=lambda n: "/opt/node/bin/node" if n == "node" else None)
         self.assertEqual(c.status, OK)
         self.assertIn("/opt/node/bin", c.detail)
+
+    def test_node_found_with_stable_dir(self):
+        with mock.patch("claude_continue.doctor.launchd_mod.stable_node_dir", return_value="/opt/homebrew/bin"):
+            c = doctor._check_node(Config(), which=lambda n: "/Users/x/.nvm/versions/node/v22/bin/node")
+        self.assertEqual(c.status, OK)
+        self.assertIn("stable node dir", c.detail)
+
+    def test_node_volatile_no_stable_warns(self):
+        with mock.patch("claude_continue.doctor.launchd_mod.stable_node_dir", return_value=None):
+            c = doctor._check_node(Config(), which=lambda n: "/Users/x/.nvm/versions/node/v22/bin/node")
+        self.assertEqual(c.status, WARN)
+        self.assertIn("version-pinned", c.detail)
 
     def test_node_missing_fails_in_auto_mode(self):
         c = doctor._check_node(Config(), which=lambda n: None)

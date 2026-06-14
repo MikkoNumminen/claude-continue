@@ -64,10 +64,7 @@ def _check_node(cfg: Config, which) -> Check:
         if cfg.at or cfg.every_hours:
             return Check("node", WARN, "node/npx not found — only needed for ccusage auto-detect")
         return Check("node", FAIL, "node/npx not found on PATH — ccusage auto-detect won't work")
-    stable_present = any(
-        os.path.exists(os.path.join(d, "node")) for d in ("/opt/homebrew/bin", "/usr/local/bin")
-    )
-    if stable_present:
+    if launchd_mod.stable_node_dir():
         return Check("node", OK, "%s (a stable node dir will be on the launchd PATH)" % node)
     if launchd_mod.is_volatile_node_dir(node):
         return Check("node", WARN, "%s is version-pinned — re-run `claude-continue install` after upgrading node" % node)

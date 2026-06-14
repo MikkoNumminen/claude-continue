@@ -57,8 +57,14 @@ def fixed_target(
         ref_naive = datetime(2000, 1, 1, hh, mm)
         elapsed = (now_naive - ref_naive).total_seconds()
         steps = math.floor(elapsed / step_seconds) + 1  # first grid point strictly after now
-        target_naive = ref_naive + timedelta(seconds=steps * step_seconds)
-        return target_naive.astimezone()  # interpret as local wall clock
+        target = (ref_naive + timedelta(seconds=steps * step_seconds)).astimezone()
+        # A grid point that lands in a DST spring-forward gap is a nonexistent
+        # wall-clock time; astimezone() can localize it backward, leaving target
+        # <= now. Step forward until it's genuinely in the future.
+        while target <= local_now:
+            steps += 1
+            target = (ref_naive + timedelta(seconds=steps * step_seconds)).astimezone()
+        return target
 
     raise ValueError("fixed_target requires either `at` or `every_hours`")
 

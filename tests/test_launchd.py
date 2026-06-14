@@ -57,6 +57,23 @@ class TestRenderPlist(unittest.TestCase):
         self.assertTrue(launchd.is_volatile_node_dir("/Users/x/.nvm/versions/node/v22.0.0/bin/node"))
         self.assertFalse(launchd.is_volatile_node_dir("/opt/homebrew/bin/node"))
 
+    def test_stable_node_dir_found(self):
+        with mock.patch("claude_continue.launchd.os.path.exists",
+                        side_effect=lambda p: p == "/opt/homebrew/bin/node"):
+            self.assertEqual(launchd.stable_node_dir(), "/opt/homebrew/bin")
+
+    def test_stable_node_dir_absent(self):
+        with mock.patch("claude_continue.launchd.os.path.exists", return_value=False):
+            self.assertIsNone(launchd.stable_node_dir())
+
+    def test_node_path_prefers_stable_over_volatile(self):
+        with mock.patch("claude_continue.launchd.shutil.which", return_value="/Users/x/.nvm/versions/node/v22/bin/node"), \
+             mock.patch("claude_continue.launchd.os.path.exists",
+                        side_effect=lambda p: p == "/opt/homebrew/bin/node"):
+            parts = launchd.node_path_value().split(":")
+        # stable dir comes before the version-pinned nvm dir
+        self.assertLess(parts.index("/opt/homebrew/bin"), parts.index("/Users/x/.nvm/versions/node/v22/bin"))
+
 
 class TestTemplateNoDrift(unittest.TestCase):
     def test_embedded_matches_reference_file(self):

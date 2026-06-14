@@ -129,6 +129,8 @@ claude-continue watch --exec "claude -p 'resume the migration' --permission-mode
     day-boundary glitch). When `H` divides 24 (1, 2, 3, 4, 6, 8, 12) the
     `--anchor HH:MM` time is hit every day; otherwise the cadence stays regular
     but the wall-clock times shift across days.
+  - Fixed times are wall-clock: across a daylight-saving transition a fire may
+    land up to an hour off for that one day (the cadence itself stays regular).
 
 ## Configuration
 

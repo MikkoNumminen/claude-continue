@@ -200,6 +200,27 @@ class TestWatchLoop(unittest.TestCase):
         watch.run(cfg(), clock=fc.now, sleep=fc.sleep, get_block=gb, perform=perform,
                   stop=lambda: False, use_lock=False, max_fires=1)
 
+    def test_loop_retries_window_after_a_failed_fire(self):
+        # a transient failure must NOT mark the window handled; the next cycle
+        # retries the SAME window and succeeds
+        T0 = utc(2026, 6, 14, 6)
+        fc = FakeClock(T0 - timedelta(minutes=1))
+        st = {"n": 0, "rolled": False}
+
+        def gb(timeout=30):
+            return block(2, T0 + timedelta(hours=5)) if st["rolled"] else block(1, T0)
+
+        def perform(c, dry_run=False):
+            st["n"] += 1
+            if st["n"] == 1:
+                raise RuntimeError("iTerm2 not running")  # first fire fails
+            st["rolled"] = True  # second fire succeeds and rolls the window
+            return ["s"]
+
+        watch.run(cfg(), clock=fc.now, sleep=fc.sleep, get_block=gb, perform=perform,
+                  stop=lambda: False, use_lock=False, max_fires=2)
+        self.assertEqual(st["n"], 2)  # retried after the failure and then succeeded
+
     def test_ccusage_unavailable_falls_to_poll(self):
         from claude_continue.ccusage import CcusageUnavailable
         T0 = utc(2026, 6, 14, 6)

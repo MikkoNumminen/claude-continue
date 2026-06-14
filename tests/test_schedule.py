@@ -1,3 +1,5 @@
+import os
+import time
 import unittest
 from datetime import datetime, timedelta
 
@@ -68,6 +70,24 @@ class TestFixedTarget(unittest.TestCase):
                 gaps.append(round((t - prev).total_seconds() / 3600.0, 3))
             prev = t
         self.assertTrue(all(g == 7.0 for g in gaps), "non-constant gaps: %s" % gaps)
+
+    @unittest.skipUnless(hasattr(time, "tzset"), "needs time.tzset to pin the timezone")
+    def test_every_is_strictly_future_across_dst_gap(self):
+        # A grid point inside the spring-forward gap must not resolve to <= now.
+        old_tz = os.environ.get("TZ")
+        os.environ["TZ"] = "America/New_York"
+        time.tzset()
+        try:
+            # 2026-03-08: clocks jump 02:00 -> 03:00, so 02:30 is nonexistent.
+            now = datetime(2026, 3, 8, 1, 30).astimezone()
+            target = schedule.fixed_target(now, every_hours=24, anchor="02:30")
+            self.assertGreater(target, now)
+        finally:
+            if old_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old_tz
+            time.tzset()
 
     def test_every_requires_positive(self):
         now = utc(2026, 6, 14, 12).astimezone()

@@ -191,21 +191,28 @@ def run(
 
             fired = _fire(cfg, perform, logger)
             fires += 1
-            if fired is None:
-                logger.warning("fire failed; re-arming on next cycle")
-            else:
+            if fired is not None:
                 logger.info("fired -> %s", fired or "(no matching sessions)")
-            if plan.block is not None:
-                last_fired_block_id = plan.block.id
-                if fired is not None:
+                if plan.block is not None:
+                    last_fired_block_id = plan.block.id
                     _verify_and_retry(
                         cfg, plan.block, clock=clock, sleep=sleep, get_block=get_block,
                         perform=perform, logger=logger, stop=stop,
                     )
+            else:
+                # A failed fire is NOT a handled window — deliberately do not set
+                # last_fired_block_id, so the next cycle retries this same window.
+                logger.warning("fire failed; retrying in %ds", cfg.retry_interval)
 
             if max_fires is not None and fires >= max_fires:
                 logger.info("max_fires=%d reached; exiting", max_fires)
                 break
+
+            if fired is None:
+                # Back off before re-arming, otherwise the (now past) target would
+                # re-fire in a tight loop.
+                if _sleep_until(clock() + timedelta(seconds=cfg.retry_interval), clock=clock, sleep=sleep, stop=stop) == "stopped":
+                    break
     finally:
         if lock is not None:
             lock.release()
