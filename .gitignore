@@ -6,6 +6,10 @@ build/
 dist/
 .eggs/
 
+# PyInstaller build venv + generated spec
+.build-venv/
+*.spec
+
 # Runtime artifacts
 *.log
 *.pid
