@@ -41,6 +41,7 @@ class WatchController:
     def __init__(self, runner=watch.run):
         self._runner = runner
         self._stop = threading.Event()
+        self._stop_requested = False
         self._thread = None
         self._lock = threading.Lock()
         self._error = None
@@ -57,6 +58,11 @@ class WatchController:
     def is_watching(self) -> bool:
         t = self._thread
         return t is not None and t.is_alive()
+
+    def is_stopping(self) -> bool:
+        # stop was requested but the worker is still finishing an in-flight cycle
+        # (an osascript/ccusage subprocess can't be interrupted by the Event)
+        return self._stop_requested and self.is_watching()
 
     @property
     def error(self):
@@ -76,13 +82,23 @@ class WatchController:
             if self.is_watching():
                 return
             self._stop.clear()
+            self._stop_requested = False
             self._error = None
             thread = threading.Thread(target=self._run, args=(cfg,), daemon=True)
             self._thread = thread
             thread.start()
 
-    def stop(self, timeout=5.0) -> None:
+    def request_stop(self) -> None:
+        """Ask the watch to stop and return immediately. The worker is a daemon
+        thread and exits at its next sleep/loop boundary — call this from the UI
+        thread so the window never blocks on an in-flight fire."""
+        self._stop_requested = True
         self._stop.set()
+
+    def stop(self, timeout=5.0) -> None:
+        """Request stop and wait up to ``timeout`` for the thread to exit. For
+        use OFF the UI thread (tests, CLI); the GUI uses request_stop()."""
+        self.request_stop()
         thread = self._thread
         if thread is not None:
             thread.join(timeout)
@@ -173,12 +189,19 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
             status.config(text="Stopped")
             detail.config(text="")
             note.config(text=controller.error)
-            button.config(text="▶  Start watching")
+            button.config(text="▶  Start watching", state="normal")
+        elif controller.is_stopping():
+            # stop requested; worker is finishing an uninterruptible in-flight fire
+            dot.config(text="◐", fg="#c80")
+            status.config(text="Stopping…")
+            detail.config(text="finishing the current cycle")
+            note.config(text="")
+            button.config(text="Stopping…", state="disabled")
         elif controller.is_watching():
             dot.config(text="●", fg="#22aa22")
             status.config(text="WATCHING")
             detail.config(text=countdown_text())
-            button.config(text="⏹  Stop watching")
+            button.config(text="⏹  Stop watching", state="normal")
             if controller.last_fired:
                 note.config(text="last fired %s ✓  (%d total)" % (controller.last_fired.strftime("%H:%M"), controller.fires), fg="#2a2")
             else:
@@ -187,13 +210,13 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
             dot.config(text="○", fg="#999")
             status.config(text="Idle")
             detail.config(text="press Start to watch the quota")
-            button.config(text="▶  Start watching")
+            button.config(text="▶  Start watching", state="normal")
             note.config(text="")
         root.after(1000, refresh)
 
     def toggle():
         if controller.is_watching():
-            controller.stop()
+            controller.request_stop()  # non-blocking; UI shows "Stopping…" until the worker exits
         else:
             cfg = resolve()
             try:
@@ -213,7 +236,9 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
         root.after(30000, poll_loop)
 
     def on_close():
-        controller.stop(timeout=3)
+        # non-blocking: the worker is a daemon thread, so it won't keep the
+        # process alive; don't join on the UI thread.
+        controller.request_stop()
         root.destroy()
 
     root.protocol("WM_DELETE_WINDOW", on_close)

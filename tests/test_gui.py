@@ -31,6 +31,28 @@ class TestWatchController(unittest.TestCase):
         c.stop(timeout=2)
         self.assertFalse(c.is_watching())
 
+    def test_request_stop_is_nonblocking_and_reports_stopping(self):
+        # a runner that ignores the stop Event (simulates an in-flight, uninterruptible
+        # osascript fire) until released — request_stop must NOT block on it
+        release = threading.Event()
+
+        def runner(cfg, *, logger, stop, sleep, use_lock, **kw):
+            release.wait(3)  # blocks regardless of the stop Event
+
+        c = WatchController(runner=runner)
+        c.start(object())
+        self.assertTrue(_wait(c.is_watching))
+
+        t0 = time.time()
+        c.request_stop()
+        self.assertLess(time.time() - t0, 0.5, "request_stop must return immediately")
+        self.assertTrue(c.is_stopping())   # requested, but worker still alive
+        self.assertTrue(c.is_watching())
+
+        release.set()  # let the "fire" finish
+        self.assertTrue(_wait(lambda: not c.is_watching()))
+        self.assertFalse(c.is_stopping())
+
     def test_double_start_is_noop(self):
         calls = []
 
