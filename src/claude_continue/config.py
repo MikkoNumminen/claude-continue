@@ -17,7 +17,7 @@ CONFIG_PATH = Path.home() / ".config" / "claude-continue" / "config.json"
 # Default session name-substrings to target (matches the original script).
 DEFAULT_FILTER = ["claude", "✳"]
 
-_BOOL_FIELDS = {"skip_busy", "all_sessions", "force"}
+_BOOL_FIELDS = {"skip_busy", "all_sessions", "force", "keystroke"}
 _INT_FIELDS = {
     "buffer",
     "verify_delay",
@@ -40,6 +40,8 @@ class Config:
     session: str | None = None  # target a single session by name substring
     all_sessions: bool = False  # drop the name filter (skip_busy still applies)
     force: bool = False  # with all_sessions: also drop skip_busy
+    keystroke: bool = False  # Windows/WSL: type `text` into a terminal window (opt-in)
+    window_title: str = "Windows Terminal"  # window to target in keystroke mode
 
     # --- timing ---
     buffer: int = 90  # seconds past the reset before firing

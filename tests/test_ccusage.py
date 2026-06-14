@@ -22,12 +22,16 @@ class TestCommand(unittest.TestCase):
             os.environ[ENV] = self._saved
 
     def test_default_command(self):
-        self.assertEqual(_command()[:2], ["npx", "ccusage"])
-        self.assertIn("--offline", _command())
+        cmd = _command()  # argv[0] is resolved on PATH (e.g. /usr/.../npx)
+        self.assertIn("npx", os.path.basename(cmd[0]))
+        self.assertIn("ccusage", cmd)
+        self.assertIn("--offline", cmd)
 
     def test_env_override_is_shlex_split(self):
         os.environ[ENV] = "cat some file.json"
-        self.assertEqual(_command(), ["cat", "some", "file.json"])
+        cmd = _command()
+        self.assertEqual(cmd[-2:], ["some", "file.json"])  # shlex split preserved
+        self.assertIn("cat", os.path.basename(cmd[0]))
 
 
 class TestGetActiveBlock(unittest.TestCase):

@@ -17,6 +17,7 @@ import os
 import shlex
 import subprocess
 
+from . import osenv
 from .model import Block, active_block_from_payload
 
 # ``--offline`` is mandatory: without it ccusage may block on a network pricing
@@ -35,9 +36,9 @@ class CcusageUnavailable(Exception):
 
 def _command() -> list[str]:
     override = os.environ.get(CMD_ENV)
-    if override:
-        return shlex.split(override)
-    return list(DEFAULT_CMD)
+    argv = shlex.split(override) if override else list(DEFAULT_CMD)
+    # resolve npx (and on Windows wrap the .cmd shim) so it runs without a shell
+    return osenv.resolve_argv(argv)
 
 
 def get_active_block(timeout: float = 30.0) -> Block | None:
