@@ -44,10 +44,27 @@ class TestBuildApplescript(unittest.TestCase):
         s = iterm.build_applescript("continue", [])
         self.assertIn("if false then", s)
 
-    def test_text_is_escaped(self):
-        s = iterm.build_applescript('say "hi"\\x', ["claude"], dry_run=False)
+    def test_text_quote_is_escaped(self):
+        s = iterm.build_applescript('say "hi"', ["claude"], dry_run=False)
         self.assertIn(r'\"hi\"', s)
         self.assertNotIn('text "say "hi', s)  # the raw quote must not leak
+
+    def test_text_backslash_is_doubled(self):
+        # backslash escaping is the load-bearing half of injection safety
+        s = iterm.build_applescript("a\\b", ["claude"], dry_run=False)
+        self.assertIn("a\\\\b", s)
+
+    def test_as_str_orders_backslash_before_quote(self):
+        # a value containing \" must become \\\"  (backslash doubled, then quote escaped)
+        self.assertEqual(iterm._as_str('\\"'), '\\\\\\"')
+
+    def test_session_name_with_quote_is_escaped(self):
+        s = iterm.build_applescript("x", ["claude"], session='a"b')
+        self.assertIn(r'contains "a\"b"', s)
+
+    def test_filter_substring_with_quote_is_escaped(self):
+        s = iterm.build_applescript("x", ['a"b'])
+        self.assertIn(r'contains "a\"b"', s)
 
 
 if __name__ == "__main__":

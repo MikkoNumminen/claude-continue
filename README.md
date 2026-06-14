@@ -48,6 +48,9 @@ pip install -e .
 ## Usage
 
 ```bash
+# Will it actually work here? Check ccusage, node, iTerm2, the agent, config.
+claude-continue doctor
+
 # What's the current window, and what would fire?
 claude-continue status
 
@@ -78,6 +81,22 @@ Action: send 'continue' to 1 session(s):
   - ✳ Claude Code (claude)
 ```
 
+### `doctor` example
+
+```
+✓ python    Python 3.9.6
+✓ ccusage   active window resets 2026-06-14T09:00:00+03:00 (in 3h 02m)
+✓ node      /Users/you/.nvm/.../bin/node (launchd PATH will include …)
+✓ iterm2    /Applications/iTerm.app present
+! agent     not installed (run `claude-continue install` to run unattended)
+✓ config    action=filter ['claude', '✳'], trigger=ccusage auto, buffer=90s
+✓ targets   1 session(s) currently match: ✳ Claude Code (claude)
+
+Ready, with warnings.
+```
+
+`doctor` exits non-zero if any check fails, so it doubles as a CI/health probe.
+
 ## Choosing what fires
 
 By default it broadcasts `continue` to iTerm2 sessions whose name contains
@@ -106,6 +125,12 @@ claude-continue watch --exec "claude -p 'resume the migration' --permission-mode
 - **Fixed schedule:** if you pass `--at HH:MM` or `--every H [--anchor HH:MM]`,
   that schedule is used instead of ccusage — useful for anchoring windows to your
   working hours, or when Node/ccusage isn't available.
+  - `--every H` fires on a single continuous H-hour grid (constant gaps, no
+    day-boundary glitch). When `H` divides 24 (1, 2, 3, 4, 6, 8, 12) the
+    `--anchor HH:MM` time is hit every day; otherwise the cadence stays regular
+    but the wall-clock times shift across days.
+  - Fixed times are wall-clock: across a daylight-saving transition a fire may
+    land up to an hour off for that one day (the cadence itself stays regular).
 
 ## Configuration
 

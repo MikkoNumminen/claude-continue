@@ -38,16 +38,27 @@ class PidLock:
 
     def acquire(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        if self.path.exists():
+        while True:
             try:
-                existing = int(self.path.read_text().strip())
-            except (ValueError, OSError):
-                existing = None
-            if existing is not None and existing != os.getpid() and _alive(existing):
-                raise AlreadyRunning(existing)
-            # else: stale or our own pid — fall through and reclaim
-        self.path.write_text(str(os.getpid()))
-        self._acquired = True
+                # Atomic create: only one process can win the O_EXCL race.
+                fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            except FileExistsError:
+                try:
+                    existing = int(self.path.read_text().strip())
+                except (ValueError, OSError):
+                    existing = None
+                if existing is not None and existing != os.getpid() and _alive(existing):
+                    raise AlreadyRunning(existing)
+                # stale or our own pid — drop it and retry the exclusive create
+                try:
+                    self.path.unlink()
+                except FileNotFoundError:
+                    pass
+                continue
+            with os.fdopen(fd, "w") as f:
+                f.write(str(os.getpid()))
+            self._acquired = True
+            return
 
     def release(self) -> None:
         if not self._acquired:

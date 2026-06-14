@@ -80,14 +80,26 @@ def build_applescript(
 
 
 def run_applescript(script: str, timeout: float = 30.0) -> list:
-    """Run an AppleScript via ``osascript`` and return its output lines."""
-    proc = subprocess.run(
-        ["osascript", "-"],
-        input=script,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    """Run an AppleScript via ``osascript`` and return its output lines.
+
+    Subprocess failures (osascript missing, timed out, or returning nonzero —
+    e.g. iTerm2 not running / an unanswered automation-permission prompt) are
+    raised as ``RuntimeError`` so the action layer can wrap them tamely.
+    """
+    try:
+        proc = subprocess.run(
+            ["osascript", "-"],
+            input=script,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except FileNotFoundError as e:
+        raise RuntimeError("osascript not found: %s" % e) from e
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError("osascript timed out after %ss (is iTerm2 responsive?)" % timeout) from e
+    except OSError as e:
+        raise RuntimeError("failed to run osascript: %s" % e) from e
     if proc.returncode != 0:
         raise RuntimeError(
             "osascript failed (%d): %s" % (proc.returncode, (proc.stderr or "").strip())
