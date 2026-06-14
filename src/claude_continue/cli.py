@@ -1,0 +1,272 @@
+"""Command-line interface: status | watch | once | fire | install | uninstall."""
+
+from __future__ import annotations
+
+import argparse
+import shutil
+import sys
+import time
+from dataclasses import fields
+from datetime import datetime, timezone
+from pathlib import Path
+
+from . import __version__, action, launchd, schedule, watch
+from .ccusage import CcusageUnavailable, get_active_block
+from .config import Config, resolve
+from .lock import AlreadyRunning
+from .log import get_logger
+
+CONFIG_FIELDS = [f.name for f in fields(Config)]
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _fmt(dt: datetime) -> str:
+    return dt.astimezone().isoformat(timespec="seconds")
+
+
+def _csv(s: str):
+    return [p.strip() for p in s.split(",") if p.strip()]
+
+
+# --- argument wiring ---------------------------------------------------------
+
+def add_action_args(p: argparse.ArgumentParser, *, dry_run: bool = False) -> None:
+    """Add the action + timing flags shared by watch/once/fire/install/status.
+
+    All defaults are ``None`` so that "flag not given" never clobbers a value
+    from env or the config file (see config.resolve precedence).
+    """
+    a = p.add_argument_group("action")
+    a.add_argument("--text", default=None, help="text to send (default: continue)")
+    a.add_argument("--exec", dest="exec_cmd", default=None, metavar="CMD",
+                   help="run this headless command instead of broadcasting to iTerm2")
+    a.add_argument("--session", default=None, metavar="NAME",
+                   help="target a single session whose name contains NAME")
+    a.add_argument("--all", dest="all_sessions", action="store_true", default=None,
+                   help="match all sessions (drop the name filter)")
+    a.add_argument("--force", action="store_true", default=None,
+                   help="with --all, also disable skip-busy")
+    a.add_argument("--skip-busy", dest="skip_busy", action="store_true", default=None,
+                   help="skip sessions that are mid-turn (default: on)")
+    a.add_argument("--no-skip-busy", dest="skip_busy", action="store_false", default=None,
+                   help="do not skip busy sessions")
+    a.add_argument("--filter", dest="filter", default=None, type=_csv, metavar="A,B",
+                   help="comma-separated session-name substrings to match")
+
+    t = p.add_argument_group("timing")
+    t.add_argument("--buffer", type=int, default=None, metavar="S",
+                   help="seconds after reset before firing (default: 90)")
+    t.add_argument("--verify-delay", dest="verify_delay", type=int, default=None, metavar="S")
+    t.add_argument("--poll-interval", dest="poll_interval", type=int, default=None, metavar="S")
+    t.add_argument("--retry-interval", dest="retry_interval", type=int, default=None, metavar="S")
+    t.add_argument("--retry-cap", dest="retry_cap", type=int, default=None, metavar="N")
+    t.add_argument("--timeout", type=int, default=None, metavar="S",
+                   help="ccusage subprocess timeout (default: 30)")
+    t.add_argument("--at", default=None, metavar="HH:MM",
+                   help="fixed fire time (fixed-schedule mode, no ccusage)")
+    t.add_argument("--every", dest="every_hours", type=float, default=None, metavar="H",
+                   help="fire every H hours (fixed-schedule mode)")
+    t.add_argument("--anchor", default=None, metavar="HH:MM", help="anchor time for --every")
+
+    if dry_run:
+        p.add_argument("--dry-run", action="store_true", help="show what would happen; do nothing")
+
+
+def build_overrides(args: argparse.Namespace) -> dict:
+    return {name: getattr(args, name) for name in CONFIG_FIELDS if hasattr(args, name)}
+
+
+def overrides_to_argv(overrides: dict) -> list:
+    """Reconstruct the explicit flags so `install` can bake them into the plist."""
+    argv = []
+    for name, value in overrides.items():
+        if value is None:
+            continue
+        if name == "skip_busy":
+            argv.append("--skip-busy" if value else "--no-skip-busy")
+        elif name == "all_sessions":
+            if value:
+                argv.append("--all")
+        elif name == "force":
+            if value:
+                argv.append("--force")
+        elif name == "exec_cmd":
+            argv += ["--exec", str(value)]
+        elif name == "every_hours":
+            argv += ["--every", str(value)]
+        elif name == "filter":
+            argv += ["--filter", ",".join(value)]
+        elif name in ("node_path", "log_path"):
+            continue  # launchd-only, not watch flags
+        else:
+            argv += ["--" + name.replace("_", "-"), str(value)]
+    return argv
+
+
+def _resolve_binary() -> str:
+    found = shutil.which("claude-continue")
+    if found:
+        return found
+    return str(Path(__file__).resolve().parents[2] / "bin" / "claude-continue")
+
+
+# --- subcommands -------------------------------------------------------------
+
+def cmd_status(args) -> int:
+    cfg = resolve(build_overrides(args))
+    try:
+        block = get_active_block(cfg.timeout)
+    except CcusageUnavailable as e:
+        print("ccusage unavailable: %s" % e)
+        print("  (install Node + ccusage, or run with --at/--every for a fixed schedule)")
+        block = None
+
+    if block is None:
+        print("No active usage window (idle) — the next window starts on your next message.")
+    else:
+        now = _utc_now()
+        mins = max(0, int((block.reset_at - now).total_seconds() // 60))
+        print("Active window:")
+        print("  started: %s" % _fmt(block.start))
+        print("  resets:  %s  (in %dh %02dm)" % (_fmt(block.reset_at), mins // 60, mins % 60))
+        print("  fire at: %s  (reset + %ds buffer)" % (_fmt(schedule.next_target(block, cfg.buffer)), cfg.buffer))
+
+    if cfg.exec_cmd:
+        print("Action: exec -> %s" % cfg.exec_cmd)
+    else:
+        try:
+            targets = action.perform(cfg, dry_run=True)
+            print("Action: send %r to %d session(s):" % (cfg.text, len(targets)))
+            for name in targets:
+                print("  - %s" % name)
+        except Exception as e:  # noqa: BLE001 - status must never raise
+            print("Action preview failed: %s" % e)
+    return 0
+
+
+def cmd_watch(args) -> int:
+    cfg = resolve(build_overrides(args))
+    logger = get_logger()
+    try:
+        watch.run(cfg, logger=logger)
+    except AlreadyRunning as e:
+        logger.error(str(e))
+        return 1
+    return 0
+
+
+def cmd_once(args) -> int:
+    cfg = resolve(build_overrides(args))
+    logger = get_logger()
+    now = _utc_now()
+
+    if cfg.at or cfg.every_hours:
+        target = schedule.fixed_target(now, at=cfg.at, every_hours=cfg.every_hours, anchor=cfg.anchor)
+    else:
+        try:
+            block = get_active_block(cfg.timeout)
+        except CcusageUnavailable as e:
+            logger.error("ccusage unavailable and no --at/--every given: %s", e)
+            return 1
+        if block is None:
+            logger.error("no active window to wait for; pass --at HH:MM for a fixed time")
+            return 1
+        target = schedule.next_target(block, cfg.buffer)
+
+    if getattr(args, "dry_run", False):
+        logger.info("would wait until %s, then fire -> %s", _fmt(target), action.perform(cfg, dry_run=True))
+        return 0
+
+    logger.info("waiting until %s ...", _fmt(target))
+    watch._sleep_until(target, clock=_utc_now, sleep=time.sleep, stop=lambda: False)
+    fired = action.perform(cfg, dry_run=False)
+    logger.info("fired -> %s", fired or "(no matching sessions)")
+    return 0
+
+
+def cmd_fire(args) -> int:
+    cfg = resolve(build_overrides(args))
+    logger = get_logger()
+    dry = bool(getattr(args, "dry_run", False))
+    fired = action.perform(cfg, dry_run=dry)
+    logger.info("%s -> %s", "would fire" if dry else "fired", fired or "(no matching sessions)")
+    return 0
+
+
+def cmd_install(args) -> int:
+    overrides = build_overrides(args)
+    cfg = resolve(overrides)
+    program_args = [_resolve_binary(), "watch"] + overrides_to_argv(overrides)
+    plist = launchd.install(
+        program_args,
+        path_value=launchd.node_path_value(cfg.node_path),
+        stdout=cfg.log_path,
+    )
+    print("installed launchd agent: %s" % plist)
+    print("  program: %s" % " ".join(program_args))
+    print("  logs:    %s" % (cfg.log_path or launchd.LOG_PATH))
+    print("  check:   launchctl print %s" % launchd._service())
+    return 0
+
+
+def cmd_uninstall(args) -> int:
+    existed = launchd.uninstall(purge=bool(args.purge))
+    if existed:
+        print("uninstalled launchd agent%s" % (" (plist removed)" if args.purge else ""))
+    else:
+        print("no plist found; sent bootout anyway in case it was loaded")
+    return 0
+
+
+# --- entrypoint --------------------------------------------------------------
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="claude-continue",
+        description="Keep Claude Code's 5-hour usage windows running back-to-back: "
+        "the instant a window resets, resume your paused sessions.",
+    )
+    p.add_argument("--version", action="version", version="%(prog)s " + __version__)
+    sub = p.add_subparsers(dest="cmd")
+    sub.required = True  # Python 3.9 needs this set explicitly
+
+    p_status = sub.add_parser("status", help="show the active window + what would fire")
+    add_action_args(p_status)
+    p_status.set_defaults(func=cmd_status)
+
+    p_watch = sub.add_parser("watch", help="run the self-rescheduling loop (foreground)")
+    add_action_args(p_watch)
+    p_watch.set_defaults(func=cmd_watch)
+
+    p_once = sub.add_parser("once", help="wait for the next reset, fire once, exit")
+    add_action_args(p_once, dry_run=True)
+    p_once.set_defaults(func=cmd_once)
+
+    p_fire = sub.add_parser("fire", help="fire the action immediately")
+    add_action_args(p_fire, dry_run=True)
+    p_fire.set_defaults(func=cmd_fire)
+
+    p_install = sub.add_parser("install", help="install the launchd agent (runs `watch` unattended)")
+    add_action_args(p_install)
+    p_install.set_defaults(func=cmd_install)
+
+    p_uninstall = sub.add_parser("uninstall", help="remove the launchd agent")
+    p_uninstall.add_argument("--purge", action="store_true", help="also delete the plist file")
+    p_uninstall.set_defaults(func=cmd_uninstall)
+
+    return p
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        return args.func(args) or 0
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())

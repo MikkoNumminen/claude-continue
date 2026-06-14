@@ -1,0 +1,23 @@
+{
+    "blocks": [
+        {
+            "id": "2026-01-02T10:00:00.000Z",
+            "startTime": "2026-01-02T10:00:00.000Z",
+            "endTime": "2026-01-02T15:00:00.000Z",
+            "actualEndTime": "2026-01-02T11:30:00.000Z",
+            "isActive": true,
+            "isGap": false,
+            "entries": 10,
+            "models": [
+                "claude-opus-4-8"
+            ],
+            "tokenCounts": {
+                "inputTokens": 0,
+                "outputTokens": 0,
+                "cacheCreationInputTokens": 0,
+                "cacheReadInputTokens": 0
+            },
+            "costUSD": 0.0
+        }
+    ]
+}

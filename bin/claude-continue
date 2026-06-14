@@ -1,0 +1,17 @@
+#!/usr/bin/env python3
+"""No-install launcher: run claude-continue straight from a checkout.
+
+Adds ``../src`` to sys.path so ``claude_continue`` imports without pip. The
+pip-installed console script (see pyproject ``[project.scripts]``) is preferred
+when available; this shim is the fallback the launchd agent points at otherwise.
+"""
+import os
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(HERE, "..", "src"))
+
+from claude_continue.cli import main  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(main())

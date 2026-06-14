@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Runtime artifacts
+*.log
+*.pid
+
+# macOS
+.DS_Store
+
+# Claude Code local session state
+.claude/

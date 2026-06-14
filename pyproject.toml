@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claude-continue"
+version = "0.1.0"
+description = "Auto-resume Claude Code work the instant each 5-hour usage window resets, so windows run back-to-back."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [{ name = "Mikko Numminen" }]
+keywords = ["claude", "claude-code", "ccusage", "macos", "launchd", "iterm2"]
+dependencies = []  # stdlib only
+
+[project.scripts]
+claude-continue = "claude_continue.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]

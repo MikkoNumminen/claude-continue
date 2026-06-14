@@ -1,0 +1,194 @@
+"""The self-rescheduling watch loop — the heart of claude-continue.
+
+Cycle:
+  1. Decide the next fire time.
+       - If a fixed schedule is configured (``at`` / ``every_hours``), use it.
+       - Else read the active ccusage block → fire at ``reset + buffer``.
+       - Else (idle / ccusage unavailable) poll and retry.
+  2. Sleep until the target, in ≤60s slices so we wake promptly after the Mac
+     sleeps (a suspended ``sleep`` would otherwise overshoot by hours).
+  3. Fire the action (broadcast ``continue`` / run the headless exec).
+  4. Verify the window actually rolled (re-read ccusage). If it didn't —
+     ccusage's reset estimate can be early — retry a bounded number of times.
+
+All external effects (clock, sleep, ccusage, action) are injectable so the loop
+can be unit-tested fast and offline.
+"""
+
+from __future__ import annotations
+
+import signal
+import threading
+import time
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+
+from . import action as action_mod
+from . import ccusage as ccusage_mod
+from . import schedule
+from .config import Config
+from .lock import PidLock
+from .log import get_logger
+from .model import Block
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _fmt(dt: datetime) -> str:
+    return dt.astimezone().isoformat(timespec="seconds")
+
+
+@dataclass
+class _Plan:
+    kind: str  # "fire" | "poll"
+    target: datetime = None
+    block: Block = None
+    reason: str = ""
+
+
+def _next_plan(cfg: Config, now: datetime, get_block, logger) -> _Plan:
+    # A configured fixed schedule is treated as the primary trigger.
+    if cfg.at or cfg.every_hours:
+        target = schedule.fixed_target(
+            now, at=cfg.at, every_hours=cfg.every_hours, anchor=cfg.anchor
+        )
+        return _Plan("fire", target=target, reason="fixed schedule")
+
+    try:
+        block = get_block(cfg.timeout)
+    except ccusage_mod.CcusageUnavailable as e:
+        logger.warning("ccusage unavailable: %s", e)
+        return _Plan("poll", reason="ccusage unavailable")
+
+    if block is None:
+        return _Plan("poll", reason="idle (no active window)")
+
+    target = schedule.next_target(block, cfg.buffer)
+    return _Plan("fire", target=target, block=block, reason="reset %s" % _fmt(block.reset_at))
+
+
+def _sleep_until(target: datetime, *, clock, sleep, stop, slice_s: int = 60) -> str:
+    """Sleep until ``target`` in small slices. Returns "reached" or "stopped"."""
+    while True:
+        if stop():
+            return "stopped"
+        remaining = (target - clock()).total_seconds()
+        if remaining <= 0:
+            return "reached"
+        sleep(min(float(slice_s), remaining))
+
+
+def _verify_and_retry(cfg, old_block, *, clock, sleep, get_block, perform, logger, stop) -> None:
+    """After firing, confirm the window rolled; retry if ccusage was early."""
+    attempts = 0
+    while attempts < cfg.retry_cap:
+        delay = cfg.verify_delay if attempts == 0 else cfg.retry_interval
+        if _sleep_until(clock() + timedelta(seconds=delay), clock=clock, sleep=sleep, stop=stop) == "stopped":
+            return
+        try:
+            new_block = get_block(cfg.timeout)
+        except ccusage_mod.CcusageUnavailable as e:
+            logger.warning("post-fire ccusage check failed: %s; assuming ok", e)
+            return
+        if new_block is None:
+            logger.info("no active window after firing; nothing more to confirm")
+            return
+        if new_block.reset_at > old_block.reset_at:
+            logger.info("window rolled: next reset %s", _fmt(new_block.reset_at))
+            return
+        attempts += 1
+        logger.warning(
+            "still on the old window after firing (attempt %d/%d) — re-firing",
+            attempts,
+            cfg.retry_cap,
+        )
+        fired = perform(cfg, dry_run=False)
+        logger.info("re-fired -> %s", fired or "(no matching sessions)")
+    logger.warning("gave up confirming the roll after %d retries; re-arming on next cycle", cfg.retry_cap)
+
+
+def run(
+    cfg: Config,
+    *,
+    logger=None,
+    clock=None,
+    sleep=None,
+    get_block=None,
+    perform=None,
+    stop=None,
+    use_lock: bool = True,
+    max_fires=None,
+) -> None:
+    logger = logger or get_logger()
+    clock = clock or _utc_now
+    get_block = get_block or ccusage_mod.get_active_block
+    perform = perform or action_mod.perform
+
+    # Default stop: an Event flipped by SIGTERM/SIGINT (launchd sends SIGTERM on
+    # bootout). Using Event.wait as the sleeper means a signal interrupts the
+    # sleep immediately, so the loop exits within launchd's grace period.
+    event = None
+    if stop is None:
+        event = threading.Event()
+
+        def _handler(signum, frame):
+            event.set()
+
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                signal.signal(sig, _handler)
+            except (ValueError, OSError):
+                pass  # not in main thread (e.g. under test)
+        stop = event.is_set
+    if sleep is None:
+        sleep = event.wait if event is not None else time.sleep
+
+    lock = PidLock() if use_lock else None
+    if lock is not None:
+        lock.acquire()
+
+    fires = 0
+    last_fired_block_id = None
+    try:
+        action_label = "exec" if cfg.exec_cmd else ("send %r" % cfg.text)
+        logger.info("watch started (action: %s)", action_label)
+        while not stop():
+            plan = _next_plan(cfg, clock(), get_block, logger)
+
+            if plan.kind == "poll":
+                logger.info("%s; polling in %ds", plan.reason, cfg.poll_interval)
+                if _sleep_until(clock() + timedelta(seconds=cfg.poll_interval), clock=clock, sleep=sleep, stop=stop) == "stopped":
+                    break
+                continue
+
+            # Dedupe: don't re-arm a window we've already fired+retried for; wait
+            # for it to roll (or a new one to appear) instead of spin-firing.
+            if plan.block is not None and plan.block.id == last_fired_block_id:
+                logger.info("window %s already handled; polling in %ds", plan.block.id, cfg.poll_interval)
+                if _sleep_until(clock() + timedelta(seconds=cfg.poll_interval), clock=clock, sleep=sleep, stop=stop) == "stopped":
+                    break
+                continue
+
+            logger.info("armed: fire at %s (%s)", _fmt(plan.target), plan.reason)
+            if _sleep_until(plan.target, clock=clock, sleep=sleep, stop=stop) == "stopped":
+                break
+
+            fired = perform(cfg, dry_run=False)
+            fires += 1
+            logger.info("fired -> %s", fired or "(no matching sessions)")
+            if plan.block is not None:
+                last_fired_block_id = plan.block.id
+                _verify_and_retry(
+                    cfg, plan.block, clock=clock, sleep=sleep, get_block=get_block,
+                    perform=perform, logger=logger, stop=stop,
+                )
+
+            if max_fires is not None and fires >= max_fires:
+                logger.info("max_fires=%d reached; exiting", max_fires)
+                break
+    finally:
+        if lock is not None:
+            lock.release()
+    logger.info("watch stopped (fired %d time(s))", fires)

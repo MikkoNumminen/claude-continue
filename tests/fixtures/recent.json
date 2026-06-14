@@ -1,0 +1,71 @@
+{
+    "blocks": [
+        {
+            "id": "2026-01-01T20:00:00.000Z",
+            "startTime": "2026-01-01T20:00:00.000Z",
+            "endTime": "2026-01-02T01:00:00.000Z",
+            "actualEndTime": "2026-01-01T22:00:00.000Z",
+            "isActive": false,
+            "isGap": false,
+            "entries": 5,
+            "models": ["claude-opus-4-8"],
+            "tokenCounts": {
+                "inputTokens": 0,
+                "outputTokens": 0,
+                "cacheCreationInputTokens": 0,
+                "cacheReadInputTokens": 0
+            },
+            "costUSD": 0.0
+        },
+        {
+            "id": "gap-2026-01-02T01:00:00.000Z",
+            "startTime": "2026-01-02T01:00:00.000Z",
+            "endTime": "2026-01-02T08:30:00.000Z",
+            "actualEndTime": null,
+            "isActive": false,
+            "isGap": true
+        },
+        {
+            "id": "2026-01-02T09:00:00.000Z",
+            "startTime": "2026-01-02T09:00:00.000Z",
+            "endTime": "2026-01-02T14:00:00.000Z",
+            "actualEndTime": "2026-01-02T09:45:00.000Z",
+            "isActive": false,
+            "isGap": false,
+            "entries": 3,
+            "models": ["claude-haiku-4-5-20251001"],
+            "tokenCounts": {
+                "inputTokens": 0,
+                "outputTokens": 0,
+                "cacheCreationInputTokens": 0,
+                "cacheReadInputTokens": 0
+            },
+            "costUSD": 0.0
+        },
+        {
+            "id": "gap-2026-01-02T14:00:00.000Z",
+            "startTime": "2026-01-02T14:00:00.000Z",
+            "endTime": "2026-01-02T19:50:00.000Z",
+            "actualEndTime": null,
+            "isActive": false,
+            "isGap": true
+        },
+        {
+            "id": "2026-01-02T20:00:00.000Z",
+            "startTime": "2026-01-02T20:00:00.000Z",
+            "endTime": "2026-01-03T01:00:00.000Z",
+            "actualEndTime": "2026-01-02T20:30:00.000Z",
+            "isActive": true,
+            "isGap": false,
+            "entries": 2,
+            "models": ["claude-opus-4-8"],
+            "tokenCounts": {
+                "inputTokens": 0,
+                "outputTokens": 0,
+                "cacheCreationInputTokens": 0,
+                "cacheReadInputTokens": 0
+            },
+            "costUSD": 0.0
+        }
+    ]
+}
