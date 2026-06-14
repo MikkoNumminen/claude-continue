@@ -1,31 +1,43 @@
-import os
+import shlex
 import unittest
-from unittest import mock
 
 import _support  # noqa: F401
 
-from claude_continue import osenv, tasksched
+from claude_continue import tasksched
 
 
-class TestBuildRunCommand(unittest.TestCase):
-    def test_native_windows(self):
-        with mock.patch.dict(os.environ, {osenv.PLATFORM_ENV: "windows"}):
-            tr = tasksched.build_run_command(["claude-continue"], ["--buffer", "120"], None)
-        self.assertIn("watch", tr)
-        self.assertIn("--buffer", tr)
-        self.assertNotIn("wsl.exe", tr)
+class TestWrapperBody(unittest.TestCase):
+    def test_windows_body_is_cmd_script(self):
+        inner = ["C:\\Program Files\\cc\\claude-continue.exe", "watch", "--exec", "claude -p 'go'"]
+        body = tasksched.wrapper_body(inner, wsl=False)
+        self.assertTrue(body.startswith("@echo off"))
+        # the full command (with its spaces/quotes) lives inside the wrapper, not in /tr
+        self.assertIn("claude-continue.exe", body)
+        self.assertIn("--exec", body)
 
-    def test_wsl_wraps_with_distro(self):
-        with mock.patch.dict(os.environ, {osenv.PLATFORM_ENV: "wsl", "WSL_DISTRO_NAME": "Ubuntu"}):
-            tr = tasksched.build_run_command(["claude-continue"], [], None)
+    def test_wsl_body_is_sh_script(self):
+        inner = ["claude-continue", "watch", "--exec", "claude -p 'go'"]
+        body = tasksched.wrapper_body(inner, wsl=True)
+        self.assertTrue(body.startswith("#!/bin/sh"))
+        self.assertIn("exec ", body)
+        # the spaced/quoted arg is shell-quoted (escape style is shlex's own)
+        self.assertIn(shlex.quote("claude -p 'go'"), body)
+
+
+class TestTrValue(unittest.TestCase):
+    def test_windows_tr_is_single_path(self):
+        # /tr is just the wrapper path — no nested command-line quoting for schtasks
+        self.assertEqual(tasksched.tr_value("C:\\x\\run.cmd", wsl=False, distro=""), "C:\\x\\run.cmd")
+
+    def test_wsl_tr_invokes_wrapper_via_wsl(self):
+        tr = tasksched.tr_value("/home/u/.config/claude-continue/run.sh", wsl=True, distro="Ubuntu")
         self.assertIn("wsl.exe", tr)
         self.assertIn("Ubuntu", tr)
-        self.assertIn("watch", tr)
+        self.assertIn("run.sh", tr)
+        self.assertIn("/bin/sh", tr)
 
-    def test_wsl_without_distro_omits_flag(self):
-        with mock.patch.dict(os.environ, {osenv.PLATFORM_ENV: "wsl"}, clear=False):
-            os.environ.pop("WSL_DISTRO_NAME", None)
-            tr = tasksched.build_run_command(["claude-continue"], [], None)
+    def test_wsl_tr_without_distro_omits_flag(self):
+        tr = tasksched.tr_value("/home/u/run.sh", wsl=True, distro="")
         self.assertIn("wsl.exe", tr)
         self.assertNotIn("-d", tr)
 

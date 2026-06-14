@@ -36,10 +36,10 @@ class TestResolveArgv(unittest.TestCase):
         with mock.patch("claude_continue.osenv.shutil.which", return_value=None):
             self.assertEqual(osenv.resolve_argv(["foo", "x"]), ["foo", "x"])
 
-    def test_windows_wraps_cmd_shim(self):
+    def test_windows_wraps_cmd_shim_with_call(self):
         with mock.patch("claude_continue.osenv.shutil.which", return_value="C:\\n\\npx.cmd"), \
              mock.patch.object(osenv.os, "name", "nt"):
-            self.assertEqual(osenv.resolve_argv(["npx", "x"]), ["cmd", "/c", "C:\\n\\npx.cmd", "x"])
+            self.assertEqual(osenv.resolve_argv(["npx", "x"]), ["cmd", "/c", "call", "C:\\n\\npx.cmd", "x"])
 
     def test_empty(self):
         self.assertEqual(osenv.resolve_argv([]), [])

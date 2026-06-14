@@ -150,7 +150,12 @@ def run(
         def _handler(signum, frame):
             event.set()
 
-        for sig in (signal.SIGTERM, signal.SIGINT):
+        # SIGBREAK is the Windows console-group signal (Ctrl-Break / taskkill);
+        # include it so a launchd/Task-Scheduler stop ends the loop promptly.
+        sigs = [signal.SIGTERM, signal.SIGINT]
+        if hasattr(signal, "SIGBREAK"):
+            sigs.append(signal.SIGBREAK)
+        for sig in sigs:
             try:
                 signal.signal(sig, _handler)
             except (ValueError, OSError):

@@ -76,7 +76,9 @@ def resolve_argv(argv: list) -> list:
     exe = shutil.which(argv[0]) or argv[0]
     rest = list(argv[1:])
     if os.name == "nt" and exe.lower().endswith((".cmd", ".bat")):
-        return ["cmd", "/c", exe] + rest
+        # `call` lets cmd handle a quoted batch path with spaces (e.g. node under
+        # "C:\Program Files\nodejs\npx.cmd") without the bare-`cmd /c` quote-strip bug.
+        return ["cmd", "/c", "call", exe] + rest
     return [exe] + rest
 
 
@@ -98,18 +100,34 @@ def pid_alive(pid: int) -> bool:
     """
     if os.name == "nt":
         import ctypes
+        from ctypes import wintypes
 
         PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        SYNCHRONIZE = 0x00100000
         STILL_ACTIVE = 259
+        WAIT_OBJECT_0 = 0x0
         kernel32 = ctypes.windll.kernel32
-        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        # Declare types so 64-bit HANDLEs aren't truncated to int.
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, False, pid)
         if not handle:
             return False
         try:
-            code = ctypes.c_ulong()
-            if kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
-                return code.value == STILL_ACTIVE
-            return True  # exists but couldn't read exit code
+            code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True  # exists but couldn't read exit code
+            if code.value != STILL_ACTIVE:
+                return False
+            # 259 is ambiguous (it's also a real exit code): confirm via the wait
+            # state — a signaled process object has genuinely exited.
+            return kernel32.WaitForSingleObject(handle, 0) != WAIT_OBJECT_0
         finally:
             kernel32.CloseHandle(handle)
     import errno

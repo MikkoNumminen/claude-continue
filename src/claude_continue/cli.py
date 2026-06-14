@@ -11,7 +11,7 @@ from dataclasses import fields
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import __version__, action, doctor, schedule, scheduler, watch
+from . import __version__, action, doctor, osenv, schedule, scheduler, watch
 from .ccusage import CcusageUnavailable, get_active_block
 from .config import Config, resolve
 from .lock import AlreadyRunning
@@ -121,8 +121,10 @@ def _launch_argv() -> list:
     if found:
         return [found]
     shim = Path(__file__).resolve().parents[2] / "bin" / "claude-continue"
-    if os.name != "nt" and shim.exists():
-        return [str(shim)]
+    if shim.exists():
+        # On Windows the shim has no executable shebang, so drive it via the
+        # interpreter; on POSIX the shebang makes it directly runnable.
+        return [sys.executable, str(shim)] if os.name == "nt" else [str(shim)]
     return [sys.executable, "-m", "claude_continue.cli"]
 
 
@@ -254,7 +256,9 @@ def cmd_install(args) -> int:
 def cmd_uninstall(args) -> int:
     existed = scheduler.uninstall(purge=bool(args.purge))
     if existed:
-        print("uninstalled the unattended agent%s" % (" (config removed)" if args.purge else ""))
+        # --purge only removes a file on macOS (the plist); the Windows task has none.
+        suffix = " (plist removed)" if (args.purge and osenv.uses_launchd()) else ""
+        print("uninstalled the unattended agent%s" % suffix)
     else:
         print("nothing to uninstall (no agent/task found)")
     return 0

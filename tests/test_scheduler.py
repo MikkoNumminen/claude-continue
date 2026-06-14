@@ -34,6 +34,21 @@ class TestUninstallDispatch(unittest.TestCase):
         tu.assert_called_once()
 
 
+class TestLinuxUnsupported(unittest.TestCase):
+    def test_install_raises(self):
+        with mock.patch.dict(os.environ, {osenv.PLATFORM_ENV: "linux"}):
+            with self.assertRaises(RuntimeError):
+                scheduler.install(["claude-continue"], [], Config())
+
+    def test_uninstall_returns_false(self):
+        with mock.patch.dict(os.environ, {osenv.PLATFORM_ENV: "linux"}):
+            self.assertFalse(scheduler.uninstall())
+
+    def test_describe_absent(self):
+        with mock.patch.dict(os.environ, {osenv.PLATFORM_ENV: "linux"}):
+            self.assertEqual(scheduler.describe()[0], "absent")
+
+
 class TestDescribe(unittest.TestCase):
     def test_launchd_running(self):
         with mock.patch.dict(os.environ, {osenv.PLATFORM_ENV: "macos"}), \

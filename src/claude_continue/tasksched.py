@@ -9,8 +9,10 @@ through WSL interop).
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
+from pathlib import Path
 
 from . import osenv
 
@@ -32,19 +34,51 @@ def _run(cmd, timeout=20):
         return subprocess.CompletedProcess(cmd, 1, "", str(e))
 
 
-def build_run_command(launch_argv, watch_flags, cfg) -> str:
-    """The /tr command string schtasks runs at logon (Windows-quoted)."""
-    inner = list(launch_argv) + ["watch"] + list(watch_flags)
+def _inner_argv(launch_argv, watch_flags) -> list:
+    return list(launch_argv) + ["watch"] + list(watch_flags)
+
+
+def wrapper_body(inner, *, wsl: bool) -> str:
+    """Contents of the wrapper script the task invokes.
+
+    We point schtasks /tr at a single wrapper path (not a full command line),
+    which sidesteps schtasks's fragile /tr quoting — the real command, with all
+    its spaces/quotes, lives inside the wrapper where we control the quoting.
+    """
+    if wsl:
+        return "#!/bin/sh\nexec " + " ".join(shlex.quote(a) for a in inner) + "\n"
+    return "@echo off\r\n" + subprocess.list2cmdline(inner) + "\r\n"
+
+
+def wrapper_path() -> Path:
     if osenv.is_wsl():
-        distro = os.environ.get("WSL_DISTRO_NAME", "")
-        argv = ["wsl.exe"] + (["-d", distro] if distro else []) + ["-e"] + inner
-    else:
-        argv = inner
-    return subprocess.list2cmdline(argv)
+        return Path.home() / ".config" / "claude-continue" / "run.sh"
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    return Path(base) / "claude-continue" / "run.cmd"
+
+
+def tr_value(wrapper: str, *, wsl: bool, distro: str) -> str:
+    """The /tr value: a single wrapper path on Windows, or a wsl.exe invocation
+    of the wrapper (no embedded spaces beyond the well-behaved path) on WSL."""
+    if wsl:
+        argv = ["wsl.exe"] + (["-d", distro] if distro else []) + ["-e", "/bin/sh", wrapper]
+        return subprocess.list2cmdline(argv)
+    return wrapper
+
+
+def _write_wrapper(launch_argv, watch_flags) -> str:
+    inner = _inner_argv(launch_argv, watch_flags)
+    path = wrapper_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(wrapper_body(inner, wsl=osenv.is_wsl()))
+    if osenv.is_wsl():
+        os.chmod(path, 0o755)
+    return str(path)
 
 
 def install(launch_argv, watch_flags, cfg) -> str:
-    tr = build_run_command(launch_argv, watch_flags, cfg)
+    wrapper = _write_wrapper(launch_argv, watch_flags)
+    tr = tr_value(wrapper, wsl=osenv.is_wsl(), distro=os.environ.get("WSL_DISTRO_NAME", ""))
     proc = _run([
         _schtasks(), "/create", "/tn", TASK_NAME, "/tr", tr,
         "/sc", "onlogon", "/rl", "highest", "/f",

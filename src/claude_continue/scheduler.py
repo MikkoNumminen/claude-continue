@@ -8,12 +8,21 @@ import shutil
 from . import launchd, osenv, tasksched
 
 
+def _unsupported() -> RuntimeError:
+    return RuntimeError(
+        "unattended scheduling isn't supported on %s — run `claude-continue watch` "
+        "under your own service manager (e.g. systemd)" % osenv.detect()
+    )
+
+
 def install(launch_argv, watch_flags, cfg) -> list:
     """Register the watch loop to run unattended. Returns lines to print.
 
     ``launch_argv`` is how to invoke this tool (e.g. ['claude-continue'] or
     [python, '-m', 'claude_continue.cli']); 'watch' + flags are appended.
     """
+    if not (osenv.uses_launchd() or osenv.uses_task_scheduler()):
+        raise _unsupported()
     if osenv.uses_launchd():
         program_args = list(launch_argv) + ["watch"] + list(watch_flags)
         path_value = launchd.node_path_value(cfg.node_path)
@@ -40,7 +49,9 @@ def install(launch_argv, watch_flags, cfg) -> list:
 def uninstall(purge=False) -> bool:
     if osenv.uses_launchd():
         return launchd.uninstall(purge=purge)
-    return tasksched.uninstall(purge=purge)
+    if osenv.uses_task_scheduler():
+        return tasksched.uninstall(purge=purge)
+    return False
 
 
 def describe():
@@ -52,4 +63,6 @@ def describe():
         if "state = running" in out:
             return ("running", "launchd agent installed and running")
         return ("installed", "launchd agent installed but not running")
-    return tasksched.describe()
+    if osenv.uses_task_scheduler():
+        return tasksched.describe()
+    return ("absent", "unattended scheduling not supported on %s" % osenv.detect())

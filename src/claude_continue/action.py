@@ -35,11 +35,11 @@ def perform(cfg: Config, dry_run: bool = False) -> list:
 
 def _resume(cfg: Config, dry_run: bool) -> list:
     plat = osenv.detect()
-    if plat == osenv.MACOS and not cfg.keystroke:
+    # macOS resumes by broadcasting into iTerm2 (its keystroke equivalent).
+    if plat == osenv.MACOS:
         return _broadcast_iterm(cfg, dry_run)
-    if cfg.keystroke:
-        if plat == osenv.MACOS:
-            return _broadcast_iterm(cfg, dry_run)  # iTerm2 *is* macOS's keystroke path
+    # Windows/WSL: keystroke into a terminal window via PowerShell SendKeys.
+    if cfg.keystroke and plat in (osenv.WINDOWS, osenv.WSL):
         try:
             return winterm.send_keystroke(
                 cfg.text, window_title=cfg.window_title, dry_run=dry_run, timeout=float(cfg.timeout)
@@ -48,7 +48,7 @@ def _resume(cfg: Config, dry_run: bool) -> list:
             raise ActionError("keystroke send failed: %s" % e) from e
     raise ActionError(
         "no resume action for this platform (%s) — set --exec '<command>' for a "
-        "headless run, or --keystroke to type into a terminal window" % plat
+        "headless run%s" % (plat, ", or --keystroke" if plat in (osenv.WINDOWS, osenv.WSL) else "")
     )
 
 
