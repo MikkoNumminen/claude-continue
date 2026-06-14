@@ -153,17 +153,20 @@ claude-continue.app`.
 ### Standalone Windows .exe (no Python required)
 
 Build it **on a Windows machine** (PyInstaller can't cross-compile from macOS),
-in PowerShell from the repo root:
+in PowerShell from the repo root. Building needs Python ≥ 3.9 on PATH; the
+resulting exe needs none to run:
 
 ```powershell
-.\packaging\build-windows.ps1
+powershell -ExecutionPolicy Bypass -File packaging\build-windows.ps1
 .\dist\claude-continue.exe          # run it (or double-click in Explorer)
 ```
 
-It produces a single `dist\claude-continue.exe` that opens the GUI. Same runtime
-deps as the CLI: Node (`npx ccusage`) for reset detection, and PowerShell for the
-optional `--keystroke` action. Windows SmartScreen may warn on an unsigned exe
-the first time — choose "More info → Run anyway".
+It builds in a throwaway venv (never touching your system Python) and produces a
+single `dist\claude-continue.exe` that opens the GUI, built `--windowed` so no
+console window flashes up behind it. Same runtime deps as the CLI: Node (`npx
+ccusage`) for reset detection, and PowerShell for the optional `--keystroke`
+action. Windows SmartScreen may warn on an unsigned exe the first time — choose
+"More info → Run anyway".
 
 ## Choosing what fires
 
