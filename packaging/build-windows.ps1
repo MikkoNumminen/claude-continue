@@ -51,8 +51,15 @@ if (-not $PyCmd) {
     throw "No Python found on PATH (the Microsoft Store python.exe stub does not count). Install Python >= 3.9 from python.org (tick 'Add to PATH') and re-run."
 }
 
+# If we resolved the `py` launcher (not python.exe), force Python 3 so it can't
+# default to a co-installed Python 2 (which has no venv module). `python.exe`
+# rejects -3, so the flag is conditional; pyproject's requires-python >= 3.9
+# still backstops a stale 3.7/3.8 default.
+$PyArgs = @()
+if ($PyCmd.Source -match '\\py\.exe$') { $PyArgs = @("-3") }
+
 Write-Host "==> creating a clean build venv at $Venv"
-& $PyCmd.Source -m venv --clear $Venv
+& $PyCmd.Source @PyArgs -m venv --clear $Venv
 if ($LASTEXITCODE -ne 0) { throw "venv creation failed (exit $LASTEXITCODE)" }
 
 # Drive the build through the venv's own interpreter so it's fully isolated.

@@ -154,7 +154,7 @@ claude-continue.app`.
 
 Build it **on a Windows machine** (PyInstaller can't cross-compile from macOS),
 in PowerShell from the repo root. Building needs Python ≥ 3.9 on PATH; the
-resulting exe needs none to run:
+resulting exe needs no Python to run:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File packaging\build-windows.ps1
@@ -163,10 +163,13 @@ powershell -ExecutionPolicy Bypass -File packaging\build-windows.ps1
 
 It builds in a throwaway venv (never touching your system Python) and produces a
 single `dist\claude-continue.exe` that opens the GUI, built `--windowed` so no
-console window flashes up behind it. Same runtime deps as the CLI: Node (`npx
-ccusage`) for reset detection, and PowerShell for the optional `--keystroke`
-action. Windows SmartScreen may warn on an unsigned exe the first time — choose
-"More info → Run anyway".
+console window flashes up behind it. The exe is actually the full
+`claude-continue` (double-click opens the GUI; `claude-continue.exe doctor` /
+`status` / `watch` work too), but because it's `--windowed` it doesn't attach to
+a console, so for CLI text output prefer the `pip install`. Same runtime deps as
+the CLI: Node (`npx ccusage`) for reset detection, and PowerShell for the
+optional `--keystroke` action. Windows SmartScreen may warn on an unsigned exe
+the first time — choose "More info → Run anyway".
 
 ## Choosing what fires
 
