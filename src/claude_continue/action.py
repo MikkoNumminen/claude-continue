@@ -14,7 +14,6 @@ re-arm/poll instead of crashing the daemon.
 
 from __future__ import annotations
 
-import shlex
 import subprocess
 
 from . import iterm, osenv, winterm
@@ -70,7 +69,7 @@ def _broadcast_iterm(cfg: Config, dry_run: bool) -> list:
 
 def _run_exec(command: str, dry_run: bool = False) -> list:
     try:
-        argv = shlex.split(command)
+        argv = osenv.split_command(command)
     except ValueError as e:
         raise ActionError("invalid exec command %r: %s" % (command, e)) from e
     if not argv:

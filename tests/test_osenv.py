@@ -45,6 +45,19 @@ class TestResolveArgv(unittest.TestCase):
         self.assertEqual(osenv.resolve_argv([]), [])
 
 
+class TestSplitCommand(unittest.TestCase):
+    def test_posix_strips_quotes(self):
+        with mock.patch.object(osenv.os, "name", "posix"):
+            self.assertEqual(osenv.split_command('claude -p "go now"'), ["claude", "-p", "go now"])
+
+    def test_windows_keeps_backslashes_and_strips_quotes(self):
+        with mock.patch.object(osenv.os, "name", "nt"):
+            self.assertEqual(
+                osenv.split_command(r'C:\tools\claude.exe -p "go now"'),
+                ["C:\\tools\\claude.exe", "-p", "go now"],
+            )
+
+
 class TestDetachedKwargs(unittest.TestCase):
     def test_posix(self):
         with mock.patch.object(osenv.os, "name", "posix"):

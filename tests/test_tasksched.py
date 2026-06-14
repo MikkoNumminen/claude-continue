@@ -1,9 +1,16 @@
+import os
 import shlex
+import subprocess
 import unittest
+from unittest import mock
 
 import _support  # noqa: F401
 
-from claude_continue import tasksched
+from claude_continue import osenv, tasksched
+
+
+def _cp(rc=0, out="", err=""):
+    return subprocess.CompletedProcess([], rc, out, err)
 
 
 class TestWrapperBody(unittest.TestCase):
@@ -40,6 +47,48 @@ class TestTrValue(unittest.TestCase):
         tr = tasksched.tr_value("/home/u/run.sh", wsl=True, distro="")
         self.assertIn("wsl.exe", tr)
         self.assertNotIn("-d", tr)
+
+
+class TestInstall(unittest.TestCase):
+    def test_calls_schtasks_create(self):
+        with mock.patch("claude_continue.tasksched._write_wrapper", return_value="C:\\x\\run.cmd"), \
+             mock.patch("claude_continue.tasksched._run", return_value=_cp(0)) as run, \
+             mock.patch.dict(os.environ, {osenv.PLATFORM_ENV: "windows"}):
+            tr = tasksched.install(["cc"], ["--buffer", "120"], None)
+        self.assertEqual(tr, "C:\\x\\run.cmd")
+        argv = run.call_args[0][0]
+        for token in ("/create", "/tn", tasksched.TASK_NAME, "/tr", "/sc", "onlogon"):
+            self.assertIn(token, argv)
+
+    def test_raises_on_failure(self):
+        with mock.patch("claude_continue.tasksched._write_wrapper", return_value="x"), \
+             mock.patch("claude_continue.tasksched._run", return_value=_cp(1, err="denied")):
+            with self.assertRaises(RuntimeError):
+                tasksched.install(["cc"], [], None)
+
+
+class TestDescribe(unittest.TestCase):
+    def test_absent_when_query_fails(self):
+        with mock.patch("claude_continue.tasksched._run", return_value=_cp(1)):
+            self.assertEqual(tasksched.describe()[0], "absent")
+
+    def test_running(self):
+        with mock.patch("claude_continue.tasksched._run", return_value=_cp(0, "TaskName: x\nStatus: Running\n")):
+            self.assertEqual(tasksched.describe()[0], "running")
+
+    def test_installed_when_ready(self):
+        with mock.patch("claude_continue.tasksched._run", return_value=_cp(0, "Status: Ready\n")):
+            self.assertEqual(tasksched.describe()[0], "installed")
+
+
+class TestUninstall(unittest.TestCase):
+    def test_deletes_task_and_removes_wrapper(self):
+        wp = mock.Mock()
+        with mock.patch("claude_continue.tasksched._run", return_value=_cp(0)) as run, \
+             mock.patch("claude_continue.tasksched.wrapper_path", return_value=wp):
+            self.assertTrue(tasksched.uninstall())
+        self.assertIn("/delete", run.call_args[0][0])
+        wp.unlink.assert_called_once()
 
 
 if __name__ == "__main__":

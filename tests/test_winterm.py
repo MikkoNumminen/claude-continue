@@ -1,4 +1,6 @@
+import subprocess
 import unittest
+from unittest import mock
 
 import _support  # noqa: F401
 
@@ -34,6 +36,20 @@ class TestSendKeystroke(unittest.TestCase):
         self.assertEqual(len(out), 1)
         self.assertIn("continue", out[0])
         self.assertIn("WT", out[0])
+
+    def test_success_returns_label(self):
+        ok = subprocess.CompletedProcess([], 0, "", "")
+        with mock.patch("claude_continue.winterm._powershell_bin", return_value="powershell"), \
+             mock.patch("claude_continue.winterm.subprocess.run", return_value=ok):
+            out = winterm.send_keystroke("continue", window_title="WT")
+        self.assertTrue(out and "WT" in out[0])
+
+    def test_nonzero_exit_raises(self):
+        fail = subprocess.CompletedProcess([], 1, "", "window not found")
+        with mock.patch("claude_continue.winterm._powershell_bin", return_value="powershell"), \
+             mock.patch("claude_continue.winterm.subprocess.run", return_value=fail):
+            with self.assertRaises(RuntimeError):
+                winterm.send_keystroke("continue")
 
 
 if __name__ == "__main__":

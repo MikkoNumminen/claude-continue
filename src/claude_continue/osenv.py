@@ -9,7 +9,9 @@ odd power user) can force a platform without being on it.
 
 from __future__ import annotations
 
+import functools
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -22,6 +24,7 @@ LINUX = "linux"
 PLATFORM_ENV = "CLAUDE_CONTINUE_PLATFORM"
 
 
+@functools.lru_cache(maxsize=1)
 def _proc_version() -> str:
     try:
         with open("/proc/version") as f:
@@ -62,6 +65,24 @@ def uses_launchd() -> bool:
 def uses_task_scheduler() -> bool:
     # native Windows runs schtasks directly; WSL drives schtasks.exe via interop
     return detect() in (WINDOWS, WSL)
+
+
+def split_command(cmd: str) -> list:
+    """Split a command string into argv, correctly per platform.
+
+    POSIX ``shlex`` treats ``\\`` as an escape, which silently eats Windows path
+    separators (``C:\\tools\\x.exe`` -> ``C:toolsx.exe``). On Windows we split
+    non-POSIX (backslashes preserved) and then strip the surrounding quotes
+    shlex leaves on quoted tokens.
+    """
+    if os.name == "nt":
+        out = []
+        for tok in shlex.split(cmd, posix=False):
+            if len(tok) >= 2 and tok[0] == tok[-1] and tok[0] in "\"'":
+                tok = tok[1:-1]
+            out.append(tok)
+        return out
+    return shlex.split(cmd)
 
 
 def resolve_argv(argv: list) -> list:

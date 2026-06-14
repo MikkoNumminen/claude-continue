@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import os
 import platform as _platform
-import shlex
 import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -112,7 +111,7 @@ def _check_action(cfg: Config, *, which, exists, preview) -> Check:
     # Headless exec: must parse and the binary must be resolvable.
     if cfg.exec_cmd:
         try:
-            argv = shlex.split(cfg.exec_cmd)
+            argv = osenv.split_command(cfg.exec_cmd)
         except ValueError as e:
             return Check("action", FAIL, "exec command does not parse: %s" % e)
         if not argv:

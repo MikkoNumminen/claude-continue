@@ -92,6 +92,11 @@ def install(launch_argv, watch_flags, cfg) -> str:
 
 def uninstall(purge=False) -> bool:
     proc = _run([_schtasks(), "/delete", "/tn", TASK_NAME, "/f"])
+    # also clean up the wrapper script we wrote at install time
+    try:
+        wrapper_path().unlink()
+    except OSError:
+        pass
     return proc.returncode == 0
 
 
