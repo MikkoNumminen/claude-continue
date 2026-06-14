@@ -6,9 +6,10 @@ broadcasting. Stale pidfiles (holder process gone) are reclaimed automatically.
 
 from __future__ import annotations
 
-import errno
 import os
 from pathlib import Path
+
+from .osenv import pid_alive as _alive
 
 DEFAULT_PIDFILE = Path.home() / ".local" / "state" / "claude-continue" / "watch.pid"
 
@@ -17,18 +18,6 @@ class AlreadyRunning(Exception):
     def __init__(self, pid: int):
         self.pid = pid
         super().__init__(f"another claude-continue watch is already running (pid {pid})")
-
-
-def _alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except OSError as e:
-        if e.errno == errno.ESRCH:  # no such process
-            return False
-        if e.errno == errno.EPERM:  # exists but owned by someone else
-            return True
-        return False
-    return True
 
 
 class PidLock:

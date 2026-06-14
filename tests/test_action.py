@@ -1,3 +1,4 @@
+import os
 import unittest
 from unittest import mock
 
@@ -19,8 +20,10 @@ class TestExec(unittest.TestCase):
         with mock.patch("claude_continue.action.subprocess.Popen") as popen:
             perform(Config(exec_cmd="claude -p go"), dry_run=False)
         args, kwargs = popen.call_args
-        self.assertEqual(args[0], ["claude", "-p", "go"])
-        self.assertTrue(kwargs.get("start_new_session"))
+        self.assertEqual(args[0][-2:], ["-p", "go"])  # argv[0] resolved on PATH
+        self.assertIn("claude", os.path.basename(args[0][0]))
+        # detached: start_new_session (POSIX) or creationflags (Windows)
+        self.assertTrue(kwargs.get("start_new_session") or kwargs.get("creationflags"))
 
     def test_empty_exec_raises(self):
         with self.assertRaises(ActionError):

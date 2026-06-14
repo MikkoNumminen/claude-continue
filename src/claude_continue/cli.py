@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import sys
 import time
@@ -10,7 +11,7 @@ from dataclasses import fields
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import __version__, action, doctor, launchd, schedule, watch
+from . import __version__, action, doctor, schedule, scheduler, watch
 from .ccusage import CcusageUnavailable, get_active_block
 from .config import Config, resolve
 from .lock import AlreadyRunning
@@ -55,6 +56,10 @@ def add_action_args(p: argparse.ArgumentParser, *, dry_run: bool = False) -> Non
                    help="do not skip busy sessions")
     a.add_argument("--filter", dest="filter", default=None, type=_csv, metavar="A,B",
                    help="comma-separated session-name substrings to match")
+    a.add_argument("--keystroke", dest="keystroke", action="store_true", default=None,
+                   help="Windows/WSL: type the text into a terminal window (opt-in, best-effort)")
+    a.add_argument("--window-title", dest="window_title", default=None, metavar="TITLE",
+                   help="window title to target in --keystroke mode (default: Windows Terminal)")
 
     t = p.add_argument_group("timing")
     t.add_argument("--buffer", type=int, default=None, metavar="S",
@@ -93,6 +98,9 @@ def overrides_to_argv(overrides: dict) -> list:
         elif name == "force":
             if value:
                 argv.append("--force")
+        elif name == "keystroke":
+            if value:
+                argv.append("--keystroke")
         elif name == "exec_cmd":
             argv += ["--exec", str(value)]
         elif name == "every_hours":
@@ -106,11 +114,16 @@ def overrides_to_argv(overrides: dict) -> list:
     return argv
 
 
-def _resolve_binary() -> str:
+def _launch_argv() -> list:
+    """How a scheduler should launch us: prefer the installed console script,
+    then the repo shim (POSIX), else run the module with this interpreter."""
     found = shutil.which("claude-continue")
     if found:
-        return found
-    return str(Path(__file__).resolve().parents[2] / "bin" / "claude-continue")
+        return [found]
+    shim = Path(__file__).resolve().parents[2] / "bin" / "claude-continue"
+    if os.name != "nt" and shim.exists():
+        return [str(shim)]
+    return [sys.executable, "-m", "claude_continue.cli"]
 
 
 # --- subcommands -------------------------------------------------------------
@@ -226,29 +239,24 @@ def cmd_fire(args) -> int:
 def cmd_install(args) -> int:
     overrides = build_overrides(args)
     cfg = resolve(overrides)
-    program_args = [_resolve_binary(), "watch"] + overrides_to_argv(overrides)
-    path_value = launchd.node_path_value(cfg.node_path)
+    launch_argv = _launch_argv()
+    watch_flags = overrides_to_argv(overrides)
     try:
-        plist = launchd.install(program_args, path_value=path_value, stdout=cfg.log_path)
+        lines = scheduler.install(launch_argv, watch_flags, cfg)
     except (RuntimeError, ValueError) as e:
         print("install failed: %s" % e)
         return 1
-    print("installed launchd agent: %s" % plist)
-    print("  program: %s" % " ".join(program_args))
-    print("  logs:    %s" % (cfg.log_path or launchd.LOG_PATH))
-    print("  check:   launchctl print %s" % launchd._service())
-    node = shutil.which("node") or shutil.which("npx")
-    if node and launchd.is_volatile_node_dir(node) and not launchd.stable_node_dir():
-        print("  note:    node is a version-pinned path; re-run `claude-continue install` after upgrading node")
+    for line in lines:
+        print(line)
     return 0
 
 
 def cmd_uninstall(args) -> int:
-    existed = launchd.uninstall(purge=bool(args.purge))
+    existed = scheduler.uninstall(purge=bool(args.purge))
     if existed:
-        print("uninstalled launchd agent%s" % (" (plist removed)" if args.purge else ""))
+        print("uninstalled the unattended agent%s" % (" (config removed)" if args.purge else ""))
     else:
-        print("no plist found; sent bootout anyway in case it was loaded")
+        print("nothing to uninstall (no agent/task found)")
     return 0
 
 

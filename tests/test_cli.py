@@ -54,6 +54,16 @@ class TestOverridesRoundTrip(unittest.TestCase):
     def test_none_values_skipped(self):
         self.assertEqual(cli.overrides_to_argv({"buffer": None, "text": None}), [])
 
+    def test_keystroke_flags_roundtrip(self):
+        p = cli.build_parser()
+        install_args = p.parse_args(["install", "--keystroke", "--window-title", "My Term"])
+        argv = cli.overrides_to_argv(cli.build_overrides(install_args))
+        self.assertIn("--keystroke", argv)
+        self.assertIn("--window-title", argv)
+        watch_args = p.parse_args(["watch"] + argv)
+        self.assertTrue(watch_args.keystroke)
+        self.assertEqual(watch_args.window_title, "My Term")
+
     def test_launchd_only_fields_not_emitted(self):
         self.assertEqual(cli.overrides_to_argv({"node_path": "/x", "log_path": "/y"}), [])
 

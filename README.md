@@ -22,14 +22,20 @@ If you stay idle, no new window opens on its own.
 [`ccusage`](https://github.com/ryoppippi/ccusage) (which reconstructs usage
 blocks from your local Claude Code transcripts — the only local source for this;
 `~/.claude.json` and the `claude` CLI expose nothing), waits until reset + a
-small buffer, fires `continue` into your paused iTerm2 sessions, then re-arms for
-the next window.
+small buffer, fires the configured action, then re-arms for the next window.
+
+Runs on **macOS, Windows, and WSL** — the reset detection and scheduling are
+portable; only the "fire" action and the unattended agent differ per platform
+(see [Platform support](#platform-support)).
 
 ## Requirements
 
-- **macOS** (uses `launchd` and AppleScript / iTerm2).
-- **iTerm2** for the default action (broadcasting `continue` to live sessions).
-  Not needed if you use `--exec` headless mode.
+- **macOS, Windows, or WSL.** The unattended agent uses `launchd` (macOS) or
+  Windows Task Scheduler (Windows/WSL).
+- **A way to act at reset**, by platform:
+  - macOS — **iTerm2** (default: broadcast `continue` to live sessions).
+  - Windows / WSL — **headless `--exec`** (recommended), or **`--keystroke`**
+    (opt-in; needs PowerShell, which ships with Windows).
 - **Node + `ccusage`** for auto-detecting the reset time. `npx ccusage` works
   with no global install. Not needed if you only use the fixed-schedule mode
   (`--at` / `--every`).
@@ -38,12 +44,16 @@ the next window.
 ## Install
 
 ```bash
-# Option A: pip (gives you the `claude-continue` command on PATH)
+# Option A (recommended, all platforms): pip — gives you `claude-continue` on PATH
 pip install -e .
 
 # Option B: no install — run straight from the checkout
-./bin/claude-continue status
+./bin/claude-continue status          # macOS / Linux / WSL
+python -m claude_continue.cli status  # any platform (run from the repo root)
 ```
+
+On native Windows, prefer Option A — `install` (Task Scheduler) needs a runnable
+program path, which the console script provides.
 
 ## Usage
 
@@ -99,7 +109,7 @@ Ready, with warnings.
 
 ## Choosing what fires
 
-By default it broadcasts `continue` to iTerm2 sessions whose name contains
+On **macOS** it broadcasts `continue` to iTerm2 sessions whose name contains
 `claude` or `✳`, **skipping any session that's mid-turn** (so it never injects
 into a job that's actively working — see the caveat below).
 
@@ -114,8 +124,17 @@ claude-continue watch --all --force      # also disable skip-busy
 # custom name filter / custom text
 claude-continue watch --filter claude,agent --text "continue"
 
-# headless instead of iTerm2: open a fresh window with a real task, no terminal
+# headless: open a fresh run with a real task, no terminal needed (all platforms)
 claude-continue watch --exec "claude -p 'resume the migration' --permission-mode bypassPermissions"
+```
+
+On **Windows / WSL** there is no per-session "type into it" API, so the
+**headless `--exec`** path above is the reliable default. If you want to mimic
+the macOS behavior of typing into a live terminal, opt into keystroke mode:
+
+```powershell
+# best-effort: SendKeys `continue`+Enter into a terminal window (focus-stealing)
+claude-continue watch --keystroke --window-title "Windows Terminal"
 ```
 
 ## Triggering
@@ -142,10 +161,8 @@ Precedence: **CLI flags > env vars > config file > defaults.**
 
 Key settings: `buffer` (90s after reset before firing), `verify_delay` (90s),
 `poll_interval` (600s while idle), `retry_interval` (300s) / `retry_cap` (6),
-`skip_busy` (true), `filter`, `text`, `exec_cmd`, `session`, `timeout` (30s).
-
-Flags passed to `install` are baked into the launchd plist, so the unattended
-agent runs with the same options you tested with `watch`.
+`skip_busy` (true), `filter`, `text`, `exec_cmd`, `session`, `timeout` (30s),
+and (Windows/WSL) `keystroke` (false) / `window_title` ("Windows Terminal").
 
 ## Two honest caveats
 
@@ -157,25 +174,50 @@ agent runs with the same options you tested with `watch`.
    bounded number of times if it didn't. That verification is the correctness
    mechanism — not the raw estimate.
 
-2. **A sleeping Mac runs no timers.** If the Mac is asleep when a window resets,
-   nothing fires until it wakes (the loop then fires immediately for the *current*
-   window — it doesn't try to replay windows that already passed). For long
-   unattended runs, keep the Mac awake with `caffeinate`.
+2. **A sleeping machine runs no timers.** If the machine is asleep when a window
+   resets, nothing fires until it wakes (the loop then fires immediately for the
+   *current* window — it doesn't replay windows that already passed). For long
+   unattended runs, keep it awake (`caffeinate` on macOS; a "do not sleep" power
+   plan / `presentationsettings` on Windows).
+
+## Platform support
+
+| | macOS | Windows | WSL |
+| --- | --- | --- | --- |
+| Reset detection (`ccusage`) | ✅ | ✅ | ✅ |
+| Default action | iTerm2 broadcast | `--exec` headless | `--exec` headless |
+| Resume-a-live-session | iTerm2 (built in) | `--keystroke` (opt-in) | `--keystroke` (opt-in) |
+| Unattended agent | launchd | Task Scheduler | Task Scheduler → `wsl.exe` |
+
+`claude-continue doctor` reports the detected platform and checks the right
+pieces for it.
 
 ## How it stays unattended
 
-`install` writes a launchd LaunchAgent
-(`~/Library/LaunchAgents/com.mikko.claude-continue.plist`) that runs `watch` with
-`RunAtLoad` + `KeepAlive` (restarts on crash, stays down after a clean
-uninstall). It injects node's bin directory into the agent's `PATH` (nvm's node
-isn't on launchd's default PATH, so `npx ccusage` would otherwise fail silently).
-Logs go to `~/Library/Logs/claude-continue.log`. A pidfile prevents a manual
-`watch` and the agent from both firing.
+`install` registers `watch` to run at logon and restart on crash:
 
-```bash
-launchctl print gui/$(id -u)/com.mikko.claude-continue   # inspect the agent
-tail -f ~/Library/Logs/claude-continue.log               # watch it work
-```
+- **macOS** — a launchd LaunchAgent
+  (`~/Library/LaunchAgents/com.mikko.claude-continue.plist`) with `RunAtLoad` +
+  `KeepAlive`. It injects node's bin directory into the agent's `PATH` (nvm's
+  node isn't on launchd's default PATH, so `npx ccusage` would otherwise fail
+  silently). Logs: `~/Library/Logs/claude-continue.log`.
+
+  ```bash
+  launchctl print gui/$(id -u)/com.mikko.claude-continue
+  tail -f ~/Library/Logs/claude-continue.log
+  ```
+
+- **Windows / WSL** — a Task Scheduler task (`claude-continue`, `/sc onlogon
+  /rl highest`). Under WSL the task lives on the Windows side and runs
+  `wsl.exe -d <distro> -e claude-continue watch` back into your distro.
+
+  ```powershell
+  schtasks /query /tn claude-continue
+  ```
+
+Flags you pass to `install` are baked into the registered command, so the
+unattended agent runs with the same options you tested with `watch`. A pidfile
+prevents a manual `watch` and the agent from both firing.
 
 ## Migrating from `claude-continue.sh`
 

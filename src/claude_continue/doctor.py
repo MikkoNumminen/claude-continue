@@ -1,17 +1,14 @@
 """Preflight checks: will claude-continue actually work on this machine?
 
-The tool depends on several external pieces that fail quietly (ccusage, node on
-launchd's PATH, iTerm2, the loaded agent). ``doctor`` probes each and reports a
-clear ok / warn / fail so problems surface *before* a window resets, not after.
-
-Each probe is injectable so the checks are unit-testable without touching the
-real environment.
+Platform-aware (macOS / Windows / WSL): the terminal and agent checks adapt to
+the detected OS. Each probe is injectable so the checks are unit-testable
+without touching the real environment.
 """
 
 from __future__ import annotations
 
 import os
-import platform
+import platform as _platform
 import shlex
 import shutil
 from dataclasses import dataclass
@@ -19,6 +16,8 @@ from datetime import datetime, timezone
 
 from . import action as action_mod
 from . import launchd as launchd_mod
+from . import osenv
+from . import scheduler as scheduler_mod
 from . import schedule
 from .ccusage import CcusageUnavailable, get_active_block
 from .config import Config
@@ -42,7 +41,11 @@ def _fmt(dt: datetime) -> str:
 
 
 def _check_python() -> Check:
-    return Check("python", OK, "Python %s" % platform.python_version())
+    return Check("python", OK, "Python %s" % _platform.python_version())
+
+
+def _check_platform() -> Check:
+    return Check("platform", OK, osenv.detect())
 
 
 def _check_ccusage(cfg: Config, probe, now) -> Check:
@@ -64,28 +67,19 @@ def _check_node(cfg: Config, which) -> Check:
         if cfg.at or cfg.every_hours:
             return Check("node", WARN, "node/npx not found — only needed for ccusage auto-detect")
         return Check("node", FAIL, "node/npx not found on PATH — ccusage auto-detect won't work")
-    if launchd_mod.stable_node_dir():
-        return Check("node", OK, "%s (a stable node dir will be on the launchd PATH)" % node)
-    if launchd_mod.is_volatile_node_dir(node):
-        return Check("node", WARN, "%s is version-pinned — re-run `claude-continue install` after upgrading node" % node)
-    return Check("node", OK, "%s (launchd PATH will include %s)" % (node, os.path.dirname(node)))
+    # The version-pinned-PATH concern is launchd-specific (the plist bakes a PATH).
+    # Task Scheduler inherits the live user env, so on Windows just report presence.
+    if osenv.uses_launchd():
+        if launchd_mod.stable_node_dir():
+            return Check("node", OK, "%s (a stable node dir will be on the launchd PATH)" % node)
+        if launchd_mod.is_volatile_node_dir(node):
+            return Check("node", WARN, "%s is version-pinned — re-run `claude-continue install` after upgrading node" % node)
+    return Check("node", OK, node)
 
 
-def _check_iterm(cfg: Config, exists) -> Check:
-    if cfg.exec_cmd:
-        return Check("iterm2", OK, "not needed (--exec headless mode)")
-    if exists(ITERM_APP):
-        return Check("iterm2", OK, "%s present" % ITERM_APP)
-    return Check("iterm2", FAIL, "iTerm2 not found at %s — install it or use --exec" % ITERM_APP)
-
-
-def _check_launchd(status_fn) -> Check:
-    out = status_fn()
-    if out.startswith("not loaded"):
-        return Check("agent", WARN, "not installed (run `claude-continue install` to run unattended)")
-    if "state = running" in out:
-        return Check("agent", OK, "installed and running")
-    return Check("agent", WARN, "installed but not running")
+def _check_agent(describe) -> Check:
+    word, detail = describe()
+    return Check("agent", OK if word == "running" else WARN, detail)
 
 
 def _check_config(cfg: Config) -> Check:
@@ -97,6 +91,8 @@ def _check_config(cfg: Config) -> Check:
                 return Check("config", FAIL, "%s invalid: %s" % (label, e))
     if cfg.exec_cmd:
         action = "exec"
+    elif cfg.keystroke:
+        action = "keystroke -> %r" % cfg.window_title
     elif cfg.session:
         action = "session %r" % cfg.session
     elif cfg.all_sessions:
@@ -112,25 +108,40 @@ def _check_config(cfg: Config) -> Check:
     return Check("config", OK, "action=%s, trigger=%s, buffer=%ds" % (action, trigger, cfg.buffer))
 
 
-def _check_action(cfg: Config, preview, which) -> Check:
+def _check_action(cfg: Config, *, which, exists, preview) -> Check:
+    # Headless exec: must parse and the binary must be resolvable.
     if cfg.exec_cmd:
         try:
             argv = shlex.split(cfg.exec_cmd)
         except ValueError as e:
-            return Check("targets", FAIL, "exec command does not parse: %s" % e)
+            return Check("action", FAIL, "exec command does not parse: %s" % e)
         if not argv:
-            return Check("targets", FAIL, "exec command is empty")
-        found = which(argv[0])
-        if not found:
-            return Check("targets", WARN, "exec binary %r not found on PATH (must be on launchd's PATH too)" % argv[0])
-        return Check("targets", OK, "would run: %s (%s)" % (cfg.exec_cmd, found))
+            return Check("action", FAIL, "exec command is empty")
+        if not which(argv[0]):
+            return Check("action", WARN, "exec binary %r not found on PATH (must also be on the agent's PATH)" % argv[0])
+        return Check("action", OK, "headless: %s" % cfg.exec_cmd)
+
+    plat = osenv.detect()
+    # Capability check for the resume path.
+    if plat == osenv.MACOS:
+        if not exists(ITERM_APP):
+            return Check("action", FAIL, "iTerm2 not found at %s — install it, or use --exec/--keystroke" % ITERM_APP)
+    elif cfg.keystroke:
+        if not (which("powershell.exe") or which("powershell") or which("pwsh")):
+            return Check("action", FAIL, "--keystroke needs PowerShell, not found on PATH")
+    else:
+        return Check("action", WARN, "no resume action on %s — set --exec '<command>' or --keystroke" % plat)
+
+    # Preview what would fire.
     try:
-        names = preview()
+        out = preview()
+    except action_mod.ActionError as e:
+        return Check("action", WARN, str(e))
     except Exception as e:  # noqa: BLE001 - doctor must never raise
-        return Check("targets", WARN, "could not query iTerm2 (%s) — is it running?" % e)
-    if not names:
-        return Check("targets", WARN, "no sessions currently match (filter %s, skip_busy=%s)" % (cfg.filter, cfg.skip_busy))
-    return Check("targets", OK, "%d session(s) currently match: %s" % (len(names), ", ".join(names)))
+        return Check("action", WARN, "preview failed: %s — is the terminal running?" % e)
+    if not out:
+        return Check("action", WARN, "nothing to act on right now (filter %s, skip_busy=%s)" % (cfg.filter, cfg.skip_busy))
+    return Check("action", OK, "%d target(s): %s" % (len(out), ", ".join(out)))
 
 
 def run_checks(
@@ -139,25 +150,25 @@ def run_checks(
     which=shutil.which,
     iterm_exists=os.path.exists,
     ccusage_probe=get_active_block,
-    launchd_status=None,
+    scheduler_describe=None,
     action_preview=None,
     now=None,
 ) -> list:
     """Run every preflight check and return the ordered list of results."""
     now = now or (lambda: datetime.now(timezone.utc))
-    launchd_status = launchd_status or launchd_mod.status
+    scheduler_describe = scheduler_describe or scheduler_mod.describe
     # Delegate the preview to the real action layer so it stays identical to what
     # would actually fire (dry-run never sends keystrokes).
     action_preview = action_preview or (lambda: action_mod.perform(cfg, dry_run=True))
 
     return [
         _check_python(),
+        _check_platform(),
         _check_ccusage(cfg, ccusage_probe, now),
         _check_node(cfg, which),
-        _check_iterm(cfg, iterm_exists),
-        _check_launchd(launchd_status),
+        _check_agent(scheduler_describe),
         _check_config(cfg),
-        _check_action(cfg, action_preview, which),
+        _check_action(cfg, which=which, exists=iterm_exists, preview=action_preview),
     ]
 
 

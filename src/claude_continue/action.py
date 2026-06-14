@@ -1,10 +1,12 @@
 """What to actually *do* at a reset.
 
-Two actions, selected by config:
-- default: broadcast ``continue`` into matching iTerm2 sessions (resumes the
-  user's live, limit-paused sessions).
-- ``exec_cmd`` set: run a headless command (e.g. ``claude -p '<task>'
-  --permission-mode bypassPermissions``) detached — no terminal needed.
+Resolution order:
+1. ``exec_cmd`` set  -> run it headless (cross-platform; the reliable default on
+   Windows/WSL where there's no per-session "type into it" API).
+2. ``keystroke`` set -> type ``text`` into a terminal window
+   (macOS: iTerm2 broadcast; Windows/WSL: PowerShell SendKeys).
+3. otherwise         -> macOS broadcasts to iTerm2 (zero-config resume);
+   Windows/WSL/Linux raise ActionError (set --exec or --keystroke).
 
 All failures surface as ``ActionError`` so the watch loop can degrade to
 re-arm/poll instead of crashing the daemon.
@@ -15,7 +17,7 @@ from __future__ import annotations
 import shlex
 import subprocess
 
-from . import iterm
+from . import iterm, osenv, winterm
 from .config import Config
 
 
@@ -24,10 +26,33 @@ class ActionError(Exception):
 
 
 def perform(cfg: Config, dry_run: bool = False) -> list:
-    """Execute the configured action. Returns a list of human-readable strings
-    describing what was acted on (session names, or the exec command)."""
+    """Execute the configured action. Returns human-readable strings describing
+    what was acted on (session names, the keystroke target, or the exec command)."""
     if cfg.exec_cmd:
         return _run_exec(cfg.exec_cmd, dry_run=dry_run)
+    return _resume(cfg, dry_run=dry_run)
+
+
+def _resume(cfg: Config, dry_run: bool) -> list:
+    plat = osenv.detect()
+    if plat == osenv.MACOS and not cfg.keystroke:
+        return _broadcast_iterm(cfg, dry_run)
+    if cfg.keystroke:
+        if plat == osenv.MACOS:
+            return _broadcast_iterm(cfg, dry_run)  # iTerm2 *is* macOS's keystroke path
+        try:
+            return winterm.send_keystroke(
+                cfg.text, window_title=cfg.window_title, dry_run=dry_run, timeout=float(cfg.timeout)
+            )
+        except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+            raise ActionError("keystroke send failed: %s" % e) from e
+    raise ActionError(
+        "no resume action for this platform (%s) — set --exec '<command>' for a "
+        "headless run, or --keystroke to type into a terminal window" % plat
+    )
+
+
+def _broadcast_iterm(cfg: Config, dry_run: bool) -> list:
     try:
         return iterm.broadcast(
             cfg.text,
@@ -54,15 +79,15 @@ def _run_exec(command: str, dry_run: bool = False) -> list:
     label = "exec: " + command
     if dry_run:
         return [label]
-    # Detach so the headless Claude run outlives this process and doesn't tie up
-    # the watch loop. Output is discarded (the run has its own session log).
+    # Detach so the headless run outlives this process and doesn't tie up the
+    # watch loop. resolve_argv handles Windows .cmd shims (claude.cmd etc.).
     try:
         subprocess.Popen(
-            argv,
+            osenv.resolve_argv(argv),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            start_new_session=True,
+            **osenv.detached_popen_kwargs(),
         )
     except OSError as e:
         raise ActionError("failed to launch exec command %r: %s" % (command, e)) from e
