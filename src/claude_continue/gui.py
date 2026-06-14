@@ -21,6 +21,10 @@ from .config import resolve
 from .lock import AlreadyRunning
 
 _MAX_SESSIONS_SHOWN = 8
+# Poll iTerm faster while watching (status matters then), slower when idle to
+# avoid spawning osascript every few seconds for the whole time the app is open.
+_SESSION_POLL_WATCHING_MS = 5000
+_SESSION_POLL_IDLE_MS = 15000
 
 
 class _FireTap(logging.Handler):
@@ -170,6 +174,8 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
     from tkinter import font as tkfont
 
     controller = WatchController()
+    # Config is snapshotted once at startup; edits to the config file / env take
+    # effect on the next launch, not mid-session.
     app_cfg = resolve()
     poll = {"reset_at": None, "note": "", "busy": False,
             "sessions": None, "sessions_note": "", "sessions_busy": False}
@@ -228,9 +234,9 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
                 else:
                     poll["sessions"] = None
                     poll["sessions_note"] = "macOS/iTerm2 only"
-            except Exception:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001
                 poll["sessions"] = None
-                poll["sessions_note"] = "iTerm2 not running?"
+                poll["sessions_note"] = "iTerm2 query failed: %s" % str(e)[:50]
             finally:
                 poll["sessions_busy"] = False
 
@@ -310,11 +316,12 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
 
     def sessions_loop():
         poll_sessions()
-        root.after(5000, sessions_loop)
+        interval = _SESSION_POLL_WATCHING_MS if controller.is_watching() else _SESSION_POLL_IDLE_MS
+        root.after(interval, sessions_loop)
 
     root.protocol("WM_DELETE_WINDOW", on_close)
     poll_sessions()  # populate the instances panel immediately
     refresh()
     root.after(30000, poll_loop)
-    root.after(5000, sessions_loop)
+    root.after(_SESSION_POLL_IDLE_MS, sessions_loop)
     root.mainloop()
