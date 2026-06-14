@@ -8,7 +8,7 @@ dist/
 
 # PyInstaller build venv + generated spec
 .build-venv/
-*.spec
+/claude-continue.spec
 
 # Runtime artifacts
 *.log

@@ -18,19 +18,24 @@ cd "$REPO"
 VENV="${REPO}/.build-venv"
 APP_NAME="claude-continue"
 BUNDLE_ID="com.mikko.claude-continue"
+PYINSTALLER_VERSION="6.21.0"  # pinned for reproducible builds
 
-echo "==> creating build venv at ${VENV}"
-python3 -m venv "$VENV"
+echo "==> creating a clean build venv at ${VENV}"
+python3 -m venv --clear "$VENV"
 "$VENV/bin/pip" install --upgrade pip >/dev/null
 
-echo "==> installing PyInstaller + the package"
-"$VENV/bin/pip" install pyinstaller .
+echo "==> installing PyInstaller ${PYINSTALLER_VERSION} + the package"
+"$VENV/bin/pip" install "pyinstaller==${PYINSTALLER_VERSION}" .
 
 echo "==> building ${APP_NAME}.app"
+# --collect-submodules guarantees every claude_continue submodule is bundled,
+# so lazily-imported modules (e.g. action, imported inside a click handler)
+# can't go missing from the frozen app.
 "$VENV/bin/pyinstaller" \
   --noconfirm --clean --windowed \
   --name "$APP_NAME" \
   --osx-bundle-identifier "$BUNDLE_ID" \
+  --collect-submodules claude_continue \
   packaging/claude_continue_app.py
 
 echo

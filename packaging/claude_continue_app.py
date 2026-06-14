@@ -1,10 +1,16 @@
-"""Entry point for the bundled macOS .app — launches the GUI directly.
+"""Entry point for the bundled macOS .app.
 
-PyInstaller analyzes the imports from here, so importing claude_continue pulls
-the whole package into the bundle. Double-clicking the .app runs this.
+Routes through the CLI so the frozen executable is a full `claude-continue` too
+(`claude-continue.app/Contents/MacOS/claude-continue status`, etc.), and so
+PyInstaller statically sees every feature module via the cli imports. With no
+arguments — i.e. a double-click — it defaults to the GUI.
 """
 
-from claude_continue.gui import run
+import sys
+
+from claude_continue.cli import main
 
 if __name__ == "__main__":
-    run()
+    if len(sys.argv) == 1:
+        sys.argv.append("gui")  # double-click → open the window
+    sys.exit(main())

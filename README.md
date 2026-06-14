@@ -144,6 +144,13 @@ arm64/x86 matching the machine you build on; PyInstaller can't cross-compile, so
 build on the architecture you'll run. (Windows users: use `pip` + `claude-continue
 gui` for now — a bundled `.exe` would need a Windows build.)
 
+The app is only **ad-hoc signed** (not Developer-ID signed or notarized). A copy
+you build and run on the same machine just works, but a copy you *download or
+copy to another Mac* gets quarantined and Gatekeeper will block first launch
+("cannot be opened because Apple cannot check it for malware"). To clear it:
+right-click → Open the first time, or `xattr -dr com.apple.quarantine
+claude-continue.app`.
+
 ## Choosing what fires
 
 On **macOS** it broadcasts `continue` to iTerm2 sessions whose name contains
