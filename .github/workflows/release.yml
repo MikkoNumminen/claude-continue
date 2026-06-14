@@ -1,0 +1,79 @@
+name: release
+
+# Cut a release by pushing a tag:  git tag v0.2.0 && git push origin v0.2.0
+# Each OS job builds its binary and uploads it straight to the release, so there's
+# no cross-version artifact passing. workflow_dispatch lets you (re)build assets
+# for an existing tag from the Actions tab.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build a release for (e.g. v0.2.0)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ env.TAG }}
+      - name: Create the release if it doesn't exist yet
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists — assets will be added/clobbered."
+          else
+            gh release create "$TAG" --title "claude-continue $TAG" --generate-notes
+          fi
+
+  macos:
+    needs: create-release
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Build claude-continue.app
+        run: ./packaging/build-macos.sh
+      - name: Zip the .app (ditto preserves the bundle + signature)
+        run: ditto -c -k --keepParent dist/claude-continue.app claude-continue-macos-arm64.zip
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" claude-continue-macos-arm64.zip --clobber
+
+  windows:
+    needs: create-release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Build claude-continue.exe
+        shell: pwsh
+        run: .\packaging\build-windows.ps1
+      - name: Name the asset and attach to the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          Copy-Item dist/claude-continue.exe claude-continue-windows-x64.exe
+          gh release upload "$env:TAG" claude-continue-windows-x64.exe --clobber

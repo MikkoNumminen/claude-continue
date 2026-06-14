@@ -30,28 +30,35 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Check for the Windows build script
-        id: check
-        shell: pwsh
-        run: |
-          if (Test-Path packaging/build-windows.ps1) {
-            "exists=true" >> $env:GITHUB_OUTPUT
-          } else {
-            "exists=false" >> $env:GITHUB_OUTPUT
-            Write-Host "packaging/build-windows.ps1 not present on this ref yet — skipping the exe build."
-          }
       - uses: actions/setup-python@v6
-        if: steps.check.outputs.exists == 'true'
         with:
           python-version: "3.11"
       - name: Build claude-continue.exe
-        if: steps.check.outputs.exists == 'true'
         shell: pwsh
         run: .\packaging\build-windows.ps1
       - name: Upload exe artifact
-        if: steps.check.outputs.exists == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: claude-continue-windows-exe
           path: dist/claude-continue.exe
+          if-no-files-found: error
+
+  build-macos-app:
+    name: build macos app
+    needs: test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Build claude-continue.app
+        run: ./packaging/build-macos.sh
+      - name: Zip the .app (ditto preserves the bundle + signature)
+        run: ditto -c -k --keepParent dist/claude-continue.app claude-continue-macos-arm64.zip
+      - name: Upload app artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: claude-continue-macos-app
+          path: claude-continue-macos-arm64.zip
           if-no-files-found: error
