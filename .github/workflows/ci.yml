@@ -1,0 +1,57 @@
+name: ci
+
+on:
+  push:
+    branches: [main, "feat/**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Run tests
+        env:
+          PYTHONPATH: src
+        run: python -m unittest discover -s tests -p "test_*.py"
+
+  build-windows-exe:
+    name: build windows exe
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check for the Windows build script
+        id: check
+        shell: pwsh
+        run: |
+          if (Test-Path packaging/build-windows.ps1) {
+            "exists=true" >> $env:GITHUB_OUTPUT
+          } else {
+            "exists=false" >> $env:GITHUB_OUTPUT
+            Write-Host "packaging/build-windows.ps1 not present on this ref yet — skipping the exe build."
+          }
+      - uses: actions/setup-python@v5
+        if: steps.check.outputs.exists == 'true'
+        with:
+          python-version: "3.11"
+      - name: Build claude-continue.exe
+        if: steps.check.outputs.exists == 'true'
+        shell: pwsh
+        run: .\packaging\build-windows.ps1
+      - name: Upload exe artifact
+        if: steps.check.outputs.exists == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-continue-windows-exe
+          path: dist/claude-continue.exe
+          if-no-files-found: error
