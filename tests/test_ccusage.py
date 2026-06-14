@@ -36,8 +36,8 @@ class TestCommand(unittest.TestCase):
             os.environ[ENV] = self._saved
 
     def test_default_command(self):
-        cmd = _command()  # argv[0] is resolved on PATH (e.g. /usr/.../npx)
-        self.assertIn("npx", os.path.basename(cmd[0]))
+        cmd = _command()  # on Windows, npx.cmd is wrapped as: cmd /c call <...npx.cmd>
+        self.assertTrue(any("npx" in part for part in cmd), cmd)
         self.assertIn("ccusage", cmd)
         self.assertIn("--offline", cmd)
 

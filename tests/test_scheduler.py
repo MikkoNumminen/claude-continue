@@ -10,7 +10,9 @@ from claude_continue.config import Config
 
 class TestInstallDispatch(unittest.TestCase):
     def test_macos_uses_launchd(self):
+        # os.getuid is POSIX-only; mock it so this (forced-macOS) test also runs on Windows
         with mock.patch.dict(os.environ, {osenv.PLATFORM_ENV: "macos"}), \
+             mock.patch("claude_continue.launchd.os.getuid", create=True, return_value=501), \
              mock.patch("claude_continue.scheduler.launchd.node_path_value", return_value="/p"), \
              mock.patch("claude_continue.scheduler.launchd.install", return_value="/x/plist") as li:
             lines = scheduler.install(["claude-continue"], ["--buffer", "120"], Config())

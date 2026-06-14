@@ -58,8 +58,9 @@ class TestRenderPlist(unittest.TestCase):
         self.assertFalse(launchd.is_volatile_node_dir("/opt/homebrew/bin/node"))
 
     def test_stable_node_dir_found(self):
-        with mock.patch("claude_continue.launchd.os.path.exists",
-                        side_effect=lambda p: p == "/opt/homebrew/bin/node"):
+        # match via os.path.join so the mock works on Windows too (\\ vs /)
+        hit = os.path.join("/opt/homebrew/bin", "node")
+        with mock.patch("claude_continue.launchd.os.path.exists", side_effect=lambda p: p == hit):
             self.assertEqual(launchd.stable_node_dir(), "/opt/homebrew/bin")
 
     def test_stable_node_dir_absent(self):
@@ -67,9 +68,9 @@ class TestRenderPlist(unittest.TestCase):
             self.assertIsNone(launchd.stable_node_dir())
 
     def test_node_path_prefers_stable_over_volatile(self):
+        hit = os.path.join("/opt/homebrew/bin", "node")  # \\ vs / safe on Windows
         with mock.patch("claude_continue.launchd.shutil.which", return_value="/Users/x/.nvm/versions/node/v22/bin/node"), \
-             mock.patch("claude_continue.launchd.os.path.exists",
-                        side_effect=lambda p: p == "/opt/homebrew/bin/node"):
+             mock.patch("claude_continue.launchd.os.path.exists", side_effect=lambda p: p == hit):
             parts = launchd.node_path_value().split(":")
         # stable dir comes before the version-pinned nvm dir
         self.assertLess(parts.index("/opt/homebrew/bin"), parts.index("/Users/x/.nvm/versions/node/v22/bin"))
