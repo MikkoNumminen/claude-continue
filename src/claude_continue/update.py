@@ -18,6 +18,7 @@ import json
 import os
 import shlex
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -34,6 +35,52 @@ RELEASES_PAGE = "https://github.com/%s/releases/latest" % REPO
 _UA = {"Accept": "application/vnd.github+json", "User-Agent": "claude-continue-updater"}
 # GitHub serves release assets from these hosts (the download URL redirects).
 _ALLOWED_HOSTS = {"github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"}
+
+# System CA bundles to fall back on when the (frozen-app) default context has
+# none. A PyInstaller .app bundles its own OpenSSL whose compiled-in OPENSSLDIR
+# points at the build machine, so create_default_context() can load ZERO CAs and
+# every HTTPS request dies with "unable to get local issuer certificate". These
+# absolute paths exist on the user's real OS regardless of the bundle.
+_CA_FALLBACKS = (
+    "/etc/ssl/cert.pem",                     # macOS + many *nix
+    "/private/etc/ssl/cert.pem",
+    "/opt/homebrew/etc/openssl@3/cert.pem",  # Homebrew (Apple silicon)
+    "/usr/local/etc/openssl@3/cert.pem",     # Homebrew (Intel)
+    "/etc/pki/tls/certs/ca-bundle.crt",      # RHEL/Fedora
+    "/etc/ssl/certs/ca-certificates.crt",    # Debian/Ubuntu
+)
+
+
+def _ca_count(ctx) -> int:
+    try:
+        return ctx.cert_store_stats().get("x509_ca", 0)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _ssl_context():
+    """A verifying TLS context that still works inside the frozen .app.
+
+    Windows pulls CAs from the system store and a from-source run finds the
+    configured bundle, so the default context is fine there. Only the frozen
+    macOS app tends to load zero CAs — when it does, load the OS system bundle.
+    """
+    ctx = ssl.create_default_context()
+    if _ca_count(ctx) == 0:
+        for path in _CA_FALLBACKS:
+            if os.path.exists(path):
+                try:
+                    ctx.load_verify_locations(cafile=path)
+                except (OSError, ssl.SSLError):
+                    continue
+                if _ca_count(ctx):
+                    break
+    return ctx
+
+
+def _open(req, timeout):
+    """Default opener for check(): urlopen with the frozen-app-safe TLS context."""
+    return urllib.request.urlopen(req, timeout=timeout, context=_ssl_context())
 
 
 class UpdateError(Exception):
@@ -100,7 +147,7 @@ def asset_for_platform(assets):
 
 # --- check ------------------------------------------------------------------
 
-def check(*, timeout: float = 15.0, opener=urllib.request.urlopen, current: str | None = None) -> UpdateInfo:
+def check(*, timeout: float = 15.0, opener=_open, current: str | None = None) -> UpdateInfo:
     """Query the latest release and report whether it's newer than us."""
     current = current or __version__
     try:
@@ -161,7 +208,7 @@ def _verify_digest(path: str, digest: str | None) -> None:
 def _download(url: str, dest: str, timeout: float) -> None:
     _check_url(url)
     req = urllib.request.Request(url, headers={"User-Agent": _UA["User-Agent"]})
-    with urllib.request.urlopen(req, timeout=timeout) as resp, open(dest, "wb") as out:
+    with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as resp, open(dest, "wb") as out:
         shutil.copyfileobj(resp, out)
 
 

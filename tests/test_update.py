@@ -180,6 +180,25 @@ class TestDigestVerify(unittest.TestCase):
             update._verify_digest(self._file(), "md5:deadbeef")
 
 
+class TestSslContext(unittest.TestCase):
+    def test_context_has_cas(self):
+        # the context update.check/_download use must trust real CAs
+        ctx = update._ssl_context()
+        self.assertGreater(ctx.cert_store_stats().get("x509_ca", 0), 0)
+
+    @unittest.skipUnless(any(os.path.exists(p) for p in update._CA_FALLBACKS),
+                         "no system CA bundle present")
+    def test_fallback_bundle_loads_into_empty_context(self):
+        # simulate the frozen-app case: a context that starts with zero CAs, then
+        # gets the system bundle loaded — proves the fallback file is usable.
+        import ssl
+        empty = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        self.assertEqual(empty.cert_store_stats().get("x509_ca", 0), 0)
+        path = next(p for p in update._CA_FALLBACKS if os.path.exists(p))
+        empty.load_verify_locations(cafile=path)
+        self.assertGreater(empty.cert_store_stats().get("x509_ca", 0), 0)
+
+
 class TestUrlGuard(unittest.TestCase):
     def test_rejects_foreign_host(self):
         with self.assertRaises(update.UpdateError):

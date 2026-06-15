@@ -88,9 +88,12 @@ def _check_config(cfg: Config) -> Check:
                 schedule.parse_hhmm(value)
             except ValueError as e:
                 return Check("config", FAIL, "%s invalid: %s" % (label, e))
-    # poll/verify/timeout only drive the ccusage auto-detect path, but
-    # retry_interval ALSO backs off after a failed fire in fixed-schedule mode
-    # (watch.py), so keep checking that one even with --at/--every.
+    # poll_interval / verify_delay only drive the ccusage auto-detect path, but
+    # retry_interval also backs off after a failed fire (watch.py) and timeout
+    # bounds the action subprocess (action.py) even under a fixed schedule.
+    # clamp_timing() floors every interval at watch startup, so the live loop is
+    # safe regardless; here we only surface the one a fixed-schedule run would
+    # actually hit before that — retry_interval — to keep the preflight honest.
     issues = timing_issues(cfg)
     if cfg.at or cfg.every_hours:
         issues = [i for i in issues if i[0] == "retry_interval"]

@@ -10,6 +10,46 @@ def _non_none(d):
     return {k: v for k, v in d.items() if v is not None}
 
 
+class TestUpdateCommand(unittest.TestCase):
+    def _run(self, info, apply=False):
+        from claude_continue import update
+        args = cli.build_parser().parse_args(["update"] + (["--apply"] if apply else []))
+        with mock.patch.object(update, "check", return_value=info):
+            return cli.cmd_update(args)
+
+    def test_up_to_date_returns_zero(self):
+        from claude_continue.update import UpdateInfo
+        self.assertEqual(self._run(UpdateInfo("0.5.1", "v0.5.1", False, None, None)), 0)
+
+    def test_error_returns_one(self):
+        from claude_continue.update import UpdateInfo
+        self.assertEqual(self._run(UpdateInfo("0.5.1", None, False, None, None, error="net")), 1)
+
+    def test_newer_from_source_reports_without_applying(self):
+        from claude_continue import update
+        from claude_continue.update import UpdateInfo
+        info = UpdateInfo("0.5.1", "v0.6.0", True, "a.zip", "https://x")
+        args = cli.build_parser().parse_args(["update", "--apply"])
+        with mock.patch.object(update, "check", return_value=info), \
+             mock.patch.object(update, "is_frozen", return_value=False), \
+             mock.patch.object(update, "apply_update") as ap:
+            rc = cli.cmd_update(args)
+        self.assertEqual(rc, 0)
+        ap.assert_not_called()  # from source -> never auto-applies
+
+    def test_newer_frozen_with_apply_calls_apply_update(self):
+        from claude_continue import update
+        from claude_continue.update import UpdateInfo
+        info = UpdateInfo("0.5.1", "v0.6.0", True, "a.zip", "https://x")
+        args = cli.build_parser().parse_args(["update", "--apply"])
+        with mock.patch.object(update, "check", return_value=info), \
+             mock.patch.object(update, "is_frozen", return_value=True), \
+             mock.patch.object(update, "apply_update", return_value="/Applications/x.app") as ap:
+            rc = cli.cmd_update(args)
+        self.assertEqual(rc, 0)
+        ap.assert_called_once()
+
+
 class TestParser(unittest.TestCase):
     def test_each_subcommand_parses(self):
         p = cli.build_parser()
