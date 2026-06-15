@@ -90,6 +90,8 @@ def _check_config(cfg: Config) -> Check:
                 return Check("config", FAIL, "%s invalid: %s" % (label, e))
     if cfg.exec_cmd:
         action = "exec"
+    elif cfg.tmux:
+        action = "tmux" + (" -> %r" % cfg.session if cfg.session else "")
     elif cfg.keystroke:
         action = "keystroke -> %r" % cfg.window_title
     elif cfg.session:
@@ -120,16 +122,22 @@ def _check_action(cfg: Config, *, which, exists, preview) -> Check:
             return Check("action", WARN, "exec binary %r not found on PATH (must also be on the agent's PATH)" % argv[0])
         return Check("action", OK, "headless: %s" % cfg.exec_cmd)
 
-    plat = osenv.detect()
-    # Capability check for the resume path.
-    if plat == osenv.MACOS:
-        if not exists(ITERM_APP):
-            return Check("action", FAIL, "iTerm2 not found at %s — install it, or use --exec/--keystroke" % ITERM_APP)
-    elif cfg.keystroke:
-        if not (which("powershell.exe") or which("powershell") or which("pwsh")):
-            return Check("action", FAIL, "--keystroke needs PowerShell, not found on PATH")
+    # tmux is terminal-agnostic and checked before the platform paths (matches
+    # action._resume), so a non-iTerm2 / Linux user can opt in anywhere.
+    if cfg.tmux:
+        if not which("tmux"):
+            return Check("action", FAIL, "--tmux needs tmux, not found on PATH")
     else:
-        return Check("action", WARN, "no resume action on %s — set --exec '<command>' or --keystroke" % plat)
+        plat = osenv.detect()
+        # Capability check for the resume path.
+        if plat == osenv.MACOS:
+            if not exists(ITERM_APP):
+                return Check("action", FAIL, "iTerm2 not found at %s — install it, or use --exec/--tmux/--keystroke" % ITERM_APP)
+        elif cfg.keystroke:
+            if not (which("powershell.exe") or which("powershell") or which("pwsh")):
+                return Check("action", FAIL, "--keystroke needs PowerShell, not found on PATH")
+        else:
+            return Check("action", WARN, "no resume action on %s — set --exec '<command>', --tmux or --keystroke" % plat)
 
     # Preview what would fire.
     try:

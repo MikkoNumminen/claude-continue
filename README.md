@@ -34,8 +34,11 @@ portable; only the "fire" action and the unattended agent differ per platform
   Windows Task Scheduler (Windows/WSL).
 - **A way to act at reset**, by platform:
   - macOS — **iTerm2** (default: broadcast `continue` to live sessions).
+  - Any terminal (macOS/Linux) — **`--tmux`** if you run Claude inside tmux
+    (terminal-agnostic; needs `tmux` on PATH).
   - Windows / WSL — **headless `--exec`** (recommended), or **`--keystroke`**
     (opt-in; needs PowerShell, which ships with Windows).
+  - Any platform — **headless `--exec`** (no terminal needed at all).
 - **Node + `ccusage`** for auto-detecting the reset time. `npx ccusage` works
   with no global install. Not needed if you only use the fixed-schedule mode
   (`--at` / `--every`).
@@ -135,9 +138,10 @@ config (e.g. "sends 'continue' to idle Claude sessions in iTerm2 … Busy
 sessions are skipped") so there are no surprises. That line is shown in the
 idle state and hidden once watching.
 
-It also shows a live **Claude instances** panel (each iTerm2 session's
-status — working/idle — and, while watching, whether it'll be resumed or
-skipped). *macOS only*; on Windows the panel notes it isn't available.
+It also shows a live **Claude instances** panel (each session's status —
+working/idle — and, while watching, whether it'll be resumed or skipped). It
+reads iTerm2 on macOS, or tmux panes when you run in `--tmux` mode (any
+platform); otherwise the panel notes it isn't available.
 
 The **⟳ Update** button checks the latest GitHub release and, if a newer one
 exists, downloads it and restarts the app in place (the standalone `.app`/`.exe`
@@ -209,6 +213,23 @@ claude-continue watch --filter claude,agent --text "continue"
 claude-continue watch --exec "claude -p 'resume the migration' --permission-mode bypassPermissions"
 ```
 
+**Not on iTerm2? Use tmux (`--tmux`).** The iTerm2 broadcast is macOS+iTerm2 only.
+If you run Claude inside **tmux** — in *any* terminal (Terminal.app, Ghostty, Warp,
+kitty, GNOME Terminal, Konsole, …), on **macOS or Linux** — `--tmux` types
+`continue` into matching panes via `tmux send-keys`. It targets panes precisely (no
+focus-stealing, no Accessibility permission) and honors the same `--session` /
+`--filter` / `--all` / `--force` gating:
+
+```bash
+# resume Claude panes running in tmux (works in any terminal, macOS + Linux)
+claude-continue watch --tmux
+```
+
+Because tmux has no `is processing` flag, "busy" is detected by reading the pane's
+visible content for the marker Claude shows while working (default `esc to
+interrupt`); skip-busy then leaves mid-turn panes alone. Tune it with
+`--tmux-busy-pattern "<text>"` if your Claude build shows something different.
+
 On **Windows / WSL** there is no per-session "type into it" API, so the
 **headless `--exec`** path above is the reliable default. If you want to mimic
 the macOS behavior of typing into a live terminal, opt into keystroke mode:
@@ -243,7 +264,8 @@ Precedence: **CLI flags > env vars > config file > defaults.**
 Key settings: `buffer` (90s after reset before firing), `verify_delay` (90s),
 `poll_interval` (600s while idle), `retry_interval` (300s) / `retry_cap` (6),
 `skip_busy` (true), `filter`, `text`, `exec_cmd`, `session`, `timeout` (30s),
-and (Windows/WSL) `keystroke` (false) / `window_title` ("Windows Terminal").
+`tmux` (false) / `tmux_busy_pattern` ("esc to interrupt"), and (Windows/WSL)
+`keystroke` (false) / `window_title` ("Windows Terminal").
 
 ## Two honest caveats
 
@@ -263,15 +285,17 @@ and (Windows/WSL) `keystroke` (false) / `window_title` ("Windows Terminal").
 
 ## Platform support
 
-| | macOS | Windows | WSL |
-| --- | --- | --- | --- |
-| Reset detection (`ccusage`) | ✅ | ✅ | ✅ |
-| Default action | iTerm2 broadcast | `--exec` headless | `--exec` headless |
-| Resume-a-live-session | iTerm2 (built in) | `--keystroke` (opt-in) | `--keystroke` (opt-in) |
-| Unattended agent | launchd | Task Scheduler | Task Scheduler → `wsl.exe` |
+| | macOS | Windows | WSL | Linux |
+| --- | --- | --- | --- | --- |
+| Reset detection (`ccusage`) | ✅ | ✅ | ✅ | ✅ |
+| Default action | iTerm2 broadcast | `--exec` headless | `--exec` headless | `--exec` headless |
+| Resume-a-live-session | iTerm2, or `--tmux` | `--keystroke` (opt-in) | `--keystroke` (opt-in) | `--tmux` |
+| Any-terminal resume (`--tmux`) | ✅ (in tmux) | — | — | ✅ (in tmux) |
+| Unattended agent | launchd | Task Scheduler | Task Scheduler → `wsl.exe` | — |
 
 `claude-continue doctor` reports the detected platform and checks the right
-pieces for it.
+pieces for it. (Linux has no bundled unattended agent yet — run `watch` under your
+own service manager, e.g. a systemd user unit.)
 
 ## How it stays unattended
 

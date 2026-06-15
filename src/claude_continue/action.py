@@ -3,10 +3,12 @@
 Resolution order:
 1. ``exec_cmd`` set  -> run it headless (cross-platform; the reliable default on
    Windows/WSL where there's no per-session "type into it" API).
-2. ``keystroke`` set -> type ``text`` into a terminal window
+2. ``tmux`` set      -> ``tmux send-keys`` into matching panes (terminal-agnostic:
+   any terminal on macOS/Linux, as long as Claude runs inside tmux).
+3. ``keystroke`` set -> type ``text`` into a terminal window
    (macOS: iTerm2 broadcast; Windows/WSL: PowerShell SendKeys).
-3. otherwise         -> macOS broadcasts to iTerm2 (zero-config resume);
-   Windows/WSL/Linux raise ActionError (set --exec or --keystroke).
+4. otherwise         -> macOS broadcasts to iTerm2 (zero-config resume);
+   Windows/WSL/Linux raise ActionError (set --exec, --tmux or --keystroke).
 
 All failures surface as ``ActionError`` so the watch loop can degrade to
 re-arm/poll instead of crashing the daemon.
@@ -16,7 +18,7 @@ from __future__ import annotations
 
 import subprocess
 
-from . import iterm, osenv, winterm
+from . import iterm, osenv, tmux, winterm
 from .config import Config
 
 
@@ -34,6 +36,10 @@ def perform(cfg: Config, dry_run: bool = False) -> list:
 
 def _resume(cfg: Config, dry_run: bool) -> list:
     plat = osenv.detect()
+    # tmux is terminal-agnostic and works on macOS/Linux alike — check it first so
+    # a non-iTerm2 (or Linux) user can opt in regardless of platform.
+    if cfg.tmux:
+        return _broadcast_tmux(cfg, dry_run)
     # macOS resumes by broadcasting into iTerm2 (its keystroke equivalent).
     if plat == osenv.MACOS:
         return _broadcast_iterm(cfg, dry_run)
@@ -47,8 +53,26 @@ def _resume(cfg: Config, dry_run: bool) -> list:
             raise ActionError("keystroke send failed: %s" % e) from e
     raise ActionError(
         "no resume action for this platform (%s) — set --exec '<command>' for a "
-        "headless run%s" % (plat, ", or --keystroke" if plat in (osenv.WINDOWS, osenv.WSL) else "")
+        "headless run, or --tmux to resume Claude panes running inside tmux%s"
+        % (plat, ", or --keystroke" if plat in (osenv.WINDOWS, osenv.WSL) else "")
     )
+
+
+def _broadcast_tmux(cfg: Config, dry_run: bool) -> list:
+    try:
+        return tmux.broadcast(
+            cfg.text,
+            cfg.filter,
+            skip_busy=cfg.skip_busy,
+            session=cfg.session,
+            dry_run=dry_run,
+            all_sessions=cfg.all_sessions,
+            force=cfg.force,
+            busy_pattern=cfg.tmux_busy_pattern,
+            timeout=float(cfg.timeout),
+        )
+    except (tmux.TmuxError, OSError, subprocess.SubprocessError) as e:
+        raise ActionError("tmux send failed: %s" % e) from e
 
 
 def _broadcast_iterm(cfg: Config, dry_run: bool) -> list:

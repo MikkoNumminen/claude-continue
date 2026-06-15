@@ -17,7 +17,7 @@ CONFIG_PATH = Path.home() / ".config" / "claude-continue" / "config.json"
 # Default session name-substrings to target (matches the original script).
 DEFAULT_FILTER = ["claude", "✳"]
 
-_BOOL_FIELDS = {"skip_busy", "all_sessions", "force", "keystroke"}
+_BOOL_FIELDS = {"skip_busy", "all_sessions", "force", "keystroke", "tmux"}
 _INT_FIELDS = {
     "buffer",
     "verify_delay",
@@ -42,6 +42,8 @@ class Config:
     force: bool = False  # with all_sessions: also drop skip_busy
     keystroke: bool = False  # Windows/WSL: type `text` into a terminal window (opt-in)
     window_title: str = "Windows Terminal"  # window to target in keystroke mode
+    tmux: bool = False  # resume via `tmux send-keys` — terminal-agnostic (any terminal, macOS/Linux)
+    tmux_busy_pattern: str = "esc to interrupt"  # pane content marking a mid-turn (busy) session
 
     # --- timing ---
     buffer: int = 90  # seconds past the reset before firing

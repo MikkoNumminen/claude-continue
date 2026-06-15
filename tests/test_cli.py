@@ -67,6 +67,20 @@ class TestOverridesRoundTrip(unittest.TestCase):
     def test_launchd_only_fields_not_emitted(self):
         self.assertEqual(cli.overrides_to_argv({"node_path": "/x", "log_path": "/y"}), [])
 
+    def test_tmux_flags_roundtrip(self):
+        p = cli.build_parser()
+        install_args = p.parse_args(["install", "--tmux", "--tmux-busy-pattern", "Working…"])
+        argv = cli.overrides_to_argv(cli.build_overrides(install_args))
+        self.assertIn("--tmux", argv)
+        self.assertIn("--tmux-busy-pattern", argv)
+        watch_args = p.parse_args(["watch"] + argv)
+        self.assertTrue(watch_args.tmux)
+        self.assertEqual(watch_args.tmux_busy_pattern, "Working…")
+
+    def test_tmux_true_emits_bare_flag_not_value(self):
+        argv = cli.overrides_to_argv({"tmux": True})
+        self.assertEqual(argv, ["--tmux"])  # not ["--tmux", "True"]
+
 
 class TestFireCommand(unittest.TestCase):
     def test_fire_dry_run_calls_perform_with_dry_run(self):

@@ -15,7 +15,7 @@ import logging
 import threading
 from datetime import datetime, timezone
 
-from . import __version__, ccusage, iterm, osenv, update, watch
+from . import __version__, ccusage, iterm, osenv, tmux, update, watch
 from .action import ActionError
 from .config import resolve
 from .lock import AlreadyRunning
@@ -190,7 +190,12 @@ def watch_explanation(cfg) -> str:
     when = "When you start watching, claude-continue waits for your Claude usage window to reset, then "
     if cfg.exec_cmd:
         return when + ("runs `%s` headlessly — so work resumes the instant your quota refreshes." % cfg.exec_cmd)
-    target = ("the “%s” session" % cfg.session) if cfg.session else "idle Claude sessions in iTerm2"
+    if cfg.session:
+        target = "the “%s” session" % cfg.session
+    elif cfg.tmux:
+        target = "Claude panes running in tmux"
+    else:
+        target = "idle Claude sessions in iTerm2"
     body = ('sends “%s” to %s — so paused work resumes the instant your quota refreshes. ' % (cfg.text, target))
     if cfg.force:
         body += "Busy sessions are nudged too (force is on)."
@@ -267,7 +272,14 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
 
         def work():
             try:
-                if osenv.is_macos():
+                if app_cfg.tmux:  # terminal-agnostic; works on any platform
+                    poll["sessions"] = tmux.list_sessions(
+                        app_cfg.filter, session=app_cfg.session,
+                        all_sessions=app_cfg.all_sessions,
+                        busy_pattern=app_cfg.tmux_busy_pattern, timeout=float(app_cfg.timeout),
+                    )
+                    poll["sessions_note"] = ""
+                elif osenv.is_macos():
                     poll["sessions"] = iterm.list_sessions(
                         app_cfg.filter, session=app_cfg.session,
                         all_sessions=app_cfg.all_sessions, timeout=float(app_cfg.timeout),
@@ -275,10 +287,11 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
                     poll["sessions_note"] = ""
                 else:
                     poll["sessions"] = None
-                    poll["sessions_note"] = "macOS/iTerm2 only"
+                    poll["sessions_note"] = "macOS/iTerm2 only (or set tmux mode)"
             except Exception as e:  # noqa: BLE001
                 poll["sessions"] = None
-                poll["sessions_note"] = "iTerm2 query failed: %s" % str(e)[:50]
+                poll["sessions_note"] = "%s query failed: %s" % (
+                    "tmux" if app_cfg.tmux else "iTerm2", str(e)[:50])
             finally:
                 poll["sessions_busy"] = False
 
