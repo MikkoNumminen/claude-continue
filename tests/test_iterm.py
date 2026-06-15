@@ -67,5 +67,24 @@ class TestBuildApplescript(unittest.TestCase):
         self.assertIn(r'contains "a\"b"', s)
 
 
+class TestListSessions(unittest.TestCase):
+    def test_build_uses_filter_status_and_hoisted_tab(self):
+        s = iterm.build_list_applescript(["claude", "✳"])
+        self.assertIn('sessionName contains "claude"', s)
+        self.assertIn("is processing of s", s)
+        self.assertIn("set sepChar to tab", s)  # tab captured OUTSIDE the tell block
+        self.assertIn("set outLines to {}", s)   # not `rows` (an iTerm2 term)
+
+    def test_all_sessions_matches_true(self):
+        self.assertIn("if true then", iterm.build_list_applescript([], all_sessions=True))
+
+    def test_parse_output_to_name_status(self):
+        lines = ["working\tA (claude)", "idle\t✳ B", "no-tab-line"]
+        self.assertEqual(
+            iterm._parse_list_output(lines),
+            [("A (claude)", "working"), ("✳ B", "idle")],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

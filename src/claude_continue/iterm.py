@@ -129,3 +129,57 @@ def broadcast(
         force=force,
     )
     return run_applescript(script, timeout=timeout)
+
+
+def build_list_applescript(name_filter, *, session: str | None = None, all_sessions: bool = False) -> str:
+    """AppleScript listing each matching session as ``status<TAB>name`` lines,
+    where status is "working" (mid-turn) or "idle"."""
+    match_expr = _filter_expr(name_filter, session, all_sessions)
+    return (
+        # `tab` is an iTerm2 term inside the tell block (windows have tabs), so
+        # capture the tab CHARACTER out here where it means the separator.
+        "set sepChar to tab\n"
+        'tell application "iTerm2"\n'
+        "  set outLines to {}\n"  # not `rows` — that's an iTerm2 session property
+        "  repeat with w in windows\n"
+        "    repeat with t in tabs of w\n"
+        "      repeat with s in sessions of t\n"
+        "        try\n"
+        "          set sessionName to name of s\n"
+        "          if " + match_expr + " then\n"
+        '            set procStatus to "working"\n'
+        "            if (is processing of s) is false then\n"
+        '              set procStatus to "idle"\n'
+        "            end if\n"
+        "            set end of outLines to (procStatus & sepChar & sessionName)\n"
+        "          end if\n"
+        "        end try\n"
+        "      end repeat\n"
+        "    end repeat\n"
+        "  end repeat\n"
+        "  set AppleScript's text item delimiters to linefeed\n"
+        "  return outLines as text\n"
+        "end tell\n"
+    )
+
+
+def _parse_list_output(lines) -> list:
+    """Parse ``status\\tname`` lines into (name, status) tuples."""
+    out = []
+    for ln in lines:
+        if "\t" in ln:
+            status, name = ln.split("\t", 1)
+            out.append((name, status))
+    return out
+
+
+def list_sessions(
+    name_filter,
+    *,
+    session: str | None = None,
+    all_sessions: bool = False,
+    timeout: float = 30.0,
+) -> list:
+    """Return [(name, status)] for matching iTerm2 sessions; status ∈ {working, idle}."""
+    script = build_list_applescript(name_filter, session=session, all_sessions=all_sessions)
+    return _parse_list_output(run_applescript(script, timeout=timeout))

@@ -5,7 +5,8 @@ import unittest
 import _support  # noqa: F401
 
 from claude_continue.action import ActionError
-from claude_continue.gui import WatchController
+from claude_continue.config import Config
+from claude_continue.gui import WatchController, format_sessions
 from claude_continue.lock import AlreadyRunning
 
 
@@ -106,6 +107,49 @@ class TestWatchController(unittest.TestCase):
         self.assertEqual(c.fires, 1)
         self.assertIsNotNone(c.last_fired)
         c.stop(timeout=2)
+
+
+class TestFormatSessions(unittest.TestCase):
+    def test_none_shows_checking(self):
+        self.assertIn("checking", format_sessions(None, "", watching=False, cfg=Config()))
+
+    def test_none_shows_note(self):
+        self.assertIn("not running", format_sessions(None, "iTerm2 not running?", watching=False, cfg=Config()))
+
+    def test_empty(self):
+        self.assertIn("none found", format_sessions([], "", watching=False, cfg=Config()))
+
+    def test_not_watching_lists_status_without_affect(self):
+        out = format_sessions([("A", "working"), ("B", "idle")], "", watching=False, cfg=Config())
+        self.assertIn("working", out)
+        self.assertIn("idle", out)
+        self.assertIn("A", out)
+        self.assertNotIn("will resume", out)
+        self.assertNotIn("skipped", out)
+
+    def test_watching_marks_idle_resume_and_busy_skipped(self):
+        out = format_sessions([("A", "working"), ("B", "idle")], "", watching=True, cfg=Config())
+        self.assertIn("will resume", out)       # idle session
+        self.assertIn("skipped (busy)", out)    # working session, skip_busy default
+
+    def test_watching_force_resumes_busy(self):
+        out = format_sessions([("A", "working")], "", watching=True, cfg=Config(force=True))
+        self.assertIn("will resume", out)
+        self.assertNotIn("skipped", out)
+
+    def test_watching_no_skip_busy_resumes_busy(self):
+        out = format_sessions([("A", "working")], "", watching=True, cfg=Config(skip_busy=False))
+        self.assertIn("will resume", out)
+
+    def test_watching_exec_mode_is_headless(self):
+        out = format_sessions([("A", "idle")], "", watching=True, cfg=Config(exec_cmd="claude -p go"))
+        self.assertIn("headless", out)
+        self.assertNotIn("will resume", out)
+
+    def test_long_list_truncated(self):
+        many = [("S%d" % i, "idle") for i in range(12)]
+        out = format_sessions(many, "", watching=False, cfg=Config())
+        self.assertIn("...and 4 more", out)  # 12 - 8
 
 
 if __name__ == "__main__":

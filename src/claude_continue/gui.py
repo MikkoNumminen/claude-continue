@@ -15,10 +15,16 @@ import logging
 import threading
 from datetime import datetime, timezone
 
-from . import ccusage, watch
+from . import ccusage, iterm, osenv, watch
 from .action import ActionError
 from .config import resolve
 from .lock import AlreadyRunning
+
+_MAX_SESSIONS_SHOWN = 8
+# Poll iTerm faster while watching (status matters then), slower when idle to
+# avoid spawning osascript every few seconds for the whole time the app is open.
+_SESSION_POLL_WATCHING_MS = 5000
+_SESSION_POLL_IDLE_MS = 15000
 
 
 class _FireTap(logging.Handler):
@@ -128,6 +134,39 @@ class WatchController:
                 self._last_fired = datetime.now()
 
 
+def format_sessions(sessions, note, *, watching, cfg) -> str:
+    """Render the 'Claude instances' panel shown above the button.
+
+    ``sessions`` is a list of (name, status) where status is "working" or "idle",
+    or None when unavailable. When watching, each row is annotated with whether
+    the watcher will affect it — mirroring the broadcast's skip-busy logic
+    (idle sessions get a `continue`; busy ones are skipped).
+    """
+    if sessions is None:
+        return "Claude instances: " + (note or "checking…")
+    if not sessions:
+        return "Claude instances: none found"
+
+    exec_mode = bool(cfg.exec_cmd)
+    effective_skip_busy = cfg.skip_busy and not cfg.force
+    lines = ["Claude instances (%d):" % len(sessions)]
+    for name, status in sessions[:_MAX_SESSIONS_SHOWN]:
+        marker = "●" if status == "working" else "○"
+        if watching:
+            if exec_mode:
+                affect = "(headless run)"
+            elif (not effective_skip_busy) or status != "working":
+                affect = "-> will resume"
+            else:
+                affect = "-- skipped (busy)"
+            lines.append("  %s %-7s %-17s %s" % (marker, status, affect, name))
+        else:
+            lines.append("  %s %-7s %s" % (marker, status, name))
+    if len(sessions) > _MAX_SESSIONS_SHOWN:
+        lines.append("  ...and %d more" % (len(sessions) - _MAX_SESSIONS_SHOWN))
+    return "\n".join(lines)
+
+
 def run() -> None:  # pragma: no cover - exercised manually; logic lives in WatchController
     """Open the toggle window. Imports tkinter lazily so the rest of the package
     doesn't require a display."""
@@ -135,23 +174,31 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
     from tkinter import font as tkfont
 
     controller = WatchController()
-    poll = {"reset_at": None, "note": "", "busy": False}
+    # Config is snapshotted once at startup; edits to the config file / env take
+    # effect on the next launch, not mid-session.
+    app_cfg = resolve()
+    poll = {"reset_at": None, "note": "", "busy": False,
+            "sessions": None, "sessions_note": "", "sessions_busy": False}
 
     root = tk.Tk()
     root.title("claude-continue")
-    root.geometry("380x220")
-    root.resizable(False, False)
+    root.geometry("470x400")
+    root.resizable(True, True)
+    root.minsize(430, 320)
 
     dot = tk.Label(root, text="○", font=tkfont.Font(size=30))
-    dot.pack(pady=(20, 0))
+    dot.pack(pady=(18, 0))
     status = tk.Label(root, text="Idle", font=tkfont.Font(size=15, weight="bold"))
     status.pack()
     detail = tk.Label(root, text="press Start to watch the quota", fg="#666")
-    detail.pack(pady=(2, 14))
+    detail.pack(pady=(2, 10))
+    sessions_label = tk.Label(root, text="Claude instances: checking…",
+                              font="TkFixedFont", justify="left", anchor="w")
+    sessions_label.pack(fill="x", padx=16, pady=(0, 12))
     button = tk.Button(root, text="▶  Start watching", width=22, height=2)
     button.pack()
-    note = tk.Label(root, text="", fg="#a00", wraplength=340)
-    note.pack(pady=(10, 0))
+    note = tk.Label(root, text="", fg="#a00", wraplength=420)
+    note.pack(pady=(8, 0))
 
     def poll_ccusage():
         if poll["busy"]:
@@ -168,6 +215,30 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
                 poll["note"] = "ccusage unavailable"
             finally:
                 poll["busy"] = False
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def poll_sessions():
+        if poll["sessions_busy"]:
+            return
+        poll["sessions_busy"] = True
+
+        def work():
+            try:
+                if osenv.is_macos():
+                    poll["sessions"] = iterm.list_sessions(
+                        app_cfg.filter, session=app_cfg.session,
+                        all_sessions=app_cfg.all_sessions, timeout=float(app_cfg.timeout),
+                    )
+                    poll["sessions_note"] = ""
+                else:
+                    poll["sessions"] = None
+                    poll["sessions_note"] = "macOS/iTerm2 only"
+            except Exception as e:  # noqa: BLE001
+                poll["sessions"] = None
+                poll["sessions_note"] = "iTerm2 query failed: %s" % str(e)[:50]
+            finally:
+                poll["sessions_busy"] = False
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -212,20 +283,22 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
             detail.config(text="press Start to watch the quota")
             button.config(text="▶  Start watching", state="normal")
             note.config(text="")
+        sessions_label.config(text=format_sessions(
+            poll["sessions"], poll["sessions_note"],
+            watching=controller.is_watching(), cfg=app_cfg))
         root.after(1000, refresh)
 
     def toggle():
         if controller.is_watching():
             controller.request_stop()  # non-blocking; UI shows "Stopping…" until the worker exits
         else:
-            cfg = resolve()
             try:
                 from . import action
-                action.perform(cfg, dry_run=True)  # validate up front; fail clearly
+                action.perform(app_cfg, dry_run=True)  # validate up front; fail clearly
             except ActionError as e:
                 note.config(text=str(e), fg="#a00")
                 return
-            controller.start(cfg)
+            controller.start(app_cfg)
             poll_ccusage()
 
     button.config(command=toggle)
@@ -241,7 +314,14 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
         controller.request_stop()
         root.destroy()
 
+    def sessions_loop():
+        poll_sessions()
+        interval = _SESSION_POLL_WATCHING_MS if controller.is_watching() else _SESSION_POLL_IDLE_MS
+        root.after(interval, sessions_loop)
+
     root.protocol("WM_DELETE_WINDOW", on_close)
+    poll_sessions()  # populate the instances panel immediately
     refresh()
     root.after(30000, poll_loop)
+    root.after(_SESSION_POLL_IDLE_MS, sessions_loop)
     root.mainloop()
