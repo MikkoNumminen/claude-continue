@@ -186,6 +186,15 @@ class TestSslContext(unittest.TestCase):
         ctx = update._ssl_context()
         self.assertGreater(ctx.cert_store_stats().get("x509_ca", 0), 0)
 
+    def test_frozen_merges_system_bundle_and_still_verifies(self):
+        # when frozen we additively merge the OS bundle even if defaults loaded
+        # some CAs; the context must still trust real CAs (and never fewer)
+        with mock.patch.object(update, "is_frozen", return_value=True):
+            ctx = update._ssl_context()
+        self.assertGreater(ctx.cert_store_stats().get("x509_ca", 0), 0)
+        self.assertTrue(ctx.check_hostname)               # verification not weakened
+        self.assertEqual(ctx.verify_mode, __import__("ssl").CERT_REQUIRED)
+
     @unittest.skipUnless(any(os.path.exists(p) for p in update._CA_FALLBACKS),
                          "no system CA bundle present")
     def test_fallback_bundle_loads_into_empty_context(self):
@@ -273,6 +282,25 @@ class TestMacosRollback(unittest.TestCase):
 
         # old bundle is back, intact; no orphaned .old
         self.assertTrue(os.path.exists(os.path.join(bundle, "Contents", "old-marker")))
+        self.assertFalse(os.path.exists(bundle + ".old"))
+
+
+class TestApplyContract(unittest.TestCase):
+    def test_failed_extract_raises_updateerror_not_raw(self):
+        # honors apply_update's "raises UpdateError on any problem" contract, so
+        # `claude-continue update --apply` reports cleanly instead of a traceback
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        bundle = os.path.join(tmp, "install", "claude-continue.app")
+        os.makedirs(bundle)  # exists, but extract will fail before any rename
+
+        def fail_run(args, **kw):
+            raise subprocess.CalledProcessError(1, args)  # ditto extract blows up
+
+        with mock.patch.object(update.subprocess, "run", fail_run):
+            with self.assertRaises(update.UpdateError):
+                update._apply_macos("/nope.zip", os.path.join(tmp, "work"), False, bundle)
+        self.assertTrue(os.path.isdir(bundle))            # untouched: extract failed first
         self.assertFalse(os.path.exists(bundle + ".old"))
 
 

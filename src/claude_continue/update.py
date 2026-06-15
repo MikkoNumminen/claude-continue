@@ -66,15 +66,18 @@ def _ssl_context():
     macOS app tends to load zero CAs — when it does, load the OS system bundle.
     """
     ctx = ssl.create_default_context()
-    if _ca_count(ctx) == 0:
+    # In a frozen app the bundled OpenSSL may load ZERO CAs, or a stale/partial
+    # bundle missing a needed root — so when frozen, additively merge the OS
+    # system bundle. load_verify_locations only ADDS trust anchors; it never
+    # weakens the (still hostname- and chain-verifying) context.
+    if is_frozen() or _ca_count(ctx) == 0:
         for path in _CA_FALLBACKS:
             if os.path.exists(path):
                 try:
                     ctx.load_verify_locations(cafile=path)
                 except (OSError, ssl.SSLError):
                     continue
-                if _ca_count(ctx):
-                    break
+                break  # one system bundle (e.g. /etc/ssl/cert.pem) is enough
     return ctx
 
 
@@ -255,13 +258,22 @@ def _apply_macos(zip_path: str, tmp: str, relaunch: bool, bundle_override: str |
     bundle = bundle_override or macos_bundle_path()
     if not bundle:
         raise UpdateError("couldn't locate the .app bundle to replace")
-    subprocess.run(["ditto", "-x", "-k", zip_path, tmp], check=True)
+    # Honor apply_update's "raises UpdateError on any problem" contract: ditto and
+    # rename can raise CalledProcessError/OSError, which the CLI would otherwise
+    # surface as a raw traceback (the GUI worker's broad except hid it).
+    try:
+        subprocess.run(["ditto", "-x", "-k", zip_path, tmp], check=True)
+    except (OSError, subprocess.SubprocessError) as e:
+        raise UpdateError("failed to extract the update: %s" % e) from e
     new_app = os.path.join(tmp, "claude-continue.app")
     if not os.path.isdir(new_app):
         raise UpdateError("update archive didn't contain claude-continue.app")
     backup = bundle + ".old"
     shutil.rmtree(backup, ignore_errors=True)
-    os.rename(bundle, backup)  # macOS lets us move an in-use bundle aside
+    try:
+        os.rename(bundle, backup)  # macOS lets us move an in-use bundle aside
+    except OSError as e:
+        raise UpdateError("couldn't move the current app aside: %s" % e) from e
     try:
         subprocess.run(["ditto", new_app, bundle], check=True)
     except Exception as e:  # noqa: BLE001 - roll back to the old bundle
@@ -309,7 +321,10 @@ def windows_swap_script(new_exe: str, target_exe: str, pid: int, relaunch: bool)
 def _apply_windows(new_exe: str, relaunch: bool) -> str:
     target = os.path.realpath(sys.executable)
     script_path = os.path.join(tempfile.gettempdir(), "claude-continue-update.cmd")
-    with open(script_path, "w") as f:
-        f.write(windows_swap_script(new_exe, target, os.getpid(), relaunch))
-    subprocess.Popen(["cmd", "/c", script_path], **osenv.detached_popen_kwargs())
+    try:
+        with open(script_path, "w") as f:
+            f.write(windows_swap_script(new_exe, target, os.getpid(), relaunch))
+        subprocess.Popen(["cmd", "/c", script_path], **osenv.detached_popen_kwargs())
+    except (OSError, subprocess.SubprocessError) as e:
+        raise UpdateError("couldn't launch the Windows update helper: %s" % e) from e
     return target
