@@ -136,6 +136,47 @@ class TestCheck(unittest.TestCase):
         self.assertIsNone(info.latest)
 
 
+class _FlakyOpener:
+    """Fails the first `fail_times` calls with `exc`, then serves `payload`."""
+    def __init__(self, fail_times, payload, exc):
+        self.fail_times = fail_times
+        self.payload = payload
+        self.exc = exc
+        self.calls = 0
+
+    def __call__(self, req, timeout=None):
+        self.calls += 1
+        if self.calls <= self.fail_times:
+            raise self.exc
+        return _FakeResp(self.payload)
+
+
+class TestCheckRetry(unittest.TestCase):
+    def _http504(self):
+        import urllib.error
+        return urllib.error.HTTPError("http://x", 504, "Gateway Timeout", {}, None)
+
+    def test_transient_then_success(self):
+        op = _FlakyOpener(2, {"tag_name": "v9.9.9", "assets": []}, self._http504())
+        with _ForcePlatform("macos"):
+            info = update.check(opener=op, current="0.0.0", sleep=lambda *_: None)
+        self.assertEqual(op.calls, 3)            # 2 × 504, then success
+        self.assertEqual(info.latest, "v9.9.9")
+        self.assertIsNone(info.error)
+
+    def test_transient_exhausts_then_reports(self):
+        op = _FlakyOpener(99, {}, self._http504())
+        info = update.check(opener=op, current="0.0.0", attempts=2, sleep=lambda *_: None)
+        self.assertEqual(op.calls, 2)            # bounded by attempts
+        self.assertIsNotNone(info.error)
+
+    def test_non_transient_not_retried(self):
+        op = _FlakyOpener(99, {}, ValueError("malformed"))
+        info = update.check(opener=op, current="0.0.0", attempts=3, sleep=lambda *_: None)
+        self.assertEqual(op.calls, 1)            # ValueError isn't transient -> no retry
+        self.assertIsNotNone(info.error)
+
+
 class TestWindowsSwapScript(unittest.TestCase):
     def test_contains_wait_copy_relaunch_selfdelete(self):
         s = update.windows_swap_script(r"C:\tmp\new.exe", r"C:\app\claude-continue.exe", 4321, relaunch=True)

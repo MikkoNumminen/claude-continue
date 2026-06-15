@@ -215,6 +215,19 @@ def update_button_color(info, *, frozen):
     return _BTN_UPDATE_AVAILABLE if kind == "prompt" else _BTN_UP_TO_DATE
 
 
+def update_button_label(info, *, frozen):
+    """Button text carrying a COLOUR GLYPH, because macOS's native Tk button
+    ignores fg/bg — an emoji dot is the only colour that reliably renders there.
+    🟢 = an installable update is waiting; ✓ = up to date; ⟳ = unknown/checking."""
+    if info is not None and not info.error:
+        kind, _ = update_decision(info, frozen=frozen)
+        if kind == "prompt":
+            return "🟢  Update"
+        if not info.newer:
+            return "✓  Up to date"
+    return "⟳  Update"
+
+
 def watch_explanation(cfg) -> str:
     """Plain-language description of what 'Start watching' will do, given the
     config. Shown in the idle state so the user knows the effect before clicking.
@@ -539,7 +552,12 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
         # green when an update is installable, gray when up to date (None until the
         # first check completes). Tint the button TEXT + the status line — never the
         # background (a coloured highlightbackground is an ugly box on macOS).
-        color = update_button_color(upd["info"], frozen=update.is_frozen())
+        # macOS native buttons ignore fg/bg, so the visible signal is a colour
+        # GLYPH in the button label (🟢/✓); also set fg (works on Linux/Windows)
+        # and colour the status line (Labels honour fg on every platform).
+        frozen = update.is_frozen()
+        update_button.config(text=update_button_label(upd["info"], frozen=frozen))
+        color = update_button_color(upd["info"], frozen=frozen)
         if color:
             update_button.config(fg=color)
             update_status.config(fg=color)

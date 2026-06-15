@@ -13,6 +13,7 @@ from claude_continue.gui import (
     format_sessions,
     should_auto_recheck,
     update_button_color,
+    update_button_label,
     update_decision,
     watch_explanation,
 )
@@ -247,6 +248,28 @@ class TestUpdateButtonColor(unittest.TestCase):
         self.assertIsNone(update_button_color(None, frozen=True))
         err = UpdateInfo("0.5.0", None, False, None, None, error="boom")
         self.assertIsNone(update_button_color(err, frozen=True))
+
+
+class TestUpdateButtonLabel(unittest.TestCase):
+    # macOS ignores button colour, so the label carries a colour glyph
+    def test_available_shows_green_glyph(self):
+        info = UpdateInfo("0.5.0", "v0.6.0", True, "a.zip", "https://x")
+        self.assertIn("🟢", update_button_label(info, frozen=True))
+
+    def test_up_to_date_shows_check(self):
+        info = UpdateInfo("0.5.0", "v0.5.0", False, None, None)
+        self.assertIn("✓", update_button_label(info, frozen=True))
+        self.assertNotIn("🟢", update_button_label(info, frozen=True))
+
+    def test_unknown_is_plain(self):
+        self.assertEqual(update_button_label(None, frozen=True), "⟳  Update")
+        err = UpdateInfo("0.5.0", None, False, None, None, error="boom")
+        self.assertNotIn("🟢", update_button_label(err, frozen=True))
+
+    def test_source_with_newer_is_not_green(self):
+        # newer exists but not installable from source -> not the green glyph
+        info = UpdateInfo("0.5.0", "v0.6.0", True, "a.zip", "https://x")
+        self.assertNotIn("🟢", update_button_label(info, frozen=False))
 
 
 class TestUpdateDecision(unittest.TestCase):
