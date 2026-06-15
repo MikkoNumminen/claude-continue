@@ -310,6 +310,11 @@ class TestFormatInstances(unittest.TestCase):
         self.assertIn("35552", out)
         self.assertIn("claude", out)
 
+    def test_node_instance_reads_as_claude(self):
+        # an npm node-based instance is still a Claude instance — label it so.
+        out = format_instances([("node", "900")], "")
+        self.assertIn("claude (node)", out)
+
     def test_long_list_truncated(self):
         many = [("claude", str(i)) for i in range(12)]
         out = format_instances(many, "")

@@ -209,7 +209,10 @@ def format_instances(instances, note) -> str:
         return "Claude instances: none running"
     lines = ["Claude instances (%d):" % len(instances)]
     for name, pid in instances[:_MAX_SESSIONS_SHOWN]:
-        lines.append("  ● %-8s (pid %s)" % (name, pid))
+        # native install lists as "claude"; an npm node CLI lists as "claude (node)"
+        # so it still reads as a Claude instance, not a stray node process.
+        label = name if name == "claude" else "claude (%s)" % name
+        lines.append("  ● %-13s (pid %s)" % (label, pid))
     if len(instances) > _MAX_SESSIONS_SHOWN:
         lines.append("  ...and %d more" % (len(instances) - _MAX_SESSIONS_SHOWN))
     return "\n".join(lines)
@@ -313,7 +316,8 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
     # Config is snapshotted once at startup; edits to the config file / env take
     # effect on the next launch, not mid-session. effective_cfg defaults Windows/WSL
     # to keystroke (so "Continue terminals" works zero-config) and is applied once
-    # here, so the explanation, the instances panel, and the action all agree.
+    # here, so the pre-watch explanation and the keystroke action agree. (The
+    # instances panel is an independent view of running processes, not the action.)
     app_cfg = effective_cfg(resolve())
     # heterogeneous UI state bags mutated by worker threads, read on the main thread
     poll: dict[str, Any] = {"reset_at": None, "note": "", "busy": False,
@@ -401,7 +405,9 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
                     poll["sessions_note"] = ""
                 else:
                     poll["sessions"] = None
-                    poll["sessions_note"] = "no live view in this mode (headless --exec)"
+                    # WSL keystroke / Linux / headless --exec: no listable processes
+                    # here (WSL's Claude is a Linux process Win32_Process can't see).
+                    poll["sessions_note"] = "no live process view on this platform"
             except Exception as e:  # noqa: BLE001
                 poll["sessions"] = None
                 if app_cfg.tmux:
