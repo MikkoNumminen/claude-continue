@@ -15,7 +15,7 @@ import logging
 import threading
 from datetime import datetime, timezone
 
-from . import ccusage, iterm, osenv, update, watch
+from . import __version__, ccusage, iterm, osenv, update, watch
 from .action import ActionError
 from .config import resolve
 from .lock import AlreadyRunning
@@ -165,6 +165,22 @@ def format_sessions(sessions, note, *, watching, cfg) -> str:
     if len(sessions) > _MAX_SESSIONS_SHOWN:
         lines.append("  ...and %d more" % (len(sessions) - _MAX_SESSIONS_SHOWN))
     return "\n".join(lines)
+
+
+def update_decision(info, *, frozen):
+    """Pure decision for the 'checked' phase. Returns (kind, message) where kind
+    is 'prompt' (offer to download+restart) or 'none' (just show the message).
+    Kept side-effect-free so it's unit-testable without Tk."""
+    if info is None or info.error:
+        return "none", "update check failed: %s" % (info.error if info else "no data")
+    if not info.newer:
+        return "none", "up to date (v%s)" % info.current
+    # info.latest is the tag (already "vX.Y.Z"); info.current is bare (e.g. "0.3.0").
+    if not frozen:
+        return "none", "%s available — update from source with `git pull`" % info.latest
+    if not info.asset_url:
+        return "none", "%s available, but no build for this platform" % info.latest
+    return "prompt", "%s available" % info.latest
 
 
 def run() -> None:  # pragma: no cover - exercised manually; logic lives in WatchController
@@ -318,8 +334,10 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
         upd["msg"] = "checking for updates…"
 
         def work():
-            info = update.check()
-            upd["info"] = info
+            try:
+                upd["info"] = update.check()
+            except Exception as e:  # noqa: BLE001 - check() shouldn't raise, but never wedge the UI
+                upd["info"] = update.UpdateInfo(__version__, None, False, None, None, error=str(e))
             upd["phase"] = "checked"
 
         threading.Thread(target=work, daemon=True).start()
@@ -344,28 +362,20 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
         phase = upd["phase"]
         if phase == "checked":
             info = upd["info"]
-            if info is None or info.error:
-                upd["msg"] = "update check failed: %s" % (info.error if info else "no data")
-                upd["phase"] = "idle"
-            elif not info.newer:
-                upd["msg"] = "up to date (v%s)" % info.current
-                upd["phase"] = "idle"
-            elif not update.is_frozen():
-                upd["msg"] = "v%s available — update from source with `git pull`" % info.latest
-                upd["phase"] = "idle"
-            elif not info.asset_url:
-                upd["msg"] = "v%s available, but no build for this platform" % info.latest
-                upd["phase"] = "idle"
-            else:
+            kind, msg = update_decision(info, frozen=update.is_frozen())
+            if kind == "prompt":
                 upd["phase"] = "prompting"
                 if messagebox.askyesno(
                     "Update available",
-                    "v%s is available (you have v%s).\nDownload it and restart now?" % (info.latest, info.current),
+                    "%s is available (you have v%s).\nDownload it and restart now?" % (info.latest, info.current),
                 ):
                     _start_apply(info)
                 else:
                     upd["msg"] = "update postponed"
                     upd["phase"] = "idle"
+            else:
+                upd["msg"] = msg
+                upd["phase"] = "idle"
         elif phase == "done":
             upd["msg"] = "updated — restarting…"
             upd["phase"] = "quitting"

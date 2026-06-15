@@ -6,8 +6,9 @@ import _support  # noqa: F401
 
 from claude_continue.action import ActionError
 from claude_continue.config import Config
-from claude_continue.gui import WatchController, format_sessions
+from claude_continue.gui import WatchController, format_sessions, update_decision
 from claude_continue.lock import AlreadyRunning
+from claude_continue.update import UpdateInfo
 
 
 def _blocking_runner(cfg, *, logger, stop, sleep, use_lock, **kw):
@@ -150,6 +151,41 @@ class TestFormatSessions(unittest.TestCase):
         many = [("S%d" % i, "idle") for i in range(12)]
         out = format_sessions(many, "", watching=False, cfg=Config())
         self.assertIn("...and 4 more", out)  # 12 - 8
+
+
+class TestUpdateDecision(unittest.TestCase):
+    def test_none_info(self):
+        kind, _ = update_decision(None, frozen=True)
+        self.assertEqual(kind, "none")
+
+    def test_error_surfaced(self):
+        info = UpdateInfo("0.3.0", None, False, None, None, error="boom")
+        kind, msg = update_decision(info, frozen=True)
+        self.assertEqual(kind, "none")
+        self.assertIn("boom", msg)
+
+    def test_up_to_date(self):
+        info = UpdateInfo("0.3.0", "v0.3.0", False, None, None)
+        kind, msg = update_decision(info, frozen=True)
+        self.assertEqual(kind, "none")
+        self.assertIn("up to date", msg)
+
+    def test_source_install_points_to_git(self):
+        info = UpdateInfo("0.3.0", "v0.4.0", True, "a.zip", "https://x")
+        kind, msg = update_decision(info, frozen=False)
+        self.assertEqual(kind, "none")
+        self.assertIn("git pull", msg)
+
+    def test_no_asset_for_platform(self):
+        info = UpdateInfo("0.3.0", "v0.4.0", True, None, None)
+        kind, msg = update_decision(info, frozen=True)
+        self.assertEqual(kind, "none")
+        self.assertIn("no build", msg)
+
+    def test_prompts_when_upgradable(self):
+        info = UpdateInfo("0.3.0", "v0.4.0", True, "a.zip", "https://x")
+        kind, _ = update_decision(info, frozen=True)
+        self.assertEqual(kind, "prompt")
 
 
 if __name__ == "__main__":
