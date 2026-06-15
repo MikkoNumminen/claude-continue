@@ -298,7 +298,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_action_args(p_status)
     p_status.set_defaults(func=cmd_status)
 
-    p_doctor = sub.add_parser("doctor", help="preflight: check ccusage, node, iTerm2, the agent, config")
+    p_doctor = sub.add_parser("doctor", help="preflight: check ccusage, node, the resume action, the agent, config")
     add_action_args(p_doctor)
     p_doctor.set_defaults(func=cmd_doctor)
 
@@ -317,12 +317,12 @@ def build_parser() -> argparse.ArgumentParser:
     add_action_args(p_fire, dry_run=True)
     p_fire.set_defaults(func=cmd_fire)
 
-    p_install = sub.add_parser("install", help="install the launchd agent (runs `watch` unattended)")
+    p_install = sub.add_parser("install", help="install the unattended agent (launchd on macOS, Task Scheduler on Windows) to run `watch`")
     add_action_args(p_install)
     p_install.set_defaults(func=cmd_install)
 
-    p_uninstall = sub.add_parser("uninstall", help="remove the launchd agent")
-    p_uninstall.add_argument("--purge", action="store_true", help="also delete the plist file")
+    p_uninstall = sub.add_parser("uninstall", help="remove the unattended agent (launchd / Task Scheduler)")
+    p_uninstall.add_argument("--purge", action="store_true", help="also delete the launchd plist file (macOS only)")
     p_uninstall.set_defaults(func=cmd_uninstall)
 
     return p

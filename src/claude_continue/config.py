@@ -29,6 +29,22 @@ _INT_FIELDS = {
 _FLOAT_FIELDS = {"every_hours"}
 _LIST_FIELDS = {"filter"}
 
+# Timing values must be positive. For poll/retry/verify, a zero/negative value
+# makes ``watch._sleep_until`` return "reached" immediately, turning the
+# idle-poll and post-fire backoff into a tight loop that re-runs ccusage / the
+# resume action every iteration. ``timeout`` is the ccusage subprocess timeout:
+# it can't busy-loop, but a non-positive value makes every probe time out
+# instantly, so auto-detect never works. Either way the value is invalid and a
+# bad one can arrive from the config file or an env var (neither is
+# bounds-checked), so floor them all here.
+MIN_TIMING_SECONDS = 1
+_TIMING_FLOORS = {
+    "poll_interval": MIN_TIMING_SECONDS,
+    "retry_interval": MIN_TIMING_SECONDS,
+    "verify_delay": MIN_TIMING_SECONDS,
+    "timeout": MIN_TIMING_SECONDS,
+}
+
 
 @dataclass
 class Config:
@@ -116,3 +132,34 @@ def resolve(overrides: dict | None = None, *, config_path: Path = CONFIG_PATH) -
         cfg.exec_cmd = None
 
     return cfg
+
+
+def timing_issues(cfg: Config) -> list:
+    """Return ``[(field, value, floor)]`` for every loop interval below its floor.
+
+    Pure and non-mutating, so ``doctor`` can warn about a busy-loop-inducing
+    value without changing the config the user is about to run with.
+    """
+    issues = []
+    for name, floor in _TIMING_FLOORS.items():
+        value = getattr(cfg, name)
+        try:
+            ok = value >= floor
+        except TypeError:
+            ok = False  # wrong type entirely (e.g. a string from the JSON file)
+        if not ok:
+            issues.append((name, value, floor))
+    return issues
+
+
+def clamp_timing(cfg: Config) -> list:
+    """Floor non-positive timing values in place; return what was adjusted.
+
+    The watch loop calls this at startup so a bad config degrades (clamped +
+    logged) instead of busy-looping (poll/retry/verify) or making auto-detect
+    fail outright (timeout).
+    """
+    issues = timing_issues(cfg)
+    for name, _value, floor in issues:
+        setattr(cfg, name, floor)
+    return issues

@@ -101,12 +101,12 @@ Action: send 'continue' to 1 session(s):
 
 ```
 ✓ python    Python 3.9.6
+✓ platform  macos
 ✓ ccusage   active window resets 2026-06-14T09:00:00+03:00 (in 3h 02m)
-✓ node      /Users/you/.nvm/.../bin/node (launchd PATH will include …)
-✓ iterm2    /Applications/iTerm.app present
+✓ node      /Users/you/.nvm/.../bin/node (a stable node dir will be on the launchd PATH)
 ! agent     not installed (run `claude-continue install` to run unattended)
 ✓ config    action=filter ['claude', '✳'], trigger=ccusage auto, buffer=90s
-✓ targets   1 session(s) currently match: ✳ Claude Code (claude)
+✓ action    1 target(s): ✳ Claude Code (claude)
 
 Ready, with warnings.
 ```
