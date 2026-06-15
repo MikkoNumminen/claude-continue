@@ -10,6 +10,28 @@ def _non_none(d):
     return {k: v for k, v in d.items() if v is not None}
 
 
+class TestUninstallApp(unittest.TestCase):
+    def test_app_flag_routes_to_complete_removal(self):
+        from claude_continue import selfremove
+        args = cli.build_parser().parse_args(["uninstall", "--app"])
+        summary = {"agent_removed": True, "deleted": [], "bundle": "/Applications/x.app",
+                   "bundle_scheduled": True, "frozen": True}
+        with mock.patch.object(selfremove, "remove", return_value=summary) as rm:
+            rc = cli.cmd_uninstall(args)
+        self.assertEqual(rc, 0)
+        rm.assert_called_once()
+        self.assertTrue(rm.call_args.kwargs.get("purge_config"))
+
+    def test_plain_uninstall_does_not_self_remove(self):
+        from claude_continue import scheduler, selfremove
+        args = cli.build_parser().parse_args(["uninstall"])
+        with mock.patch.object(scheduler, "uninstall", return_value=True), \
+             mock.patch.object(selfremove, "remove") as rm:
+            rc = cli.cmd_uninstall(args)
+        self.assertEqual(rc, 0)
+        rm.assert_not_called()
+
+
 class TestUpdateCommand(unittest.TestCase):
     def _run(self, info, apply=False):
         from claude_continue import update
