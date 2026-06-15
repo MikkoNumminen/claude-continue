@@ -19,7 +19,7 @@ import subprocess
 DEFAULT_BUSY_PATTERN = "esc to interrupt"
 
 # pane_id is a stable handle (e.g. "%3"); the names are what we filter/display on.
-_FMT = "#{pane_id}\t#{session_name}\t#{window_name}\t#{pane_title}\t#{pane_current_command}"
+_FMT = "#{pane_id}\t#{session_name}\t#{window_name}\t#{pane_title}"
 
 
 class TmuxError(RuntimeError):
@@ -49,16 +49,21 @@ def _tmux(args, *, timeout: float) -> str:
 
 
 def _matches(name_filter, session, all_sessions, sess, win, title) -> bool:
-    """A pane matches if any of its names (session/window/pane title) carries the
-    filter substring — Claude's title-bar marker usually lands in pane_title."""
-    hay = " ".join((sess, win, title)).lower()
+    """Decide whether a pane should be targeted."""
     if session:
-        return session.lower() in hay
+        # --session targets the tmux SESSION grouping by name (matches iterm.py
+        # and the CLI help), NOT incidental text in a window name or pane title.
+        return session.lower() in sess.lower()
     if all_sessions:
         return True
     subs = name_filter or []
     if not subs:
         return False  # misconfigured: match nothing rather than everything
+    # Match the fields Claude actually labels — its title-bar marker lands in
+    # pane_title (and sometimes window_name). Deliberately exclude session_name:
+    # it's usually the working-dir (e.g. "claude-continue"), which would
+    # otherwise match every pane in the session, including plain shells.
+    hay = (win + " " + title).lower()
     return any(sub.lower() in hay for sub in subs)
 
 
@@ -66,11 +71,11 @@ def _parse_panes(out, name_filter, session, all_sessions) -> list:
     panes = []
     for ln in out.splitlines():
         parts = ln.split("\t")
-        if len(parts) < 5:
+        if len(parts) < 4:
             continue
-        pane_id, sess, win, title, cmd = parts[0], parts[1], parts[2], parts[3], parts[4]
+        pane_id, sess, win, title = parts[0], parts[1], parts[2], parts[3]
         if _matches(name_filter, session, all_sessions, sess, win, title):
-            panes.append({"id": pane_id, "session": sess, "window": win, "title": title, "cmd": cmd})
+            panes.append({"id": pane_id, "session": sess, "window": win, "title": title})
     return panes
 
 
@@ -85,7 +90,12 @@ def _is_busy(pane_id: str, busy_pattern: str, timeout: float) -> bool:
     if not busy_pattern:
         return False
     content = _tmux(["capture-pane", "-p", "-t", pane_id], timeout=timeout)
-    return busy_pattern.lower() in content.lower()
+    # Claude's "esc to interrupt" footer renders at the bottom of the pane. Only
+    # inspect the last few non-blank lines so the marker appearing earlier in the
+    # transcript (a paste, a doc, our own past output) can't false-trip skip-busy.
+    lines = [ln for ln in content.splitlines() if ln.strip()]
+    tail = "\n".join(lines[-3:]).lower()
+    return busy_pattern.lower() in tail
 
 
 def _label(pane: dict) -> str:
@@ -112,8 +122,10 @@ def broadcast(
         if effective_skip_busy and _is_busy(pane["id"], busy_pattern, timeout):
             continue
         if not dry_run:
-            # -l sends the text literally (no key-name interpretation); Enter submits it.
-            _tmux(["send-keys", "-t", pane["id"], "-l", text], timeout=timeout)
+            # -l sends the text literally (no key-name interpretation); `--` ends
+            # option parsing so a text starting with '-' can't be read as a flag.
+            # Enter is a separate key event that submits it.
+            _tmux(["send-keys", "-t", pane["id"], "-l", "--", text], timeout=timeout)
             _tmux(["send-keys", "-t", pane["id"], "Enter"], timeout=timeout)
         fired.append(_label(pane))
     return fired
