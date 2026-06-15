@@ -272,6 +272,17 @@ def cmd_install(args) -> int:
 
 
 def cmd_uninstall(args) -> int:
+    if getattr(args, "app", False):
+        from . import selfremove
+        summary = selfremove.remove(purge_config=True, logger=lambda *a: print(a[0] % a[1:] if len(a) > 1 else a[0]))
+        print("removed the unattended agent" if summary["agent_removed"] else "no unattended agent was installed")
+        for p in summary["deleted"]:
+            print("deleted %s" % p)
+        if summary["bundle"]:
+            print("the app will delete itself (%s) once this process exits." % summary["bundle"])
+        else:
+            print("running from source — nothing to self-delete (remove the repo, or `pip uninstall claude-continue`).")
+        return 0
     existed = scheduler.uninstall(purge=bool(args.purge))
     if existed:
         # --purge only removes a file on macOS (the plist); the Windows task has none.
@@ -352,6 +363,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_uninstall = sub.add_parser("uninstall", help="remove the unattended agent (launchd / Task Scheduler)")
     p_uninstall.add_argument("--purge", action="store_true", help="also delete the launchd plist file (macOS only)")
+    p_uninstall.add_argument("--app", action="store_true",
+                             help="remove EVERYTHING: agent, settings, logs, and the app/exe itself")
     p_uninstall.set_defaults(func=cmd_uninstall)
 
     p_update = sub.add_parser("update", help="check for a newer release (--apply to download + replace this build)")

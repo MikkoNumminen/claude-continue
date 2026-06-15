@@ -183,8 +183,11 @@ def update_decision(info, *, frozen):
     return "prompt", "%s available" % info.latest
 
 
-_BTN_UPDATE_AVAILABLE = "#34c759"  # green: an installable update is waiting
-_BTN_UP_TO_DATE = "#c9c9c9"        # gray: current / nothing to install
+_BTN_UPDATE_AVAILABLE = "#1a7f37"  # green: an installable update is waiting
+_BTN_UP_TO_DATE = "#888888"        # gray: current / nothing to install
+# (readable as TEXT colour — we tint the button's text + the status line, never
+# the button background: a coloured highlightbackground paints an ugly box on the
+# macOS native button.)
 
 
 def update_button_color(info, *, frozen):
@@ -241,6 +244,8 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
     # self-update state machine: idle -> checking -> checked -> [applying -> done] / error
     # `auto` marks a background (startup) check that colours the button without prompting.
     upd = {"phase": "idle", "info": None, "msg": "", "error": None, "auto": False}
+    # self-removal state: idle -> removing -> done (quit; the helper deletes the app) / error
+    rem = {"phase": "idle", "error": None}
 
     root = tk.Tk()
     root.title("claude-continue")
@@ -263,8 +268,12 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
     button.pack()
     note = tk.Label(root, text="", fg="#a00", wraplength=420)
     note.pack(pady=(8, 0))
+    # bottom row: a low-key "Remove…" link sits under the Update button
+    remove_button = tk.Button(root, text="Remove app…", fg="#a00", borderwidth=0,
+                              highlightthickness=0, font=tkfont.Font(size=11))
+    remove_button.pack(side="bottom", pady=(0, 8))
     update_button = tk.Button(root, text="⟳  Update", width=14)
-    update_button.pack(side="bottom", pady=(0, 10))
+    update_button.pack(side="bottom", pady=(0, 8))
     update_status = tk.Label(root, text="", fg="#666", wraplength=430)
     update_status.pack(side="bottom")
 
@@ -413,9 +422,51 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
 
         threading.Thread(target=work, daemon=True).start()
 
+    def remove_app():
+        if rem["phase"] == "removing":
+            return
+        if not messagebox.askyesno(
+            "Remove claude-continue",
+            "Remove claude-continue completely?\n\n"
+            "This stops watching, removes the background agent, deletes your "
+            "settings and logs, and deletes the app itself.\n\nThis cannot be undone.",
+            icon="warning",
+        ):
+            return
+        controller.request_stop()
+        rem["phase"] = "removing"
+
+        def work():
+            try:
+                from . import selfremove
+                selfremove.remove(purge_config=True)
+                rem["phase"] = "done"
+            except Exception as e:  # noqa: BLE001 - surfaced in the UI
+                rem["error"] = str(e)
+                rem["phase"] = "error"
+
+        threading.Thread(target=work, daemon=True).start()
+
+    remove_button.config(command=remove_app)
+
     def update_poll():
-        # main-thread state machine: workers only mutate `upd`; the dialog,
-        # relaunch and quit all happen here so Tk is only touched on this thread.
+        # main-thread state machine: workers only mutate `upd`/`rem`; the dialogs
+        # and quit all happen here so Tk is only touched on this thread.
+        if rem["phase"] == "removing":
+            update_status.config(text="removing…", fg="#a00")
+            remove_button.config(state="disabled")
+            update_button.config(state="disabled")
+            root.after(500, update_poll)
+            return
+        if rem["phase"] == "done":
+            # config/agent already gone; the detached helper deletes the bundle
+            # once we exit. Quit promptly so it can run.
+            root.destroy()
+            return
+        if rem["phase"] == "error":
+            update_status.config(text="remove failed: %s" % (rem["error"] or ""), fg="#a00")
+            remove_button.config(state="normal")
+            rem["phase"] = "idle"
         phase = upd["phase"]
         if phase == "checked":
             info = upd["info"]
@@ -449,11 +500,12 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
         update_button.config(state="disabled" if busy else "normal")
         update_status.config(text=upd["msg"])
         # green when an update is installable, gray when up to date (None until the
-        # first check completes). Set both bg (Linux/Win) and highlightbackground
-        # (the macOS tk.Button face tint) so it shows on every platform.
+        # first check completes). Tint the button TEXT + the status line — never the
+        # background (a coloured highlightbackground is an ugly box on macOS).
         color = update_button_color(upd["info"], frozen=update.is_frozen())
         if color:
-            update_button.config(bg=color, highlightbackground=color)
+            update_button.config(fg=color)
+            update_status.config(fg=color)
         root.after(500, update_poll)
 
     update_button.config(command=check_for_update)

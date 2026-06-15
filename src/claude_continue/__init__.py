@@ -4,4 +4,4 @@ The instant a usage window resets, resume paused Claude sessions so quota is
 never left idle between windows. See the README for the design and caveats.
 """
 
-__version__ = "0.5.1"
+__version__ = "0.5.2"

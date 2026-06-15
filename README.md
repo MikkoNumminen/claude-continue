@@ -75,7 +75,7 @@ claude-continue gui
 
 # Install as a launchd agent — runs unattended, survives reboots
 claude-continue install
-claude-continue uninstall          # add --purge to also delete the plist
+claude-continue uninstall          # --purge also deletes the plist; --app removes EVERYTHING (agent, settings, logs, the app itself)
 
 # Fire right now (testing); --dry-run shows targets without sending
 claude-continue fire --dry-run
@@ -130,6 +130,7 @@ dependencies; for an unattended, survives-reboot setup use `install` instead.
 │     ○ idle     -> will resume     …  │
 │        [  ⏹  Stop watching  ]        │
 │   [ ⟳ Update ]                       │
+│        Remove app…                   │
 └──────────────────────────────────────┘
 ```
 
@@ -145,7 +146,14 @@ platform); otherwise the panel notes it isn't available.
 
 The **⟳ Update** button checks the latest GitHub release and, if a newer one
 exists, downloads it and restarts the app in place (the standalone `.app`/`.exe`
-builds). Run from source instead? It tells you to `git pull`.
+builds). It's checked once on launch and tinted green when an update is waiting,
+gray when you're up to date. Run from source instead? It tells you to `git pull`.
+
+The **Remove app…** button removes claude-continue **completely** — after a
+confirmation it stops watching, removes the background agent, deletes your
+settings + logs, and deletes the app bundle itself (a detached helper removes
+the bundle once the app quits). The CLI equivalent is `claude-continue uninstall
+--app`.
 
 ### Standalone macOS app (no Python required)
 
