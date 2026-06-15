@@ -17,7 +17,8 @@ class TestDefaults(unittest.TestCase):
         self.assertTrue(cfg.skip_busy)
         self.assertEqual(cfg.text, "continue")
         self.assertEqual(cfg.filter, ["claude", "✳"])
-        self.assertEqual(cfg.retry_cap, 6)
+        self.assertEqual(cfg.retry_cap, 30)
+        self.assertEqual(cfg.retry_interval, 120)
 
 
 class TestPrecedence(unittest.TestCase):

@@ -49,8 +49,8 @@ class Config:
     buffer: int = 90  # seconds past the reset before firing
     verify_delay: int = 90  # seconds to wait after firing before re-reading ccusage
     poll_interval: int = 600  # seconds between polls while idle (no active block)
-    retry_interval: int = 300  # seconds between retries when still limited after firing
-    retry_cap: int = 6  # max retries (6 * 5m ≈ 30m of ccusage-was-early slack)
+    retry_interval: int = 120  # seconds between retries when the window hasn't rolled yet
+    retry_cap: int = 30  # max retries; 30 * 2m ≈ 1h covers a worst-case-early ccusage estimate
     timeout: int = 30  # ccusage subprocess timeout (seconds)
 
     # --- fixed-schedule fallback (used when ccusage is unavailable, or by choice) ---

@@ -262,7 +262,8 @@ Precedence: **CLI flags > env vars > config file > defaults.**
 - Env vars: `CLAUDE_CONTINUE_<FIELD>` (e.g. `CLAUDE_CONTINUE_BUFFER=120`).
 
 Key settings: `buffer` (90s after reset before firing), `verify_delay` (90s),
-`poll_interval` (600s while idle), `retry_interval` (300s) / `retry_cap` (6),
+`poll_interval` (600s while idle), `retry_interval` (120s) / `retry_cap` (30,
+so retries span ~1h — enough to cover a worst-case-early estimate),
 `skip_busy` (true), `filter`, `text`, `exec_cmd`, `session`, `timeout` (30s),
 `tmux` (false) / `tmux_busy_pattern` ("esc to interrupt"), and (Windows/WSL)
 `keystroke` (false) / `window_title` ("Windows Terminal").
@@ -273,8 +274,11 @@ Key settings: `buffer` (90s after reset before firing), `verify_delay` (90s),
    your local transcripts; on idle paths it can be up to the ~1-hour rounding
    granularity early (it's spot-on when you run continuously into the limit,
    which is the case this tool targets). So after firing, `claude-continue`
-   **re-reads `ccusage` to confirm the window actually rolled**, and retries a
-   bounded number of times if it didn't. That verification is the correctness
+   **re-reads `ccusage` to confirm the window actually rolled** — a real resume
+   produces a *new* window with a later reset. If it hasn't rolled (same window,
+   or no active window yet because we fired before the true reset), it keeps
+   re-sending `continue` every `retry_interval` until the window rolls, up to
+   `retry_cap` (~1h of coverage). That verification-and-retry is the correctness
    mechanism — not the raw estimate.
 
 2. **A sleeping machine runs no timers.** If the machine is asleep when a window
