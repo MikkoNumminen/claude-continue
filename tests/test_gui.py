@@ -1,9 +1,11 @@
+import os
 import threading
 import time
 import unittest
 
 import _support  # noqa: F401
 
+from claude_continue import osenv
 from claude_continue.action import ActionError
 from claude_continue.config import Config
 from claude_continue.gui import WatchController, format_sessions, update_decision, watch_explanation
@@ -179,6 +181,32 @@ class TestWatchExplanation(unittest.TestCase):
     def test_skip_busy_off(self):
         out = watch_explanation(Config(skip_busy=False))
         self.assertIn("skip-busy is off", out)
+
+    def _on_platform(self, plat, cfg):
+        old = os.environ.get(osenv.PLATFORM_ENV)
+        os.environ[osenv.PLATFORM_ENV] = plat
+        try:
+            return watch_explanation(cfg)
+        finally:
+            if old is None:
+                os.environ.pop(osenv.PLATFORM_ENV, None)
+            else:
+                os.environ[osenv.PLATFORM_ENV] = old
+
+    def test_keystroke_on_windows_describes_window_not_iterm(self):
+        out = self._on_platform("windows", Config(keystroke=True, window_title="My Term"))
+        self.assertIn("My Term", out)
+        self.assertNotIn("iTerm2", out)
+        self.assertNotIn("Busy sessions", out)   # keystroke has no skip-busy concept
+
+    def test_keystroke_on_macos_falls_through_to_iterm(self):
+        # keystroke is a no-op on macOS (action routes to the iTerm broadcast)
+        out = self._on_platform("macos", Config(keystroke=True))
+        self.assertIn("iTerm2", out)
+
+    def test_tmux_wins_over_keystroke_on_windows(self):
+        out = self._on_platform("windows", Config(keystroke=True, tmux=True))
+        self.assertIn("tmux", out)
 
 
 class TestUpdateDecision(unittest.TestCase):

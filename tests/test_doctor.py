@@ -118,10 +118,16 @@ class TestConfigCheck(unittest.TestCase):
         self.assertEqual(c.status, WARN)
         self.assertIn("poll_interval", c.detail)
 
-    def test_nonpositive_timing_ignored_in_fixed_schedule(self):
-        # A fixed schedule never uses these intervals, so don't warn about them.
+    def test_poll_interval_ignored_in_fixed_schedule(self):
+        # poll/verify/timeout aren't used by a fixed schedule, so don't warn.
         c = doctor._check_config(Config(poll_interval=0, every_hours=5))
         self.assertEqual(c.status, OK)
+
+    def test_retry_interval_still_warns_in_fixed_schedule(self):
+        # retry_interval DOES drive the failed-fire backoff even in fixed mode.
+        c = doctor._check_config(Config(retry_interval=0, every_hours=5))
+        self.assertEqual(c.status, WARN)
+        self.assertIn("retry_interval", c.detail)
 
 
 class TestActionCheck(unittest.TestCase):

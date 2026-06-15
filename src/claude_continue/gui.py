@@ -190,6 +190,12 @@ def watch_explanation(cfg) -> str:
     when = "When you start watching, claude-continue waits for your Claude usage window to reset, then "
     if cfg.exec_cmd:
         return when + ("runs `%s` headlessly — so work resumes the instant your quota refreshes." % cfg.exec_cmd)
+    # --keystroke is the Windows/WSL path: it types into a single titled window
+    # (no session/skip-busy concept). tmux wins over it (matches action._resume),
+    # and on macOS keystroke is a no-op that falls through to the iTerm2 broadcast.
+    if cfg.keystroke and not cfg.tmux and osenv.detect() in (osenv.WINDOWS, osenv.WSL):
+        return when + ('types “%s” into the “%s” window — so paused work resumes the instant your quota refreshes.'
+                       % (cfg.text, cfg.window_title))
     if cfg.session:
         target = "the “%s” session" % cfg.session
     elif cfg.tmux:
