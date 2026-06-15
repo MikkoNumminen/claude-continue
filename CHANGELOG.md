@@ -4,7 +4,7 @@ All notable changes to `claude-continue`. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.7.0] — 2026-06-16
 
 ### Added
 - **Windows/WSL GUI parity.** The GUI is now zero-config on Windows the same way
