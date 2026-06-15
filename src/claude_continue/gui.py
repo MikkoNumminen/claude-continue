@@ -183,6 +183,24 @@ def update_decision(info, *, frozen):
     return "prompt", "%s available" % info.latest
 
 
+def watch_explanation(cfg) -> str:
+    """Plain-language description of what 'Start watching' will do, given the
+    config. Shown in the idle state so the user knows the effect before clicking.
+    Pure (no Tk) so it's unit-testable."""
+    when = "When you start watching, claude-continue waits for your Claude usage window to reset, then "
+    if cfg.exec_cmd:
+        return when + ("runs `%s` headlessly — so work resumes the instant your quota refreshes." % cfg.exec_cmd)
+    target = ("the “%s” session" % cfg.session) if cfg.session else "idle Claude sessions in iTerm2"
+    body = ('sends “%s” to %s — so paused work resumes the instant your quota refreshes. ' % (cfg.text, target))
+    if cfg.force:
+        body += "Busy sessions are nudged too (force is on)."
+    elif cfg.skip_busy:
+        body += "Busy sessions are skipped; only idle ones are nudged."
+    else:
+        body += "All matched sessions are nudged (skip-busy is off)."
+    return when + body
+
+
 def run() -> None:  # pragma: no cover - exercised manually; logic lives in WatchController
     """Open the toggle window. Imports tkinter lazily so the rest of the package
     doesn't require a display."""
@@ -200,9 +218,9 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
 
     root = tk.Tk()
     root.title("claude-continue")
-    root.geometry("470x470")
+    root.geometry("470x540")
     root.resizable(True, True)
-    root.minsize(440, 380)
+    root.minsize(440, 440)
 
     dot = tk.Label(root, text="○", font=tkfont.Font(size=30))
     dot.pack(pady=(18, 0))
@@ -212,7 +230,9 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
     detail.pack(pady=(2, 10))
     sessions_label = tk.Label(root, text="Claude instances: checking…",
                               font="TkFixedFont", justify="left", anchor="w")
-    sessions_label.pack(fill="x", padx=16, pady=(0, 12))
+    sessions_label.pack(fill="x", padx=16, pady=(0, 10))
+    explain = tk.Label(root, text="", fg="#555", wraplength=430, justify="center")
+    explain.pack(padx=16, pady=(0, 10))
     button = tk.Button(root, text="▶  Start watching", width=22, height=2)
     button.pack()
     note = tk.Label(root, text="", fg="#a00", wraplength=420)
@@ -277,6 +297,8 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
         return "next reset %s · in %dh %02dm" % (reset_at.astimezone().strftime("%H:%M"), hours, mins)
 
     def refresh():
+        # the pre-watch explanation is only relevant before you start
+        explain.config(text="" if controller.is_watching() or controller.is_stopping() else watch_explanation(app_cfg))
         if controller.error:
             dot.config(text="⚠", fg="#a00")
             status.config(text="Stopped")
