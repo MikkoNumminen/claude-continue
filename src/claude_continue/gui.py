@@ -428,7 +428,9 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
     def start_watch(quota):
         if controller.is_watching() or controller.is_stopping():
             return
-        cfg = replace(app_cfg, start_window=quota)
+        # "Start quota" must open a window even if exec_cmd is configured (exec
+        # otherwise wins in action.perform); "Continue terminals" keeps exec_cmd.
+        cfg = replace(app_cfg, start_window=True, exec_cmd=None) if quota else replace(app_cfg, start_window=False)
         try:
             from . import action
             action.perform(cfg, dry_run=True)  # validate up front; fail clearly

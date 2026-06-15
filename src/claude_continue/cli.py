@@ -170,6 +170,8 @@ def cmd_status(args) -> int:
 
     if cfg.exec_cmd:
         print("Action: exec -> %s" % cfg.exec_cmd)
+    elif cfg.start_window:
+        print("Action: open window (quota) -> %s" % cfg.window_cmd)
     else:
         try:
             targets = action.perform(cfg, dry_run=True)

@@ -133,6 +133,11 @@ def resolve(overrides: dict | None = None, *, config_path: Path = CONFIG_PATH) -
     if cfg.exec_cmd is not None and not cfg.exec_cmd.strip():
         cfg.exec_cmd = None
 
+    # A blanked window_cmd would make quota mode try to run an empty command;
+    # restore the default so --start-window always has something to open with.
+    if not (cfg.window_cmd or "").strip():
+        cfg.window_cmd = Config.window_cmd
+
     return cfg
 
 

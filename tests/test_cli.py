@@ -32,6 +32,21 @@ class TestUninstallApp(unittest.TestCase):
         rm.assert_not_called()
 
 
+class TestStatusQuotaMode(unittest.TestCase):
+    def test_status_shows_open_window_not_send_continue(self):
+        import contextlib
+        import io
+        from claude_continue.ccusage import CcusageUnavailable
+        args = cli.build_parser().parse_args(["status", "--start-window"])
+        buf = io.StringIO()
+        with mock.patch("claude_continue.cli.get_active_block", side_effect=CcusageUnavailable("x")), \
+             contextlib.redirect_stdout(buf):
+            cli.cmd_status(args)
+        out = buf.getvalue()
+        self.assertIn("open window (quota)", out)
+        self.assertNotIn("send", out)  # not the resume/broadcast wording
+
+
 class TestUpdateCommand(unittest.TestCase):
     def _run(self, info, apply=False):
         from claude_continue import update

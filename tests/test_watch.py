@@ -191,8 +191,9 @@ class TestWatchLoop(unittest.TestCase):
                   perform=perform, stop=lambda: False, use_lock=False, max_fires=1)
         self.assertEqual(len(fired), 1)  # did NOT just poll — it opened a window
 
-    def test_quota_idle_open_retries_until_window_appears(self):
-        # if the first open doesn't register a window, keep opening (old_block=None path)
+    def test_quota_idle_open_retries_across_cycles_until_window_appears(self):
+        # first open doesn't register a window; the loop backs off and opens again
+        # next cycle (poll-paced, NOT a tight re-fire loop) until one appears
         T0 = utc(2026, 6, 14, 6)
         fc = FakeClock(T0)
         st = {"fires": 0}
@@ -207,8 +208,29 @@ class TestWatchLoop(unittest.TestCase):
             return ["open window"]
 
         watch.run(cfg(start_window=True), clock=fc.now, sleep=fc.sleep, get_block=gb,
-                  perform=perform, stop=lambda: False, use_lock=False, max_fires=1)
-        self.assertGreaterEqual(len(fired), 2)  # re-opened until a window appeared
+                  perform=perform, stop=lambda: False, use_lock=False, max_fires=2)
+        self.assertEqual(len(fired), 2)  # opened, didn't register, opened again -> registered
+
+    def test_quota_idle_open_never_registers_is_poll_paced_not_spam(self):
+        # regression: if opened windows NEVER register, don't re-open back-to-back;
+        # each attempt is separated by ~poll_interval, not retry_interval.
+        T0 = utc(2026, 6, 14, 6)
+        fc = FakeClock(T0)
+        fired = []
+
+        def gb(timeout=30):
+            return None  # a window never appears
+
+        def perform(c, dry_run=False):
+            fired.append(fc.now())
+            return ["open window"]
+
+        # stop after ~25 min of fake time; with verify_delay=90 + poll_interval=600
+        # between opens, that's only a couple of attempts — not dozens.
+        watch.run(cfg(start_window=True, verify_delay=90, poll_interval=600, retry_cap=30),
+                  clock=fc.now, sleep=fc.sleep, get_block=gb,
+                  stop=lambda: fc.now() > T0 + timedelta(minutes=25), perform=perform, use_lock=False)
+        self.assertLessEqual(len(fired), 4)  # poll-paced, bounded — not ~30/hr spam
 
     def test_dedupe_prevents_spin_on_unrolling_window(self):
         T0 = utc(2026, 6, 14, 6)
