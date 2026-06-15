@@ -136,6 +136,42 @@ class TestWatchLoop(unittest.TestCase):
                   stop=lambda: False, use_lock=False, max_fires=1)
         self.assertEqual(len(fired), 1)
 
+    def test_nonpositive_poll_interval_does_not_busy_loop(self):
+        # A poll_interval of 0 (from a bad config/env value) must not spin: the
+        # loop should clamp it and actually sleep between idle polls instead of
+        # re-running ccusage every iteration with the clock frozen.
+        T0 = utc(2026, 6, 14, 6)
+        st = {"reads": 0, "rolled": False}
+        fired = []
+        fc = FakeClock(T0)
+        sleeps = []
+
+        def gb(timeout=30):
+            st["reads"] += 1
+            if st["rolled"]:
+                return block(2, T0 + timedelta(hours=10))
+            if st["reads"] <= 3:
+                return None  # idle
+            return block(1, T0 + timedelta(hours=5))
+
+        def rec(s):
+            sleeps.append(s)
+            fc.sleep(s)
+
+        def perform(c, dry_run=False):
+            fired.append(fc.now())
+            st["rolled"] = True  # firing rolls the window so verify passes
+            return ["s"]
+
+        watch.run(cfg(poll_interval=0), clock=fc.now, sleep=rec, get_block=gb,
+                  perform=perform, stop=lambda: False, use_lock=False, max_fires=1)
+        self.assertEqual(len(fired), 1)
+        # Each idle poll slept (clamped to >=1s), so the clock advanced and the
+        # idle reads are bounded — not an unbounded spin.
+        self.assertGreaterEqual(len(sleeps), 3)
+        self.assertTrue(all(s >= 1 for s in sleeps))
+        self.assertGreater(fc.now(), T0)
+
     def test_dedupe_prevents_spin_on_unrolling_window(self):
         T0 = utc(2026, 6, 14, 6)
         fired = []

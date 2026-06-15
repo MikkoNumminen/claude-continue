@@ -113,6 +113,11 @@ class TestConfigCheck(unittest.TestCase):
         c = doctor._check_config(Config(keystroke=True, window_title="WT"))
         self.assertIn("keystroke", c.detail)
 
+    def test_nonpositive_timing_warns(self):
+        c = doctor._check_config(Config(poll_interval=0))
+        self.assertEqual(c.status, WARN)
+        self.assertIn("poll_interval", c.detail)
+
 
 class TestActionCheck(unittest.TestCase):
     def _check(self, cfg, **kw):

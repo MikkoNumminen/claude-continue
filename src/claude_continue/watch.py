@@ -26,7 +26,7 @@ from datetime import datetime, timedelta, timezone
 from . import action as action_mod
 from . import ccusage as ccusage_mod
 from . import schedule
-from .config import Config
+from .config import Config, clamp_timing
 from .lock import PidLock
 from .log import get_logger
 from .model import Block
@@ -154,6 +154,11 @@ def run(
     clock = clock or _utc_now
     get_block = get_block or ccusage_mod.get_active_block
     perform = perform or action_mod.perform
+
+    # Floor any non-positive loop interval so a fat-fingered config value can't
+    # turn the idle-poll / retry backoff into a busy loop (see config.clamp_timing).
+    for name, value, floor in clamp_timing(cfg):
+        logger.warning("%s=%r is too low; clamping to %ds to avoid a busy loop", name, value, floor)
 
     # Default stop: an Event flipped by SIGTERM/SIGINT (launchd sends SIGTERM on
     # bootout). Using Event.wait as the sleeper means a signal interrupts the

@@ -19,7 +19,7 @@ from . import osenv
 from . import scheduler as scheduler_mod
 from . import schedule
 from .ccusage import CcusageUnavailable, get_active_block
-from .config import Config
+from .config import Config, MIN_TIMING_SECONDS, timing_issues
 
 OK = "ok"
 WARN = "warn"
@@ -88,6 +88,10 @@ def _check_config(cfg: Config) -> Check:
                 schedule.parse_hhmm(value)
             except ValueError as e:
                 return Check("config", FAIL, "%s invalid: %s" % (label, e))
+    issues = timing_issues(cfg)
+    if issues:
+        named = ", ".join("%s=%r" % (name, value) for name, value, _floor in issues)
+        return Check("config", WARN, "non-positive timing interval(s) %s — would busy-loop; will be clamped to %ds" % (named, MIN_TIMING_SECONDS))
     if cfg.exec_cmd:
         action = "exec"
     elif cfg.tmux:

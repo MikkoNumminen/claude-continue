@@ -7,7 +7,13 @@ from pathlib import Path
 import _support  # noqa: F401
 
 from claude_continue import config
-from claude_continue.config import Config, resolve
+from claude_continue.config import (
+    MIN_TIMING_SECONDS,
+    Config,
+    clamp_timing,
+    resolve,
+    timing_issues,
+)
 
 
 class TestDefaults(unittest.TestCase):
@@ -81,6 +87,39 @@ class TestPrecedence(unittest.TestCase):
         self.addCleanup(os.unlink, path)
         cfg = resolve(config_path=Path(path))
         self.assertEqual(cfg.buffer, 90)  # default, no crash
+
+
+class TestTimingClamp(unittest.TestCase):
+    def test_sane_values_report_no_issues(self):
+        self.assertEqual(timing_issues(Config()), [])
+
+    def test_nonpositive_values_are_flagged(self):
+        cfg = Config(poll_interval=0, retry_interval=-5)
+        flagged = {name for name, _v, _f in timing_issues(cfg)}
+        self.assertEqual(flagged, {"poll_interval", "retry_interval"})
+
+    def test_clamp_floors_in_place_and_reports(self):
+        cfg = Config(poll_interval=0, retry_interval=-5, verify_delay=0, timeout=0)
+        adjusted = clamp_timing(cfg)
+        self.assertEqual(cfg.poll_interval, MIN_TIMING_SECONDS)
+        self.assertEqual(cfg.retry_interval, MIN_TIMING_SECONDS)
+        self.assertEqual(cfg.verify_delay, MIN_TIMING_SECONDS)
+        self.assertEqual(cfg.timeout, MIN_TIMING_SECONDS)
+        self.assertEqual(len(adjusted), 4)
+
+    def test_clamp_leaves_good_values_untouched(self):
+        cfg = Config()
+        before = (cfg.poll_interval, cfg.retry_interval, cfg.verify_delay, cfg.timeout)
+        self.assertEqual(clamp_timing(cfg), [])
+        self.assertEqual((cfg.poll_interval, cfg.retry_interval, cfg.verify_delay, cfg.timeout), before)
+
+    def test_wrong_type_from_file_is_treated_as_invalid(self):
+        # The config-file path does not coerce types, so a stringy interval could
+        # slip in; clamp_timing must not crash on the comparison, and must fix it.
+        cfg = Config(poll_interval="0")
+        adjusted = clamp_timing(cfg)
+        self.assertEqual(cfg.poll_interval, MIN_TIMING_SECONDS)
+        self.assertEqual([name for name, _v, _f in adjusted], ["poll_interval"])
 
 
 if __name__ == "__main__":
