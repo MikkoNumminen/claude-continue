@@ -29,11 +29,14 @@ _INT_FIELDS = {
 _FLOAT_FIELDS = {"every_hours"}
 _LIST_FIELDS = {"filter"}
 
-# Loop-driving intervals must be positive. A zero/negative poll, retry, or
-# verify interval makes ``watch._sleep_until`` return "reached" immediately,
-# turning the idle-poll and post-fire backoff into a tight loop that re-runs
-# ccusage / the resume action every iteration. Such a value can arrive from the
-# config file or an env var (neither is bounds-checked), so floor them here.
+# Timing values must be positive. For poll/retry/verify, a zero/negative value
+# makes ``watch._sleep_until`` return "reached" immediately, turning the
+# idle-poll and post-fire backoff into a tight loop that re-runs ccusage / the
+# resume action every iteration. ``timeout`` is the ccusage subprocess timeout:
+# it can't busy-loop, but a non-positive value makes every probe time out
+# instantly, so auto-detect never works. Either way the value is invalid and a
+# bad one can arrive from the config file or an env var (neither is
+# bounds-checked), so floor them all here.
 MIN_TIMING_SECONDS = 1
 _TIMING_FLOORS = {
     "poll_interval": MIN_TIMING_SECONDS,
@@ -150,10 +153,11 @@ def timing_issues(cfg: Config) -> list:
 
 
 def clamp_timing(cfg: Config) -> list:
-    """Floor non-positive loop intervals in place; return what was adjusted.
+    """Floor non-positive timing values in place; return what was adjusted.
 
     The watch loop calls this at startup so a bad config degrades (clamped +
-    logged) instead of pinning a CPU and spawning a subprocess every iteration.
+    logged) instead of busy-looping (poll/retry/verify) or making auto-detect
+    fail outright (timeout).
     """
     issues = timing_issues(cfg)
     for name, _value, floor in issues:

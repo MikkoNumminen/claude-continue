@@ -118,6 +118,11 @@ class TestConfigCheck(unittest.TestCase):
         self.assertEqual(c.status, WARN)
         self.assertIn("poll_interval", c.detail)
 
+    def test_nonpositive_timing_ignored_in_fixed_schedule(self):
+        # A fixed schedule never uses these intervals, so don't warn about them.
+        c = doctor._check_config(Config(poll_interval=0, every_hours=5))
+        self.assertEqual(c.status, OK)
+
 
 class TestActionCheck(unittest.TestCase):
     def _check(self, cfg, **kw):
