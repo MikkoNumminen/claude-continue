@@ -4,7 +4,7 @@ from unittest import mock
 
 import _support  # noqa: F401
 
-from claude_continue import action, osenv
+from claude_continue import osenv
 from claude_continue.action import ActionError, perform
 from claude_continue.config import Config
 

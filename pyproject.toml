@@ -11,7 +11,11 @@ requires-python = ">=3.9"
 license = { file = "LICENSE" }
 authors = [{ name = "Mikko Numminen" }]
 keywords = ["claude", "claude-code", "ccusage", "macos", "launchd", "iterm2"]
-dependencies = []  # stdlib only
+dependencies = []  # stdlib only — NO runtime third-party deps
+
+# Dev/CI tools only (never imported at runtime). Pinned for reproducible CI.
+[project.optional-dependencies]
+dev = ["ruff==0.6.9", "mypy==1.11.2"]
 
 [project.scripts]
 claude-continue = "claude_continue.cli:main"
@@ -19,5 +23,39 @@ claude-continue = "claude_continue.cli:main"
 [tool.setuptools]
 package-dir = { "" = "src" }
 
+[tool.setuptools.package-data]
+claude_continue = ["py.typed"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# --- dev tooling (CI-enforced; not runtime deps) ---------------------------
+[tool.ruff]
+target-version = "py39"   # also guards against 3.10+ syntax sneaking in
+line-length = 110
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# F=pyflakes (real bugs: unused/undefined), E/W=pycodestyle, I=isort, B=bugbear.
+# Deliberately NOT pyupgrade (UP): the codebase intentionally uses %-style
+# formatting/logging, and the "no 3.10+ syntax" rule is enforced by the real
+# Python 3.9 CI run, not by rewriting idioms.
+select = ["F", "E", "W", "I", "B"]
+ignore = [
+  "E501",   # line length is advisory here, not a hard failure
+  "E741",   # short locals like `a`, `b` in the version-compare helper
+]
+
+[tool.ruff.lint.per-file-ignores]
+# tests import `_support` FIRST to set sys.path, so import order is bootstrap-
+# driven, not stylistic.
+"tests/*" = ["E402", "I001"]
+
+[tool.mypy]
+python_version = "3.9"
+files = ["src/claude_continue"]
+ignore_missing_imports = true
+# Lenient to start: catch real type errors without requiring full annotation.
+check_untyped_defs = true
+warn_redundant_casts = true
+warn_unused_ignores = true

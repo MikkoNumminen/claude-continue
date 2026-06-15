@@ -22,6 +22,7 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import Callable, Optional
 
 from . import action as action_mod
 from . import ccusage as ccusage_mod
@@ -30,6 +31,14 @@ from .config import Config, clamp_timing
 from .lock import PidLock
 from .log import get_logger
 from .model import Block
+
+# The injectable ports of the watch loop (real impls are the module defaults).
+# See ARCHITECTURE.md "Ports & contracts".
+Clock = Callable[[], datetime]
+Sleeper = Callable[[float], object]                # return ignored (real one is Event.wait -> bool)
+BlockGetter = Callable[[float], Optional[Block]]   # raises ccusage.CcusageUnavailable
+Performer = Callable[..., list]                    # action.perform(cfg, dry_run=False)
+Stop = Callable[[], bool]
 
 
 def _utc_now() -> datetime:
@@ -48,7 +57,7 @@ class _Plan:
     reason: str = ""
 
 
-def _fire(cfg, perform, logger):
+def _fire(cfg: Config, perform: Performer, logger) -> Optional[list]:
     """Perform the action, never letting a failure crash the daemon.
 
     Returns the list of acted-on targets, or None if the fire failed (logged).
@@ -60,7 +69,7 @@ def _fire(cfg, perform, logger):
         return None
 
 
-def _next_plan(cfg: Config, now: datetime, get_block, logger) -> _Plan:
+def _next_plan(cfg: Config, now: datetime, get_block: BlockGetter, logger) -> _Plan:
     # A configured fixed schedule is treated as the primary trigger.
     if cfg.at or cfg.every_hours:
         target = schedule.fixed_target(
@@ -85,7 +94,7 @@ def _next_plan(cfg: Config, now: datetime, get_block, logger) -> _Plan:
     return _Plan("fire", target=target, block=block, reason="reset %s" % _fmt(block.reset_at))
 
 
-def _sleep_until(target: datetime, *, clock, sleep, stop, slice_s: int = 60) -> str:
+def _sleep_until(target: datetime, *, clock: Clock, sleep: Sleeper, stop: Stop, slice_s: int = 60) -> str:
     """Sleep until ``target`` in small slices. Returns "reached" or "stopped"."""
     while True:
         if stop():
@@ -96,7 +105,8 @@ def _sleep_until(target: datetime, *, clock, sleep, stop, slice_s: int = 60) -> 
         sleep(min(float(slice_s), remaining))
 
 
-def _verify_and_retry(cfg, old_block, *, clock, sleep, get_block, perform, logger, stop) -> bool:
+def _verify_and_retry(cfg: Config, old_block: Optional[Block], *, clock: Clock, sleep: Sleeper,
+                      get_block: BlockGetter, perform: Performer, logger, stop: Stop) -> bool:
     """After firing, confirm the window actually rolled. Returns True if a newer
     window became active, False if we gave up without one.
 
@@ -149,13 +159,13 @@ def run(
     cfg: Config,
     *,
     logger=None,
-    clock=None,
-    sleep=None,
-    get_block=None,
-    perform=None,
-    stop=None,
+    clock: Optional[Clock] = None,
+    sleep: Optional[Sleeper] = None,
+    get_block: Optional[BlockGetter] = None,
+    perform: Optional[Performer] = None,
+    stop: Optional[Stop] = None,
     use_lock: bool = True,
-    max_fires=None,
+    max_fires: Optional[int] = None,
 ) -> None:
     logger = logger or get_logger()
     clock = clock or _utc_now
@@ -222,6 +232,7 @@ def run(
                     break
                 continue
 
+            assert plan.target is not None  # a "fire" plan always carries a target
             logger.info("armed: fire at %s (%s)", _fmt(plan.target), plan.reason)
             if _sleep_until(plan.target, clock=clock, sleep=sleep, stop=stop) == "stopped":
                 break

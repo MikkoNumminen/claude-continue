@@ -127,7 +127,7 @@ def pid_alive(pid: int) -> bool:
         SYNCHRONIZE = 0x00100000
         STILL_ACTIVE = 259
         WAIT_OBJECT_0 = 0x0
-        kernel32 = ctypes.windll.kernel32
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]  # windll is Windows-only
         # Declare types so 64-bit HANDLEs aren't truncated to int.
         kernel32.OpenProcess.restype = wintypes.HANDLE
         kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
