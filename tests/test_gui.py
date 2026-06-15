@@ -6,7 +6,7 @@ import _support  # noqa: F401
 
 from claude_continue.action import ActionError
 from claude_continue.config import Config
-from claude_continue.gui import WatchController, format_sessions, update_decision
+from claude_continue.gui import WatchController, format_sessions, update_decision, watch_explanation
 from claude_continue.lock import AlreadyRunning
 from claude_continue.update import UpdateInfo
 
@@ -151,6 +151,34 @@ class TestFormatSessions(unittest.TestCase):
         many = [("S%d" % i, "idle") for i in range(12)]
         out = format_sessions(many, "", watching=False, cfg=Config())
         self.assertIn("...and 4 more", out)  # 12 - 8
+
+
+class TestWatchExplanation(unittest.TestCase):
+    def test_default_explains_continue_to_idle_and_skip_busy(self):
+        out = watch_explanation(Config())
+        self.assertIn("window to reset", out)
+        self.assertIn("continue", out)            # the default text it sends
+        self.assertIn("idle Claude sessions", out)
+        self.assertIn("Busy sessions are skipped", out)
+
+    def test_exec_mode_describes_headless_command(self):
+        out = watch_explanation(Config(exec_cmd="claude -p go"))
+        self.assertIn("claude -p go", out)
+        self.assertIn("headlessly", out)
+        self.assertNotIn("Busy sessions", out)    # no iTerm broadcast in exec mode
+
+    def test_session_targeted(self):
+        out = watch_explanation(Config(session="work"))
+        self.assertIn("work", out)
+        self.assertIn("session", out)
+
+    def test_force_includes_busy(self):
+        out = watch_explanation(Config(force=True))
+        self.assertIn("force is on", out)
+
+    def test_skip_busy_off(self):
+        out = watch_explanation(Config(skip_busy=False))
+        self.assertIn("skip-busy is off", out)
 
 
 class TestUpdateDecision(unittest.TestCase):

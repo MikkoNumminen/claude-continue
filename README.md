@@ -130,6 +130,11 @@ dependencies; for an unattended, survives-reboot setup use `install` instead.
 └──────────────────────────────────────┘
 ```
 
+Before you start, the window spells out **what watching will do** given your
+config (e.g. "sends 'continue' to idle Claude sessions in iTerm2 … Busy
+sessions are skipped") so there are no surprises. That line is shown in the
+idle state and hidden once watching.
+
 It also shows a live **Claude instances** panel (each iTerm2 session's
 status — working/idle — and, while watching, whether it'll be resumed or
 skipped). *macOS only*; on Windows the panel notes it isn't available.
