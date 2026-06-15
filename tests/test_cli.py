@@ -14,7 +14,8 @@ class TestUninstallApp(unittest.TestCase):
     def test_app_flag_routes_to_complete_removal(self):
         from claude_continue import selfremove
         args = cli.build_parser().parse_args(["uninstall", "--app"])
-        summary = {"agent_removed": True, "deleted": [], "bundle": "/Applications/x.app", "frozen": True}
+        summary = {"agent_removed": True, "deleted": [], "bundle": "/Applications/x.app",
+                   "bundle_scheduled": True, "frozen": True}
         with mock.patch.object(selfremove, "remove", return_value=summary) as rm:
             rc = cli.cmd_uninstall(args)
         self.assertEqual(rc, 0)

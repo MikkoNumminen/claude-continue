@@ -82,7 +82,8 @@ def remove(*, purge_config: bool = True, logger=None) -> dict:
     Never raises — a complete removal should degrade, not stall half-done.
     """
     log = logger or (lambda *a: None)
-    summary = {"agent_removed": False, "deleted": [], "bundle": None, "frozen": update.is_frozen()}
+    summary = {"agent_removed": False, "deleted": [], "bundle": None,
+               "bundle_scheduled": False, "frozen": update.is_frozen()}
 
     try:
         summary["agent_removed"] = bool(scheduler.uninstall(purge=True))
@@ -106,6 +107,7 @@ def remove(*, purge_config: bool = True, logger=None) -> dict:
     if target:
         try:
             _spawn_self_delete(target)
+            summary["bundle_scheduled"] = True  # only true if the helper actually launched
         except (OSError, subprocess.SubprocessError) as e:
             log("couldn't schedule bundle deletion: %s", e)
     return summary

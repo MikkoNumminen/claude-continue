@@ -439,8 +439,22 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
         def work():
             try:
                 from . import selfremove
-                selfremove.remove(purge_config=True)
-                rem["phase"] = "done"
+                errs = []
+                summary = selfremove.remove(
+                    purge_config=True,
+                    logger=lambda *a: errs.append(a[0] % a[1:] if len(a) > 1 else a[0]),
+                )
+                # Frozen but the bundle wasn't actually scheduled for deletion
+                # (couldn't locate it, or the helper failed to spawn): config and
+                # the agent are gone but the app survives — surface that, don't
+                # report a clean "done" and quit.
+                if summary["frozen"] and not summary["bundle_scheduled"]:
+                    where = ("\n%s" % summary["bundle"]) if summary["bundle"] else ""
+                    rem["error"] = ("Removed your settings and the background agent, but couldn't "
+                                    "delete the app itself — please delete it manually." + where)
+                    rem["phase"] = "error"
+                else:
+                    rem["phase"] = "done"
             except Exception as e:  # noqa: BLE001 - surfaced in the UI
                 rem["error"] = str(e)
                 rem["phase"] = "error"
@@ -464,9 +478,12 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
             root.destroy()
             return
         if rem["phase"] == "error":
-            update_status.config(text="remove failed: %s" % (rem["error"] or ""), fg="#a00")
-            remove_button.config(state="normal")
+            # deliver the failure via a modal so the update poll can't clobber it;
+            # re-enable BOTH buttons (both were disabled during "removing").
             rem["phase"] = "idle"
+            remove_button.config(state="normal")
+            update_button.config(state="normal")
+            messagebox.showerror("Remove failed", rem["error"] or "removal failed")
         phase = upd["phase"]
         if phase == "checked":
             info = upd["info"]

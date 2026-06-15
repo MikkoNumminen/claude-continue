@@ -70,6 +70,19 @@ class TestRemove(unittest.TestCase):
             summary = selfremove.remove(purge_config=False)
         spawn.assert_called_once_with("/Applications/claude-continue.app")
         self.assertEqual(summary["bundle"], "/Applications/claude-continue.app")
+        self.assertTrue(summary["bundle_scheduled"])   # helper launched -> scheduled
+
+    def test_spawn_failure_marks_not_scheduled(self):
+        # if the detached helper can't launch, bundle_scheduled stays False so the
+        # caller can warn instead of falsely reporting a clean removal
+        with mock.patch.object(selfremove.scheduler, "uninstall", return_value=True), \
+             mock.patch.object(selfremove, "leftover_paths", return_value=[]), \
+             mock.patch.object(selfremove, "removal_target",
+                               return_value="/Applications/claude-continue.app"), \
+             mock.patch.object(selfremove, "_spawn_self_delete", side_effect=OSError("read-only")):
+            summary = selfremove.remove()              # must not raise
+        self.assertEqual(summary["bundle"], "/Applications/claude-continue.app")
+        self.assertFalse(summary["bundle_scheduled"])
 
     def test_purge_false_keeps_config(self):
         tmp = tempfile.mkdtemp()

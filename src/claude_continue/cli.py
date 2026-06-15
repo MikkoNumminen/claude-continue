@@ -278,8 +278,11 @@ def cmd_uninstall(args) -> int:
         print("removed the unattended agent" if summary["agent_removed"] else "no unattended agent was installed")
         for p in summary["deleted"]:
             print("deleted %s" % p)
-        if summary["bundle"]:
+        if summary["bundle"] and summary["bundle_scheduled"]:
             print("the app will delete itself (%s) once this process exits." % summary["bundle"])
+        elif summary["frozen"]:
+            where = " (%s)" % summary["bundle"] if summary["bundle"] else ""
+            print("couldn't delete the app bundle%s — please remove it manually." % where)
         else:
             print("running from source — nothing to self-delete (remove the repo, or `pip uninstall claude-continue`).")
         return 0
