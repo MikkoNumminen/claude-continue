@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from datetime import datetime, timezone
 
 from . import __version__, ccusage, iterm, osenv, tmux, update, watch
@@ -25,6 +26,11 @@ _MAX_SESSIONS_SHOWN = 8
 # avoid spawning osascript every few seconds for the whole time the app is open.
 _SESSION_POLL_WATCHING_MS = 5000
 _SESSION_POLL_IDLE_MS = 15000
+# Re-check for updates periodically (the app may stay open for days) and when the
+# window regains focus, so the button turns green on its own when a release drops
+# — debounced so focus storms / dialog closes don't hammer the releases API.
+_UPDATE_RECHECK_MS = 6 * 60 * 60 * 1000  # every 6 hours
+_UPDATE_MIN_AUTO_S = 120.0               # min seconds between auto re-checks
 
 
 class _FireTap(logging.Handler):
@@ -188,6 +194,15 @@ _BTN_UP_TO_DATE = "#888888"        # gray: current / nothing to install
 # (readable as TEXT colour — we tint the button's text + the status line, never
 # the button background: a coloured highlightbackground paints an ugly box on the
 # macOS native button.)
+
+
+def should_auto_recheck(last_check, now, *, min_interval=_UPDATE_MIN_AUTO_S):
+    """Debounce automatic update re-checks: True only if enough time has passed
+    since the last one (so a focus storm or a closing dialog can't hammer the
+    releases API). ``last_check`` is None before the first check. Pure/testable."""
+    if last_check is None:
+        return True
+    return (now - last_check) >= min_interval
 
 
 def update_button_color(info, *, frozen):
@@ -393,6 +408,11 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
     def check_for_update(auto=False):
         if upd["phase"] in ("checking", "applying"):
             return
+        if auto:
+            # debounce periodic/focus re-checks; a manual click is never debounced
+            if not should_auto_recheck(upd.get("last_auto"), time.monotonic()):
+                return
+            upd["last_auto"] = time.monotonic()
         upd["phase"] = "checking"
         upd["info"] = None
         upd["error"] = None
@@ -527,6 +547,14 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
 
     update_button.config(command=check_for_update)
 
+    def update_recheck_loop():
+        check_for_update(auto=True)  # debounced; colours the button if a release appeared
+        root.after(_UPDATE_RECHECK_MS, update_recheck_loop)
+
+    # re-check when the window regains focus, so it refreshes the moment you look
+    # (debounced inside check_for_update, so dialog closes / focus storms are cheap)
+    root.bind("<FocusIn>", lambda e: check_for_update(auto=True))
+
     def poll_loop():
         if controller.is_watching():
             poll_ccusage()
@@ -550,4 +578,5 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
     root.after(_SESSION_POLL_IDLE_MS, sessions_loop)
     root.after(500, update_poll)
     root.after(900, lambda: check_for_update(auto=True))  # colour the button on launch
+    root.after(_UPDATE_RECHECK_MS, update_recheck_loop)   # then re-check periodically
     root.mainloop()

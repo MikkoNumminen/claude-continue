@@ -11,6 +11,7 @@ from claude_continue.config import Config
 from claude_continue.gui import (
     WatchController,
     format_sessions,
+    should_auto_recheck,
     update_button_color,
     update_decision,
     watch_explanation,
@@ -214,6 +215,18 @@ class TestWatchExplanation(unittest.TestCase):
     def test_tmux_wins_over_keystroke_on_windows(self):
         out = self._on_platform("windows", Config(keystroke=True, tmux=True))
         self.assertIn("tmux", out)
+
+
+class TestShouldAutoRecheck(unittest.TestCase):
+    def test_first_check_always_allowed(self):
+        self.assertTrue(should_auto_recheck(None, 1000.0))
+
+    def test_debounced_within_interval(self):
+        self.assertFalse(should_auto_recheck(1000.0, 1000.0 + 60, min_interval=120))
+
+    def test_allowed_after_interval(self):
+        self.assertTrue(should_auto_recheck(1000.0, 1000.0 + 120, min_interval=120))
+        self.assertTrue(should_auto_recheck(1000.0, 1000.0 + 500, min_interval=120))
 
 
 class TestUpdateButtonColor(unittest.TestCase):
