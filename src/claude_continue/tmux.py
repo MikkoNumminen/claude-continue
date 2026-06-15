@@ -21,6 +21,14 @@ DEFAULT_BUSY_PATTERN = "esc to interrupt"
 # pane_id is a stable handle (e.g. "%3"); the names are what we filter/display on.
 _FMT = "#{pane_id}\t#{session_name}\t#{window_name}\t#{pane_title}"
 
+# How many non-blank lines from the bottom of the visible pane to scan for the
+# busy marker. Claude's "esc to interrupt" footer sits ABOVE the input box
+# (spinner + box border + prompt + hint), so it's several lines up from the very
+# bottom; scan a generous tail so a working pane is reliably seen as busy. The
+# bias is deliberate: a false "busy" only defers a resume to the next retry,
+# whereas a false "idle" would type into a live turn.
+_FOOTER_LINES = 12
+
 
 class TmuxError(RuntimeError):
     """tmux was missing, timed out, or returned an error."""
@@ -80,21 +88,26 @@ def _parse_panes(out, name_filter, session, all_sessions) -> list:
 
 
 def list_panes(name_filter, *, session=None, all_sessions=False, timeout: float = 10.0) -> list:
-    """Return [{id, session, window, title, cmd}] for matching Claude tmux panes."""
+    """Return [{id, session, window, title}] for matching Claude tmux panes."""
     out = _tmux(["list-panes", "-a", "-F", _FMT], timeout=timeout)
     return _parse_panes(out, name_filter, session, all_sessions)
 
 
 def _is_busy(pane_id: str, busy_pattern: str, timeout: float) -> bool:
-    """True if the pane's visible content shows Claude is mid-turn."""
+    """True if the pane's visible content shows Claude is mid-turn.
+
+    Each call is its own `capture-pane` (one per pane) — inherent to tmux, but
+    panes are few and capture-pane is cheap.
+    """
     if not busy_pattern:
         return False
     content = _tmux(["capture-pane", "-p", "-t", pane_id], timeout=timeout)
-    # Claude's "esc to interrupt" footer renders at the bottom of the pane. Only
-    # inspect the last few non-blank lines so the marker appearing earlier in the
-    # transcript (a paste, a doc, our own past output) can't false-trip skip-busy.
+    # Scan a generous tail of the visible pane (see _FOOTER_LINES): Claude's
+    # "esc to interrupt" marker sits a few lines above the input box, not on the
+    # very last line. A paused/limited session shows the limit message there
+    # instead, so it still reads as idle and gets resumed.
     lines = [ln for ln in content.splitlines() if ln.strip()]
-    tail = "\n".join(lines[-3:]).lower()
+    tail = "\n".join(lines[-_FOOTER_LINES:]).lower()
     return busy_pattern.lower() in tail
 
 
@@ -119,14 +132,19 @@ def broadcast(
     effective_skip_busy = skip_busy and not force
     fired = []
     for pane in panes:
-        if effective_skip_busy and _is_busy(pane["id"], busy_pattern, timeout):
+        try:
+            if effective_skip_busy and _is_busy(pane["id"], busy_pattern, timeout):
+                continue
+            if not dry_run:
+                # -l sends the text literally (no key-name interpretation); `--` ends
+                # option parsing so a text starting with '-' can't be read as a flag.
+                # Enter is a separate key event that submits it.
+                _tmux(["send-keys", "-t", pane["id"], "-l", "--", text], timeout=timeout)
+                _tmux(["send-keys", "-t", pane["id"], "Enter"], timeout=timeout)
+        except TmuxError:
+            # a pane can vanish between enumeration and use; skip it rather than
+            # aborting the whole broadcast (mirrors iTerm2's per-session `try`).
             continue
-        if not dry_run:
-            # -l sends the text literally (no key-name interpretation); `--` ends
-            # option parsing so a text starting with '-' can't be read as a flag.
-            # Enter is a separate key event that submits it.
-            _tmux(["send-keys", "-t", pane["id"], "-l", "--", text], timeout=timeout)
-            _tmux(["send-keys", "-t", pane["id"], "Enter"], timeout=timeout)
         fired.append(_label(pane))
     return fired
 
@@ -144,6 +162,9 @@ def list_sessions(
     panes = list_panes(name_filter, session=session, all_sessions=all_sessions, timeout=timeout)
     out = []
     for pane in panes:
-        status = "working" if _is_busy(pane["id"], busy_pattern, timeout) else "idle"
+        try:
+            status = "working" if _is_busy(pane["id"], busy_pattern, timeout) else "idle"
+        except TmuxError:
+            continue  # pane vanished mid-query; drop it rather than failing the whole panel
         out.append((_label(pane), status))
     return out

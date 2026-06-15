@@ -125,24 +125,53 @@ class TestListSessions(unittest.TestCase):
 
 
 class TestBusyHeuristic(unittest.TestCase):
-    def test_marker_only_in_scrollback_reads_as_idle(self):
-        # the busy marker is buried earlier; the live footer (last lines) is an idle prompt
-        fake = _FakeTmux(captures={
-            "%1": "Earlier I said esc to interrupt\nran a command\nfinished it\n\n│ > \n? for shortcuts",
-            "%2": "idle",
-        })
+    def test_marker_far_up_in_scrollback_reads_as_idle(self):
+        # the marker is well above the footer region (old scrollback); the live
+        # bottom is an idle prompt -> idle, so the session is eligible to resume
+        old = "esc to interrupt was mentioned ages ago"
+        filler = "\n".join("output line %d" % i for i in range(16))
+        fake = _FakeTmux(captures={"%1": old + "\n" + filler + "\n│ > \n? for shortcuts", "%2": "idle"})
         with mock.patch.object(tmux, "_tmux", fake):
             sessions = tmux.list_sessions(["claude"])
         self.assertIn(("✳ claude — repoA", "idle"), sessions)
 
-    def test_marker_in_footer_reads_as_working(self):
-        fake = _FakeTmux(captures={
-            "%1": "some output\nmore output\n✶ Working… (esc to interrupt · 2.1k tokens)",
-            "%2": "idle",
-        })
+    def test_marker_above_input_box_reads_as_working(self):
+        # regression: Claude's footer renders the spinner ABOVE the input box, so
+        # the marker is ~5 lines up from the bottom — a 3-line tail would miss it
+        footer = ("assistant said something\n"
+                  "✶ Working… (esc to interrupt · 2.1k tokens)\n"
+                  "\n╭───────────╮\n│ >         │\n╰───────────╯\n? for shortcuts")
+        fake = _FakeTmux(captures={"%1": footer, "%2": "idle"})
         with mock.patch.object(tmux, "_tmux", fake):
             sessions = tmux.list_sessions(["claude"])
         self.assertIn(("✳ claude — repoA", "working"), sessions)
+
+
+class _FlakyTmux(_FakeTmux):
+    """Like _FakeTmux but raises TmuxError for any per-pane op on `bad_pane`
+    (simulates a pane that vanished between enumeration and use)."""
+    def __init__(self, bad_pane, **kw):
+        super().__init__(**kw)
+        self.bad_pane = bad_pane
+
+    def __call__(self, args, *, timeout):
+        if args[0] in ("capture-pane", "send-keys") and self.bad_pane in args:
+            raise tmux.TmuxError("can't find pane: %s" % self.bad_pane)
+        return super().__call__(args, timeout=timeout)
+
+
+class TestResilience(unittest.TestCase):
+    def test_broadcast_skips_vanished_pane_and_fires_rest(self):
+        fake = _FlakyTmux("%2")
+        with mock.patch.object(tmux, "_tmux", fake):
+            fired = tmux.broadcast("continue", ["claude"])
+        self.assertEqual(fired, ["✳ claude — repoA"])  # %2 vanished -> skipped, not aborted
+
+    def test_list_sessions_drops_vanished_pane(self):
+        fake = _FlakyTmux("%2")
+        with mock.patch.object(tmux, "_tmux", fake):
+            sessions = tmux.list_sessions(["claude"])
+        self.assertEqual(sessions, [("✳ claude — repoA", "idle")])  # %2 dropped, no crash
 
 
 class _Proc:
