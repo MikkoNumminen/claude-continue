@@ -124,7 +124,12 @@ def _verify_and_retry(cfg, old_block, *, clock, sleep, get_block, perform, logge
             logger.info("window rolled: next reset %s", _fmt(new_block.reset_at))
             return
         if attempts >= cfg.retry_cap:
-            logger.warning("window still not rolled after %d retries; re-arming on next cycle", cfg.retry_cap)
+            minutes = (cfg.verify_delay + cfg.retry_cap * cfg.retry_interval) // 60
+            logger.warning(
+                "gave up after %d retries (~%dm): window never rolled — quota coverage "
+                "has lapsed; will resume only when ccusage next reports a new window",
+                cfg.retry_cap, minutes,
+            )
             return
         attempts += 1
         state = "no active window yet" if new_block is None else "still on the old window"
