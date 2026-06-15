@@ -22,6 +22,8 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -150,17 +152,40 @@ def asset_for_platform(assets):
 
 # --- check ------------------------------------------------------------------
 
-def check(*, timeout: float = 15.0, opener=_open, current: str | None = None) -> UpdateInfo:
-    """Query the latest release and report whether it's newer than us."""
+_TRANSIENT_HTTP = {408, 425, 429, 500, 502, 503, 504}  # worth retrying
+
+
+def _is_transient(e) -> bool:
+    """A retryable network blip (GitHub 5xx/429, timeout, connection reset)."""
+    if isinstance(e, urllib.error.HTTPError):
+        return e.code in _TRANSIENT_HTTP
+    # URLError wraps socket errors (timeout/DNS/reset); TimeoutError/ConnectionError too
+    return isinstance(e, (urllib.error.URLError, TimeoutError, ConnectionError))
+
+
+def check(*, timeout: float = 15.0, opener=_open, current: str | None = None,
+          attempts: int = 3, sleep=time.sleep) -> UpdateInfo:
+    """Query the latest release and report whether it's newer than us.
+
+    Retries transient failures (GitHub 502/503/504, timeouts) a few times with a
+    short backoff so a momentary blip doesn't surface as 'update check failed'.
+    Never raises — any final failure is reported via UpdateInfo.error.
+    """
     current = current or __version__
-    try:
-        req = urllib.request.Request(API_URL, headers=_UA)
-        with opener(req, timeout=timeout) as resp:
-            data = json.load(resp)
-        latest = data.get("tag_name")
-        raw = data.get("assets", [])
-    except Exception as e:  # noqa: BLE001 - any failure -> reported, never raised
-        return UpdateInfo(current, None, False, None, None, error=str(e)[:100])
+    req = urllib.request.Request(API_URL, headers=_UA)
+    data = None
+    for attempt in range(attempts):
+        try:
+            with opener(req, timeout=timeout) as resp:
+                data = json.load(resp)
+            break
+        except Exception as e:  # noqa: BLE001 - reported, never raised
+            if attempt < attempts - 1 and _is_transient(e):
+                sleep(1.0 * (attempt + 1))  # 1s, 2s backoff
+                continue
+            return UpdateInfo(current, None, False, None, None, error=str(e)[:100])
+    latest = data.get("tag_name")
+    raw = data.get("assets", [])
     name, url = asset_for_platform((a["name"], a["browser_download_url"]) for a in raw)
     digest = next((a.get("digest") for a in raw if a["name"] == name), None) if name else None
     newer = is_newer(latest, current) if latest else False
