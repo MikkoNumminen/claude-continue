@@ -102,6 +102,8 @@ def _check_config(cfg: Config) -> Check:
         return Check("config", WARN, "non-positive timing value(s) %s — invalid; will be clamped to %ds" % (named, MIN_TIMING_SECONDS))
     if cfg.exec_cmd:
         action = "exec"
+    elif cfg.start_window:
+        action = "open window (quota)"
     elif cfg.tmux:
         action = "tmux" + (" -> %r" % cfg.session if cfg.session else "")
     elif cfg.keystroke:
@@ -122,17 +124,20 @@ def _check_config(cfg: Config) -> Check:
 
 
 def _check_action(cfg: Config, *, which, exists, preview) -> Check:
-    # Headless exec: must parse and the binary must be resolvable.
-    if cfg.exec_cmd:
+    # Headless exec (explicit --exec, or quota mode's window-opener): must parse
+    # and the binary must be resolvable.
+    headless = cfg.exec_cmd or (cfg.window_cmd if cfg.start_window else None)
+    if headless:
+        kind = "exec" if cfg.exec_cmd else "window"
         try:
-            argv = osenv.split_command(cfg.exec_cmd)
+            argv = osenv.split_command(headless)
         except ValueError as e:
-            return Check("action", FAIL, "exec command does not parse: %s" % e)
+            return Check("action", FAIL, "%s command does not parse: %s" % (kind, e))
         if not argv:
-            return Check("action", FAIL, "exec command is empty")
+            return Check("action", FAIL, "%s command is empty" % kind)
         if not which(argv[0]):
-            return Check("action", WARN, "exec binary %r not found on PATH (must also be on the agent's PATH)" % argv[0])
-        return Check("action", OK, "headless: %s" % cfg.exec_cmd)
+            return Check("action", WARN, "%s binary %r not found on PATH (must also be on the agent's PATH)" % (kind, argv[0]))
+        return Check("action", OK, "headless %s: %s" % (kind, headless))
 
     # tmux is terminal-agnostic and checked before the platform paths (matches
     # action._resume), so a non-iTerm2 / Linux user can opt in anywhere.

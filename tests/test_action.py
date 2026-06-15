@@ -93,6 +93,21 @@ class TestBroadcastRouting(unittest.TestCase):
                 perform(Config(), dry_run=False)
 
 
+class TestQuotaWindow(unittest.TestCase):
+    def test_start_window_runs_window_cmd_headless(self):
+        out = perform(Config(start_window=True, window_cmd="claude -p hi"), dry_run=True)
+        self.assertEqual(out, ["open window: claude -p hi"])
+
+    def test_exec_takes_precedence_over_start_window(self):
+        out = perform(Config(start_window=True, exec_cmd="claude -p go", window_cmd="x y"), dry_run=True)
+        self.assertEqual(out, ["exec: claude -p go"])
+
+    def test_start_window_real_spawns_detached(self):
+        with mock.patch("claude_continue.action.subprocess.Popen") as popen:
+            perform(Config(start_window=True, window_cmd="claude -p hi"), dry_run=False)
+        popen.assert_called_once()
+
+
 class TestTmuxRouting(unittest.TestCase):
     def test_tmux_takes_priority_over_iterm_on_macos(self):
         # cfg.tmux must route to tmux even on macOS (where iTerm is the default)

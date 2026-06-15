@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 
 from . import __version__, ccusage, iterm, osenv, tmux, update, watch
@@ -233,6 +234,9 @@ def watch_explanation(cfg) -> str:
     config. Shown in the idle state so the user knows the effect before clicking.
     Pure (no Tk) so it's unit-testable."""
     when = "When you start watching, claude-continue waits for your Claude usage window to reset, then "
+    if cfg.start_window:
+        return when + ("opens a fresh window headlessly (no terminals touched) — keeping your "
+                       "5-hour windows back-to-back. It opens one right away if you have none.")
     if cfg.exec_cmd:
         return when + ("runs `%s` headlessly — so work resumes the instant your quota refreshes." % cfg.exec_cmd)
     # --keystroke is the Windows/WSL path: it types into a single titled window
@@ -274,6 +278,8 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
     upd = {"phase": "idle", "info": None, "msg": "", "error": None, "auto": False}
     # self-removal state: idle -> removing -> done (quit; the helper deletes the app) / error
     rem = {"phase": "idle", "error": None}
+    # which mode the running watch is in, so the right button shows "Stop"
+    watch_mode = {"quota": False}
 
     root = tk.Tk()
     root.title("claude-continue")
@@ -292,8 +298,10 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
     sessions_label.pack(fill="x", padx=16, pady=(0, 10))
     explain = tk.Label(root, text="", fg="#555", wraplength=430, justify="center")
     explain.pack(padx=16, pady=(0, 10))
-    button = tk.Button(root, text="▶  Start watching", width=22, height=2)
+    button = tk.Button(root, text="▶  Continue terminals", width=24, height=2)
     button.pack()
+    quota_button = tk.Button(root, text="＋  Start quota", width=24)
+    quota_button.pack(pady=(6, 0))
     note = tk.Label(root, text="", fg="#a00", wraplength=420)
     note.pack(pady=(8, 0))
     # bottom row: a low-key "Remove…" link sits under the Update button
@@ -367,27 +375,41 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
         hours, mins = divmod(secs // 60, 60)
         return "next reset %s · in %dh %02dm" % (reset_at.astimezone().strftime("%H:%M"), hours, mins)
 
+    def set_buttons(active, stopping=False):
+        # active: None (idle/error), "continue", or "quota". The active mode's
+        # button becomes Stop; the other is disabled while a watch runs.
+        if active is None:
+            button.config(text="▶  Continue terminals", state="normal")
+            quota_button.config(text="＋  Start quota", state="normal")
+        elif active == "continue":
+            button.config(text="Stopping…" if stopping else "⏹  Stop", state="disabled" if stopping else "normal")
+            quota_button.config(text="＋  Start quota", state="disabled")
+        else:  # quota
+            quota_button.config(text="Stopping…" if stopping else "⏹  Stop", state="disabled" if stopping else "normal")
+            button.config(text="▶  Continue terminals", state="disabled")
+
     def refresh():
+        watching, stopping = controller.is_watching(), controller.is_stopping()
+        mode = "quota" if watch_mode["quota"] else "continue"
         # the pre-watch explanation is only relevant before you start
-        explain.config(text="" if controller.is_watching() or controller.is_stopping() else watch_explanation(app_cfg))
+        explain.config(text="" if watching or stopping else watch_explanation(app_cfg))
         if controller.error:
             dot.config(text="⚠", fg="#a00")
             status.config(text="Stopped")
             detail.config(text="")
             note.config(text=controller.error)
-            button.config(text="▶  Start watching", state="normal")
-        elif controller.is_stopping():
-            # stop requested; worker is finishing an uninterruptible in-flight fire
+            set_buttons(None)
+        elif stopping:
             dot.config(text="◐", fg="#c80")
             status.config(text="Stopping…")
             detail.config(text="finishing the current cycle")
             note.config(text="")
-            button.config(text="Stopping…", state="disabled")
-        elif controller.is_watching():
+            set_buttons(mode, stopping=True)
+        elif watching:
             dot.config(text="●", fg="#22aa22")
-            status.config(text="WATCHING")
+            status.config(text="WATCHING · quota" if watch_mode["quota"] else "WATCHING")
             detail.config(text=countdown_text())
-            button.config(text="⏹  Stop watching", state="normal")
+            set_buttons(mode)
             if controller.last_fired:
                 note.config(text="last fired %s ✓  (%d total)" % (controller.last_fired.strftime("%H:%M"), controller.fires), fg="#2a2")
             else:
@@ -395,28 +417,44 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
         else:
             dot.config(text="○", fg="#999")
             status.config(text="Idle")
-            detail.config(text="press Start to watch the quota")
-            button.config(text="▶  Start watching", state="normal")
+            detail.config(text="resume terminals at each reset, or just keep a window open")
             note.config(text="")
+            set_buttons(None)
         sessions_label.config(text=format_sessions(
             poll["sessions"], poll["sessions_note"],
-            watching=controller.is_watching(), cfg=app_cfg))
+            watching=watching and not watch_mode["quota"], cfg=app_cfg))
         root.after(1000, refresh)
 
-    def toggle():
-        if controller.is_watching():
-            controller.request_stop()  # non-blocking; UI shows "Stopping…" until the worker exits
-        else:
-            try:
-                from . import action
-                action.perform(app_cfg, dry_run=True)  # validate up front; fail clearly
-            except ActionError as e:
-                note.config(text=str(e), fg="#a00")
-                return
-            controller.start(app_cfg)
-            poll_ccusage()
+    def start_watch(quota):
+        if controller.is_watching() or controller.is_stopping():
+            return
+        cfg = replace(app_cfg, start_window=quota)
+        try:
+            from . import action
+            action.perform(cfg, dry_run=True)  # validate up front; fail clearly
+        except ActionError as e:
+            note.config(text=str(e), fg="#a00")
+            return
+        watch_mode["quota"] = quota
+        controller.start(cfg)
+        poll_ccusage()
 
-    button.config(command=toggle)
+    def toggle_continue():
+        if controller.is_watching() or controller.is_stopping():
+            if not watch_mode["quota"]:
+                controller.request_stop()  # non-blocking
+        else:
+            start_watch(quota=False)
+
+    def toggle_quota():
+        if controller.is_watching() or controller.is_stopping():
+            if watch_mode["quota"]:
+                controller.request_stop()
+        else:
+            start_watch(quota=True)
+
+    button.config(command=toggle_continue)
+    quota_button.config(command=toggle_quota)
 
     def check_for_update(auto=False):
         if upd["phase"] in ("checking", "applying"):

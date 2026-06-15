@@ -64,6 +64,10 @@ def add_action_args(p: argparse.ArgumentParser, *, dry_run: bool = False) -> Non
                    help="resume Claude panes running inside tmux (any terminal, macOS/Linux)")
     a.add_argument("--tmux-busy-pattern", dest="tmux_busy_pattern", default=None, metavar="TEXT",
                    help="pane content marking a busy session in --tmux mode (default: 'esc to interrupt')")
+    a.add_argument("--start-window", dest="start_window", action="store_true", default=None,
+                   help="quota mode: open a fresh usage window headlessly instead of resuming terminals")
+    a.add_argument("--window-cmd", dest="window_cmd", default=None, metavar="CMD",
+                   help="headless command that opens a window in --start-window mode (default: a tiny `claude -p`)")
 
     t = p.add_argument_group("timing")
     t.add_argument("--buffer", type=int, default=None, metavar="S",
@@ -108,6 +112,9 @@ def overrides_to_argv(overrides: dict) -> list:
         elif name == "tmux":
             if value:
                 argv.append("--tmux")
+        elif name == "start_window":
+            if value:
+                argv.append("--start-window")
         elif name == "exec_cmd":
             argv += ["--exec", str(value)]
         elif name == "every_hours":

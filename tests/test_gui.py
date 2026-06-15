@@ -172,6 +172,12 @@ class TestWatchExplanation(unittest.TestCase):
         self.assertIn("idle Claude sessions", out)
         self.assertIn("Busy sessions are skipped", out)
 
+    def test_quota_mode_describes_opening_a_window(self):
+        out = watch_explanation(Config(start_window=True))
+        self.assertIn("window", out)
+        self.assertIn("headlessly", out)
+        self.assertNotIn("sends", out)  # not the resume/broadcast wording
+
     def test_exec_mode_describes_headless_command(self):
         out = watch_explanation(Config(exec_cmd="claude -p go"))
         self.assertIn("claude -p go", out)

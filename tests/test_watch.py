@@ -172,6 +172,44 @@ class TestWatchLoop(unittest.TestCase):
         self.assertTrue(all(s >= 1 for s in sleeps))
         self.assertGreater(fc.now(), T0)
 
+    def test_quota_mode_opens_window_when_idle(self):
+        # quota mode + idle (no active window) -> open one NOW; verify sees it appear
+        T0 = utc(2026, 6, 14, 6)
+        fc = FakeClock(T0)
+        st = {"fires": 0}
+        fired = []
+
+        def gb(timeout=30):
+            return block(1, T0 + timedelta(hours=5)) if st["fires"] >= 1 else None
+
+        def perform(c, dry_run=False):
+            st["fires"] += 1
+            fired.append(fc.now())
+            return ["open window"]
+
+        watch.run(cfg(start_window=True), clock=fc.now, sleep=fc.sleep, get_block=gb,
+                  perform=perform, stop=lambda: False, use_lock=False, max_fires=1)
+        self.assertEqual(len(fired), 1)  # did NOT just poll — it opened a window
+
+    def test_quota_idle_open_retries_until_window_appears(self):
+        # if the first open doesn't register a window, keep opening (old_block=None path)
+        T0 = utc(2026, 6, 14, 6)
+        fc = FakeClock(T0)
+        st = {"fires": 0}
+        fired = []
+
+        def gb(timeout=30):
+            return block(1, T0 + timedelta(hours=5)) if st["fires"] >= 2 else None
+
+        def perform(c, dry_run=False):
+            st["fires"] += 1
+            fired.append(fc.now())
+            return ["open window"]
+
+        watch.run(cfg(start_window=True), clock=fc.now, sleep=fc.sleep, get_block=gb,
+                  perform=perform, stop=lambda: False, use_lock=False, max_fires=1)
+        self.assertGreaterEqual(len(fired), 2)  # re-opened until a window appeared
+
     def test_dedupe_prevents_spin_on_unrolling_window(self):
         T0 = utc(2026, 6, 14, 6)
         fired = []

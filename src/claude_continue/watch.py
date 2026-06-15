@@ -75,6 +75,10 @@ def _next_plan(cfg: Config, now: datetime, get_block, logger) -> _Plan:
         return _Plan("poll", reason="ccusage unavailable")
 
     if block is None:
+        # Quota mode wants a window OPEN; with none active, open one now. Resume
+        # mode has nothing to resume when idle, so it just polls.
+        if cfg.start_window:
+            return _Plan("fire", target=now, reason="quota: no active window — opening one")
         return _Plan("poll", reason="idle (no active window)")
 
     target = schedule.next_target(block, cfg.buffer)
@@ -109,6 +113,9 @@ def _verify_and_retry(cfg, old_block, *, clock, sleep, get_block, perform, logge
     So we keep re-firing `continue` on each check until a later window appears or
     we hit the retry cap. Verification happens at the top of every iteration, so
     even the last re-fire before giving up gets checked.
+
+    Quota mode fires from an idle state too (no window yet), so ``old_block`` may
+    be None — there success is simply *any* active window appearing.
     """
     attempts = 0
     while True:
@@ -120,8 +127,10 @@ def _verify_and_retry(cfg, old_block, *, clock, sleep, get_block, perform, logge
         except ccusage_mod.CcusageUnavailable as e:
             logger.warning("post-fire ccusage check failed: %s; assuming ok", e)
             return
-        if new_block is not None and new_block.reset_at > old_block.reset_at:
-            logger.info("window rolled: next reset %s", _fmt(new_block.reset_at))
+        # Success = a window that's newer than what we fired against. When
+        # old_block is None (quota opened from idle), any active window counts.
+        if new_block is not None and (old_block is None or new_block.reset_at > old_block.reset_at):
+            logger.info("window active: next reset %s", _fmt(new_block.reset_at))
             return
         if attempts >= cfg.retry_cap:
             minutes = (cfg.verify_delay + cfg.retry_cap * cfg.retry_interval) // 60
@@ -191,7 +200,12 @@ def run(
     fires = 0
     last_fired_block_id = None
     try:
-        action_label = "exec" if cfg.exec_cmd else ("send %r" % cfg.text)
+        if cfg.exec_cmd:
+            action_label = "exec"
+        elif cfg.start_window:
+            action_label = "open window (quota mode)"
+        else:
+            action_label = "send %r" % cfg.text
         logger.info("watch started (action: %s)", action_label)
         while not stop():
             plan = _next_plan(cfg, clock(), get_block, logger)
@@ -220,6 +234,10 @@ def run(
                 logger.info("fired -> %s", fired or "(no matching sessions)")
                 if plan.block is not None:
                     last_fired_block_id = plan.block.id
+                # Verify resume fires (block set) and quota opens-from-idle
+                # (block None, but quota mode): confirm a window is active, retry
+                # if not. plan.block may be None here — _verify_and_retry handles it.
+                if plan.block is not None or cfg.start_window:
                     _verify_and_retry(
                         cfg, plan.block, clock=clock, sleep=sleep, get_block=get_block,
                         perform=perform, logger=logger, stop=stop,
