@@ -4,6 +4,13 @@ All notable changes to `claude-continue`. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- CI **secret scan** (gitleaks, full git history) with a `.gitleaks.toml` that
+  extends the default rules with an Anthropic `sk-ant-` key rule — verified to
+  catch a planted key (the defaults alone did not).
+
 ## [0.6.0] — 2026-06-16
 
 ### Added
