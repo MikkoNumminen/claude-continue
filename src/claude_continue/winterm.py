@@ -76,3 +76,83 @@ def send_keystroke(text: str, *, window_title: str = DEFAULT_WINDOW_TITLE,
     if proc.returncode != 0:
         raise RuntimeError("SendKeys failed (%d): %s" % (proc.returncode, (proc.stderr or "").strip()))
     return [label]
+
+
+# --- window listing (the GUI's "Claude instances" panel on Windows) ----------
+#
+# Windows has no per-session "is processing" API (the iTerm2 panel's basis), so
+# the honest analogue is: which top-level terminal windows can I see, and which
+# one will the keystroke land in? ``AppActivate`` matches a window whose title
+# *contains* the target string, so we mirror that here — the panel then shows the
+# user whether their ``--window-title`` target is actually present.
+
+# A title-listing one-liner (built into Windows; reachable from WSL via interop).
+# MainWindowTitle is the visible top-level window title per process; blanks are
+# dropped (background services), and Sort -Unique de-dupes identical titles.
+_LIST_SCRIPT = (
+    "Get-Process | Where-Object { $_.MainWindowTitle } | "
+    "ForEach-Object { $_.MainWindowTitle } | Sort-Object -Unique"
+)
+
+
+def build_list_script() -> str:
+    return _LIST_SCRIPT
+
+
+def _parse_titles(stdout: str) -> list:
+    return [ln.strip() for ln in (stdout or "").splitlines() if ln.strip()]
+
+
+def select_windows(titles, name_filter, window_title: str, *, exclude=()) -> list:
+    """Classify visible window titles for the keystroke panel. Pure/testable.
+
+    Returns ``[(title, status)]`` where status is:
+      - "target": the title contains ``window_title`` — where a keystroke would
+        actually land (matching ``WScript.Shell.AppActivate``'s substring match);
+      - "match":  the title contains one of the ``name_filter`` terms (a likely
+        Claude terminal) but is not the keystroke target.
+
+    Titles in ``exclude`` are dropped (case-insensitive, exact) — the GUI passes
+    its own window title so the app doesn't list itself as a candidate terminal.
+    Targets come first; titles matching neither are dropped. Match is
+    case-insensitive (AppActivate is too), de-duplicated, otherwise order-stable.
+    """
+    target_key = (window_title or "").lower()
+    terms = [t.lower() for t in (name_filter or []) if t]
+    skip = {x.lower() for x in exclude}
+    targets, matches, seen = [], [], set()
+    for title in titles:
+        if title in seen or title.lower() in skip:
+            continue
+        low = title.lower()
+        if target_key and target_key in low:
+            seen.add(title)
+            targets.append((title, "target"))
+        elif any(term in low for term in terms):
+            seen.add(title)
+            matches.append((title, "match"))
+    return targets + matches
+
+
+def list_windows(name_filter, *, window_title: str = DEFAULT_WINDOW_TITLE,
+                 timeout: float = 30.0, exclude=(), run=None) -> list:
+    """Return ``[(title, status)]`` for visible terminal windows (see
+    ``select_windows``). ``run`` runs the PowerShell lister and returns its
+    stdout — injectable so the GUI panel is testable without a real shell."""
+    run = run or _run_list
+    return select_windows(_parse_titles(run(timeout)), name_filter, window_title, exclude=exclude)
+
+
+def _run_list(timeout: float) -> str:
+    try:
+        proc = subprocess.run(
+            [_powershell_bin(), "-NoProfile", "-NonInteractive", "-Command", build_list_script()],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        raise RuntimeError("failed to list windows: %s" % e) from e
+    if proc.returncode != 0:
+        raise RuntimeError("window list failed (%d): %s" % (proc.returncode, (proc.stderr or "").strip()))
+    return proc.stdout

@@ -30,6 +30,67 @@ class TestBuildScript(unittest.TestCase):
         self.assertIn("a{(}b{)}{ENTER}", s)
 
 
+class TestSelectWindows(unittest.TestCase):
+    def test_window_title_is_the_target(self):
+        out = winterm.select_windows(["claude — Windows Terminal"], ["claude"], "Windows Terminal")
+        self.assertEqual(out, [("claude — Windows Terminal", "target")])
+
+    def test_target_matching_is_case_insensitive(self):
+        out = winterm.select_windows(["my WINDOWS TERMINAL"], [], "Windows Terminal")
+        self.assertEqual(out, [("my WINDOWS TERMINAL", "target")])
+
+    def test_filter_match_when_not_the_target(self):
+        out = winterm.select_windows(["✳ claude in cmd"], ["claude", "✳"], "Windows Terminal")
+        self.assertEqual(out, [("✳ claude in cmd", "match")])
+
+    def test_non_matching_titles_dropped(self):
+        out = winterm.select_windows(["Spotify", "Notepad"], ["claude"], "Windows Terminal")
+        self.assertEqual(out, [])
+
+    def test_targets_come_before_matches(self):
+        out = winterm.select_windows(
+            ["✳ claude (cmd)", "claude — Windows Terminal"], ["claude"], "Windows Terminal")
+        self.assertEqual([s for _t, s in out], ["target", "match"])
+
+    def test_duplicate_titles_collapsed(self):
+        out = winterm.select_windows(
+            ["Windows Terminal", "Windows Terminal"], [], "Windows Terminal")
+        self.assertEqual(len(out), 1)
+
+    def test_empty_window_title_still_lists_filter_matches(self):
+        out = winterm.select_windows(["claude here"], ["claude"], "")
+        self.assertEqual(out, [("claude here", "match")])
+
+    def test_excluded_title_dropped_even_if_it_matches(self):
+        # the GUI excludes its own "claude-continue" window so it isn't listed as
+        # a candidate terminal just because the title contains "claude".
+        out = winterm.select_windows(
+            ["claude-continue", "✳ claude (cmd)"], ["claude"], "WT", exclude=("claude-continue",))
+        self.assertEqual(out, [("✳ claude (cmd)", "match")])
+
+
+class TestListWindows(unittest.TestCase):
+    def test_parse_titles_strips_blanks(self):
+        self.assertEqual(winterm._parse_titles("a\n\n  b  \n"), ["a", "b"])
+
+    def test_build_list_script_uses_get_process(self):
+        self.assertIn("Get-Process", winterm.build_list_script())
+        self.assertIn("MainWindowTitle", winterm.build_list_script())
+
+    def test_list_windows_with_injected_runner(self):
+        out = winterm.list_windows(
+            ["claude"], window_title="Windows Terminal",
+            run=lambda timeout: "claude — Windows Terminal\nSpotify\n✳ claude (cmd)\n")
+        self.assertEqual(out, [("claude — Windows Terminal", "target"), ("✳ claude (cmd)", "match")])
+
+    def test_run_list_nonzero_raises(self):
+        fail = subprocess.CompletedProcess([], 1, "", "boom")
+        with mock.patch("claude_continue.winterm._powershell_bin", return_value="powershell"), \
+             mock.patch("claude_continue.winterm.subprocess.run", return_value=fail):
+            with self.assertRaises(RuntimeError):
+                winterm._run_list(30.0)
+
+
 class TestSendKeystroke(unittest.TestCase):
     def test_dry_run_sends_nothing(self):
         out = winterm.send_keystroke("continue", window_title="WT", dry_run=True)
