@@ -39,6 +39,21 @@ class TestSelectWindows(unittest.TestCase):
         out = winterm.select_windows(["my WINDOWS TERMINAL"], [], "Windows Terminal")
         self.assertEqual(out, [("my WINDOWS TERMINAL", "target")])
 
+    def test_prefix_match_is_target(self):
+        # AppActivate activates a window whose title BEGINS WITH the key.
+        out = winterm.select_windows(["Windows Terminal — claude"], [], "Windows Terminal")
+        self.assertEqual(out, [("Windows Terminal — claude", "target")])
+
+    def test_midstring_only_is_not_a_target(self):
+        # The key appears mid-title (neither prefix nor suffix), so AppActivate
+        # would NOT find it — the panel must not mark it as the keystroke target.
+        out = winterm.select_windows(["app — Windows Terminal — logs"], [], "Windows Terminal")
+        self.assertEqual(out, [])
+
+    def test_dedup_is_case_insensitive(self):
+        out = winterm.select_windows(["Windows Terminal", "WINDOWS TERMINAL"], [], "Windows Terminal")
+        self.assertEqual(len(out), 1)
+
     def test_filter_match_when_not_the_target(self):
         out = winterm.select_windows(["✳ claude in cmd"], ["claude", "✳"], "Windows Terminal")
         self.assertEqual(out, [("✳ claude in cmd", "match")])

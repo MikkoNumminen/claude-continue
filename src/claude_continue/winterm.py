@@ -82,9 +82,10 @@ def send_keystroke(text: str, *, window_title: str = DEFAULT_WINDOW_TITLE,
 #
 # Windows has no per-session "is processing" API (the iTerm2 panel's basis), so
 # the honest analogue is: which top-level terminal windows can I see, and which
-# one will the keystroke land in? ``AppActivate`` matches a window whose title
-# *contains* the target string, so we mirror that here — the panel then shows the
-# user whether their ``--window-title`` target is actually present.
+# one will the keystroke land in? ``AppActivate`` activates a window whose title
+# equals, begins with, or ends with the target (NOT any substring), so we mirror
+# exactly that here — the panel then shows the user whether their ``--window-title``
+# target is actually present, and never marks one the keystroke couldn't hit.
 
 # A title-listing one-liner (built into Windows; reachable from WSL via interop).
 # MainWindowTitle is the visible top-level window title per process; blanks are
@@ -103,33 +104,42 @@ def _parse_titles(stdout: str) -> list:
     return [ln.strip() for ln in (stdout or "").splitlines() if ln.strip()]
 
 
+def _appactivate_matches(title_low: str, key_low: str) -> bool:
+    """Whether ``WScript.Shell.AppActivate(key)`` would activate a window titled
+    ``title``. Its real contract is exact, else begins-with, else ends-with (all
+    case-insensitive) — NOT a general substring match. ``select_windows`` uses
+    exactly this for the "target" class so the panel never marks a window the
+    keystroke action couldn't actually land in. Both args are pre-lowercased."""
+    return title_low == key_low or title_low.startswith(key_low) or title_low.endswith(key_low)
+
+
 def select_windows(titles, name_filter, window_title: str, *, exclude=()) -> list:
     """Classify visible window titles for the keystroke panel. Pure/testable.
 
     Returns ``[(title, status)]`` where status is:
-      - "target": the title contains ``window_title`` — where a keystroke would
-        actually land (matching ``WScript.Shell.AppActivate``'s substring match);
+      - "target": ``AppActivate(window_title)`` would land here — an exact /
+        begins-with / ends-with title match (see ``_appactivate_matches``);
       - "match":  the title contains one of the ``name_filter`` terms (a likely
         Claude terminal) but is not the keystroke target.
 
     Titles in ``exclude`` are dropped (case-insensitive, exact) — the GUI passes
     its own window title so the app doesn't list itself as a candidate terminal.
-    Targets come first; titles matching neither are dropped. Match is
-    case-insensitive (AppActivate is too), de-duplicated, otherwise order-stable.
+    Targets come first; titles matching neither are dropped. All matching is
+    case-insensitive, de-duplicated by title (case-insensitively), order-stable.
     """
     target_key = (window_title or "").lower()
     terms = [t.lower() for t in (name_filter or []) if t]
     skip = {x.lower() for x in exclude}
     targets, matches, seen = [], [], set()
     for title in titles:
-        if title in seen or title.lower() in skip:
-            continue
         low = title.lower()
-        if target_key and target_key in low:
-            seen.add(title)
+        if low in seen or low in skip:
+            continue
+        if target_key and _appactivate_matches(low, target_key):
+            seen.add(low)
             targets.append((title, "target"))
         elif any(term in low for term in terms):
-            seen.add(title)
+            seen.add(low)
             matches.append((title, "match"))
     return targets + matches
 

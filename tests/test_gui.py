@@ -39,6 +39,24 @@ def _wait(pred, timeout=2.0):
     return pred()
 
 
+class _ForcePlatform:
+    """Force osenv.detect() via the platform env var, restoring it on exit."""
+
+    def __init__(self, plat):
+        self.plat = plat
+
+    def __enter__(self):
+        self._old = os.environ.get(osenv.PLATFORM_ENV)
+        os.environ[osenv.PLATFORM_ENV] = self.plat
+        return self
+
+    def __exit__(self, *exc):
+        if self._old is None:
+            os.environ.pop(osenv.PLATFORM_ENV, None)
+        else:
+            os.environ[osenv.PLATFORM_ENV] = self._old
+
+
 class TestWatchController(unittest.TestCase):
     def test_start_then_stop(self):
         c = WatchController(runner=_blocking_runner)
@@ -200,47 +218,23 @@ class TestWatchExplanation(unittest.TestCase):
         out = watch_explanation(Config(skip_busy=False))
         self.assertIn("skip-busy is off", out)
 
-    def _on_platform(self, plat, cfg):
-        old = os.environ.get(osenv.PLATFORM_ENV)
-        os.environ[osenv.PLATFORM_ENV] = plat
-        try:
-            return watch_explanation(cfg)
-        finally:
-            if old is None:
-                os.environ.pop(osenv.PLATFORM_ENV, None)
-            else:
-                os.environ[osenv.PLATFORM_ENV] = old
-
     def test_keystroke_on_windows_describes_window_not_iterm(self):
-        out = self._on_platform("windows", Config(keystroke=True, window_title="My Term"))
+        with _ForcePlatform("windows"):
+            out = watch_explanation(Config(keystroke=True, window_title="My Term"))
         self.assertIn("My Term", out)
         self.assertNotIn("iTerm2", out)
         self.assertNotIn("Busy sessions", out)   # keystroke has no skip-busy concept
 
     def test_keystroke_on_macos_falls_through_to_iterm(self):
         # keystroke is a no-op on macOS (action routes to the iTerm broadcast)
-        out = self._on_platform("macos", Config(keystroke=True))
+        with _ForcePlatform("macos"):
+            out = watch_explanation(Config(keystroke=True))
         self.assertIn("iTerm2", out)
 
     def test_tmux_wins_over_keystroke_on_windows(self):
-        out = self._on_platform("windows", Config(keystroke=True, tmux=True))
+        with _ForcePlatform("windows"):
+            out = watch_explanation(Config(keystroke=True, tmux=True))
         self.assertIn("tmux", out)
-
-
-class _ForcePlatform:
-    def __init__(self, plat):
-        self.plat = plat
-
-    def __enter__(self):
-        self._old = os.environ.get(osenv.PLATFORM_ENV)
-        os.environ[osenv.PLATFORM_ENV] = self.plat
-        return self
-
-    def __exit__(self, *exc):
-        if self._old is None:
-            os.environ.pop(osenv.PLATFORM_ENV, None)
-        else:
-            os.environ[osenv.PLATFORM_ENV] = self._old
 
 
 class TestEffectiveCfg(unittest.TestCase):
