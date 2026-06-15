@@ -93,10 +93,22 @@ def _sleep_until(target: datetime, *, clock, sleep, stop, slice_s: int = 60) -> 
 
 
 def _verify_and_retry(cfg, old_block, *, clock, sleep, get_block, perform, logger, stop) -> None:
-    """After firing, confirm the window rolled; retry if ccusage was early.
+    """After firing, confirm the window actually rolled; retry if it didn't.
 
-    Verification happens at the top of each iteration, so *every* re-fire —
-    including the last one before giving up — gets checked.
+    The only proof a resume *took* is a NEW active window whose reset is later
+    than the one we fired for — resuming a session makes Claude work again, which
+    creates a fresh ccusage block. Anything else means the resume did NOT land:
+
+      - same block / earlier reset  -> ccusage was early; we fired before the
+        real reset and the session is still limited.
+      - NO active block             -> the early estimate "ended" the window in
+        ccusage's view, but the paused session generates no activity, so there's
+        nothing active yet. This is NOT success — it's the classic early-fire
+        case; bailing here is exactly what left sessions un-resumed.
+
+    So we keep re-firing `continue` on each check until a later window appears or
+    we hit the retry cap. Verification happens at the top of every iteration, so
+    even the last re-fire before giving up gets checked.
     """
     attempts = 0
     while True:
@@ -108,17 +120,15 @@ def _verify_and_retry(cfg, old_block, *, clock, sleep, get_block, perform, logge
         except ccusage_mod.CcusageUnavailable as e:
             logger.warning("post-fire ccusage check failed: %s; assuming ok", e)
             return
-        if new_block is None:
-            logger.info("no active window after firing; nothing more to confirm")
-            return
-        if new_block.reset_at > old_block.reset_at:
+        if new_block is not None and new_block.reset_at > old_block.reset_at:
             logger.info("window rolled: next reset %s", _fmt(new_block.reset_at))
             return
         if attempts >= cfg.retry_cap:
-            logger.warning("still on the old window after %d retries; re-arming on next cycle", cfg.retry_cap)
+            logger.warning("window still not rolled after %d retries; re-arming on next cycle", cfg.retry_cap)
             return
         attempts += 1
-        logger.warning("still on the old window (retry %d/%d) — re-firing", attempts, cfg.retry_cap)
+        state = "no active window yet" if new_block is None else "still on the old window"
+        logger.warning("%s (retry %d/%d) — re-firing", state, attempts, cfg.retry_cap)
         fired = _fire(cfg, perform, logger)
         logger.info("re-fired -> %s", fired if fired is not None else "(fire failed)")
 

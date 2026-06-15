@@ -175,8 +175,36 @@ class TestWatchLoop(unittest.TestCase):
                   stop=lambda: False, use_lock=False, max_fires=1)
         self.assertEqual(len(fired), 1)
 
-    def test_verify_none_after_fire_stops(self):
-        # fire succeeds, post-fire check shows no active window -> nothing to confirm, no re-fire
+    def test_none_after_fire_keeps_retrying_until_real_reset(self):
+        # Regression for the early-fire bug: ccusage's estimate was early, so the
+        # first `continue` fired BEFORE the real reset. ccusage then reports NO
+        # active window (the estimate "ended" but the paused session makes no
+        # activity). The loop must KEEP firing until the real reset produces a new
+        # window — not treat that first None as success and give up.
+        T0 = utc(2026, 6, 14, 6)
+        fc = FakeClock(T0 - timedelta(minutes=1))
+        fired = []
+        st = {"fires": 0}
+
+        def gb(timeout=30):
+            if st["fires"] == 0:
+                return block(1, T0)                       # arm on the (early) estimate
+            if st["fires"] >= 3:
+                return block(2, T0 + timedelta(hours=5))  # real reset finally rolled
+            return None                                   # fired early; nothing active yet
+
+        def perform(c, dry_run=False):
+            st["fires"] += 1
+            fired.append(fc.now())
+            return ["s"]
+
+        watch.run(cfg(), clock=fc.now, sleep=fc.sleep, get_block=gb, perform=perform,
+                  stop=lambda: False, use_lock=False, max_fires=1)
+        # did NOT bail on the first None: re-fired until the window actually rolled
+        self.assertEqual(len(fired), 3)
+
+    def test_none_forever_gives_up_after_retry_cap(self):
+        # if no window ever appears, the retries are still bounded by retry_cap
         T0 = utc(2026, 6, 14, 6)
         fc = FakeClock(T0 - timedelta(minutes=1))
         fired = []
@@ -190,9 +218,9 @@ class TestWatchLoop(unittest.TestCase):
             st["fired"] = True
             return ["s"]
 
-        watch.run(cfg(), clock=fc.now, sleep=fc.sleep, get_block=gb, perform=perform,
+        watch.run(cfg(retry_cap=4), clock=fc.now, sleep=fc.sleep, get_block=gb, perform=perform,
                   stop=lambda: False, use_lock=False, max_fires=1)
-        self.assertEqual(len(fired), 1)
+        self.assertEqual(len(fired), 1 + 4)  # initial fire + retry_cap re-fires, then stop
 
     def test_fire_failure_does_not_crash_daemon(self):
         # perform raising must NOT propagate out of run(); the loop just re-arms
