@@ -82,8 +82,8 @@ def remove(*, purge_config: bool = True, logger=None) -> dict:
     Never raises — a complete removal should degrade, not stall half-done.
     """
     log = logger or (lambda *a: None)
-    summary = {"agent_removed": False, "deleted": [], "bundle": None,
-               "bundle_scheduled": False, "frozen": update.is_frozen()}
+    summary: dict = {"agent_removed": False, "deleted": [], "bundle": None,
+                     "bundle_scheduled": False, "frozen": update.is_frozen()}
 
     try:
         summary["agent_removed"] = bool(scheduler.uninstall(purge=True))

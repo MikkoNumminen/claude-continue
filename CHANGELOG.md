@@ -4,6 +4,16 @@ All notable changes to `claude-continue`. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- AI-first / contributor docs: `AGENTS.md`, `ARCHITECTURE.md`, `CONTRIBUTING.md`,
+  `CHANGELOG.md`, `SECURITY.md`, `llms.txt`, `.editorconfig`.
+- Enforced quality gates in CI: tests on **Python 3.9 + 3.12 × {ubuntu, macOS,
+  windows}** (the 3.9 job guards the "no 3.10+ syntax" runtime invariant),
+  `ruff` lint, and `mypy` type-check. Added `py.typed` and typed the watch-loop
+  ports.
+
 ## [0.5.5] — 2026-06-15
 
 ### Added

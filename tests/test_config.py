@@ -6,7 +6,6 @@ from pathlib import Path
 
 import _support  # noqa: F401
 
-from claude_continue import config
 from claude_continue.config import (
     MIN_TIMING_SECONDS,
     Config,

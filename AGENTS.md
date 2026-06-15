@@ -51,13 +51,21 @@ CLAUDE_CONTINUE_CCUSAGE_CMD="cat tests/fixtures/active.json" ./bin/claude-contin
 # Force a platform in tests / manual runs
 CLAUDE_CONTINUE_PLATFORM=windows ./bin/claude-continue doctor
 
+# Lint + type-check (CI-enforced; tools are dev-only, never runtime deps)
+python3 -m pip install ".[dev]"   # ruff + mypy, pinned
+ruff check src tests
+mypy src/claude_continue
+
 # Build the standalone app (throwaway venv; doesn't touch system Python)
 ./packaging/build-macos.sh        # -> dist/claude-continue.app   (macOS)
 .\packaging\build-windows.ps1     # -> dist/claude-continue.exe   (Windows)
 ```
 
-There is **no linter/formatter config**; match the surrounding style (4-space
-indent, double quotes, `%`-style logging, comments that explain *why*).
+**CI gates (all must pass):** tests on **Python 3.9 + 3.12 × {ubuntu, macOS,
+windows}**, `ruff check`, and `mypy`. The 3.9 job enforces the "runs on 3.9 / no
+3.10+ syntax" rule. Style: 4-space indent, double quotes, `%`-style logging,
+comments that explain *why* — `ruff` config (in `pyproject.toml`) deliberately
+does **not** enable pyupgrade, so `%`-formatting stays.
 
 ## Project layout
 

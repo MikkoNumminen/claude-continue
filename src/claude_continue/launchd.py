@@ -145,7 +145,7 @@ def _run(cmd, check=False, timeout=15):
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         if check:
-            raise RuntimeError("timed out after %ss: %s" % (timeout, " ".join(cmd)))
+            raise RuntimeError("timed out after %ss: %s" % (timeout, " ".join(cmd))) from None
         # synthesize a failed result so ignore-errors callers don't crash on a wedged launchd
         return subprocess.CompletedProcess(cmd, 124, "", "timed out after %ss" % timeout)
     if check and proc.returncode != 0:

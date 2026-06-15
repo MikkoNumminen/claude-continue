@@ -15,11 +15,10 @@ from datetime import datetime, timezone
 
 from . import action as action_mod
 from . import launchd as launchd_mod
-from . import osenv
+from . import osenv, schedule
 from . import scheduler as scheduler_mod
-from . import schedule
 from .ccusage import CcusageUnavailable, get_active_block
-from .config import Config, MIN_TIMING_SECONDS, timing_issues
+from .config import MIN_TIMING_SECONDS, Config, timing_issues
 
 OK = "ok"
 WARN = "warn"

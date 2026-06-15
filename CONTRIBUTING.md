@@ -31,10 +31,22 @@ Tests must stay **offline and fast**. Don't call real `ccusage`, `osascript`,
 - Force the OS with `CLAUDE_CONTINUE_PLATFORM=windows|macos|wsl|linux`.
 - Mock `subprocess.run`/`Popen` for anything that shells out.
 
+## Lint & type-check
+
+CI runs (and you should too, before pushing):
+
+```bash
+python3 -m pip install ".[dev]"   # ruff + mypy (pinned; dev-only, not runtime deps)
+ruff check src tests
+mypy src/claude_continue
+```
+
 ## Style
 
-- 4-space indent, double quotes, `%`-style logging args. No linter is enforced —
-  match the surrounding code.
+- 4-space indent, double quotes, `%`-style logging args — enforced by `ruff`
+  (config in `pyproject.toml`). pyupgrade (`UP`) is intentionally **off** so the
+  `%`-formatting idiom stays; the "no 3.10+ syntax" rule is enforced by the
+  Python 3.9 CI job, not by a linter.
 - `from __future__ import annotations` at the top of every module; **no 3.10+
   runtime syntax** (it must import on Python 3.9).
 - Comments and docstrings explain **why**, not what. Keep pure logic in

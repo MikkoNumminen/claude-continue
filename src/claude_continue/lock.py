@@ -37,7 +37,7 @@ class PidLock:
                 except (ValueError, OSError):
                     existing = None
                 if existing is not None and existing != os.getpid() and _alive(existing):
-                    raise AlreadyRunning(existing)
+                    raise AlreadyRunning(existing) from None
                 # stale or our own pid — drop it and retry the exclusive create
                 try:
                     self.path.unlink()
@@ -63,6 +63,5 @@ class PidLock:
         self.acquire()
         return self
 
-    def __exit__(self, *exc) -> bool:
+    def __exit__(self, *exc) -> None:
         self.release()
-        return False

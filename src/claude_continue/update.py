@@ -184,6 +184,7 @@ def check(*, timeout: float = 15.0, opener=_open, current: str | None = None,
                 sleep(1.0 * (attempt + 1))  # 1s, 2s backoff
                 continue
             return UpdateInfo(current, None, False, None, None, error=str(e)[:100])
+    assert data is not None  # the loop either broke with data set or returned above
     latest = data.get("tag_name")
     raw = data.get("assets", [])
     name, url = asset_for_platform((a["name"], a["browser_download_url"]) for a in raw)

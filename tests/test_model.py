@@ -3,7 +3,6 @@ import unittest
 import _support  # noqa: F401  (path setup)
 from _support import fixture
 
-from claude_continue import model
 from claude_continue.model import Block, active_block_from_payload, parse_iso
 
 

@@ -16,6 +16,7 @@ import threading
 import time
 from dataclasses import replace
 from datetime import datetime, timezone
+from typing import Any
 
 from . import __version__, ccusage, iterm, osenv, tmux, update, watch
 from .action import ActionError
@@ -265,21 +266,23 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
     """Open the toggle window. Imports tkinter lazily so the rest of the package
     doesn't require a display."""
     import tkinter as tk
-    from tkinter import font as tkfont, messagebox
+    from tkinter import font as tkfont
+    from tkinter import messagebox
 
     controller = WatchController()
     # Config is snapshotted once at startup; edits to the config file / env take
     # effect on the next launch, not mid-session.
     app_cfg = resolve()
-    poll = {"reset_at": None, "note": "", "busy": False,
-            "sessions": None, "sessions_note": "", "sessions_busy": False}
+    # heterogeneous UI state bags mutated by worker threads, read on the main thread
+    poll: dict[str, Any] = {"reset_at": None, "note": "", "busy": False,
+                            "sessions": None, "sessions_note": "", "sessions_busy": False}
     # self-update state machine: idle -> checking -> checked -> [applying -> done] / error
     # `auto` marks a background (startup) check that colours the button without prompting.
-    upd = {"phase": "idle", "info": None, "msg": "", "error": None, "auto": False}
+    upd: dict[str, Any] = {"phase": "idle", "info": None, "msg": "", "error": None, "auto": False}
     # self-removal state: idle -> removing -> done (quit; the helper deletes the app) / error
-    rem = {"phase": "idle", "error": None}
+    rem: dict[str, Any] = {"phase": "idle", "error": None}
     # which mode the running watch is in, so the right button shows "Stop"
-    watch_mode = {"quota": False}
+    watch_mode: dict[str, Any] = {"quota": False}
 
     root = tk.Tk()
     root.title("claude-continue")

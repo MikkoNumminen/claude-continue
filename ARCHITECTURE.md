@@ -20,7 +20,7 @@ back-to-back with no idle gap.
                  ▼
    ┌── watch.run() ───────────────────────────────────────────────┐
    │  _next_plan ── ccusage.get_active_block ── model.Block        │  the loop
-   │      │            (npx ccusage --active --json --offline)     │  (watch.py)
+   │      │         (npx ccusage blocks --active --json --offline) │  (watch.py)
    │      ▼                                                        │
    │  schedule.next_target(block, buffer)  ── fixed_target(at/every)│
    │      │ sleep in ≤60s slices (survives Mac sleep)              │
@@ -61,6 +61,23 @@ back-to-back with no idle gap.
 - **Self-update / self-remove** can't overwrite/delete a running bundle directly,
   so both spawn a **detached helper** that waits for this process to exit, then
   swaps/deletes the `.app`/`.exe` (`update.py`, `selfremove.py`).
+
+## Ports & contracts
+
+`watch.run` is the seam everything plugs into. Its injectable ports (all keyword
+args, defaulting to the real implementations) and their contracts:
+
+| Port | Signature | Contract |
+| --- | --- | --- |
+| `clock` | `() -> datetime` | tz-aware UTC "now". |
+| `sleep` | `(seconds: float) -> None` | interruptible sleep (the real one is `Event.wait`). |
+| `get_block` | `(timeout: float) -> Block \| None` | active block or `None` (idle); raises `ccusage.CcusageUnavailable` on failure (treated as "no signal", never fatal). |
+| `perform` | `(cfg, dry_run=False) -> list[str]` | do the action; returns labels acted on; raises `action.ActionError` on failure (the loop logs + degrades). |
+| `stop` | `() -> bool` | True when the loop should exit (SIGTERM/SIGINT flips it). |
+
+Exceptions that cross module boundaries: `ccusage.CcusageUnavailable`,
+`action.ActionError`, `update.UpdateError`, `tmux.TmuxError`, `lock.AlreadyRunning`.
+All are caught where they'd otherwise crash the daemon.
 
 ## Testing model
 
