@@ -4,12 +4,12 @@ All notable changes to `claude-continue`. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.6.1] — 2026-06-16
 
 ### Added
 - CI **secret scan** (gitleaks, full git history) with a `.gitleaks.toml` that
   extends the default rules with an Anthropic `sk-ant-` key rule — verified to
-  catch a planted key (the defaults alone did not).
+  catch a planted key (the defaults alone did not). No runtime/behavior change.
 
 ## [0.6.0] — 2026-06-16
 
@@ -113,6 +113,7 @@ quality-gate layer and stamps the version.)
   skip-busy, launchd / Windows Task Scheduler agents, and the standalone macOS
   `.app` / Windows `.exe` builds.
 
+[0.6.1]: https://github.com/MikkoNumminen/claude-continue/releases/tag/v0.6.1
 [0.6.0]: https://github.com/MikkoNumminen/claude-continue/releases/tag/v0.6.0
 [0.5.5]: https://github.com/MikkoNumminen/claude-continue/releases/tag/v0.5.5
 [0.5.4]: https://github.com/MikkoNumminen/claude-continue/releases/tag/v0.5.4
