@@ -1,0 +1,22 @@
+# gitleaks config — used by the CI "secret scan" job (and locally:
+#   gitleaks detect --source . --config .gitleaks.toml --redact)
+# Extends gitleaks' built-in provider rules (AWS, GitHub, Stripe, …) with the
+# Anthropic-key rule the defaults lack — the secret this project most cares about.
+title = "claude-continue secret scan"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "anthropic-api-key"
+description = "Anthropic API key (sk-ant-…)"
+# real keys are sk-ant-api03-/sk-ant-sid01- followed by a long url-safe token;
+# keep it broad so any sk-ant- secret is caught.
+regex = '''sk-ant-[A-Za-z0-9_-]{16,}'''
+keywords = ["sk-ant-"]
+
+[[rules]]
+id = "anthropic-api-key-env"
+description = "Anthropic key assigned to an env var"
+regex = '''(?i)(ANTHROPIC|CLAUDE)_API_KEY\s*[:=]\s*['"]?[A-Za-z0-9_\-]{20,}'''
+keywords = ["ANTHROPIC_API_KEY", "CLAUDE_API_KEY"]

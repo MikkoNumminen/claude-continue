@@ -63,8 +63,10 @@ mypy src/claude_continue
 ```
 
 **CI gates (all must pass):** tests on **Python 3.9 + 3.12 × {ubuntu, macOS,
-windows}**, `ruff check`, and `mypy`. The 3.9 job enforces the "runs on 3.9 / no
-3.10+ syntax" rule. Style: 4-space indent, double quotes, `%`-style logging,
+windows}**, `ruff check`, `mypy`, and a **gitleaks secret scan** (full history;
+`.gitleaks.toml` adds an Anthropic `sk-ant-` rule on top of the defaults — run it
+locally with `gitleaks detect --source . --config .gitleaks.toml --redact`). The
+3.9 job enforces the "runs on 3.9 / no 3.10+ syntax" rule. Style: 4-space indent, double quotes, `%`-style logging,
 comments that explain *why* — `ruff` config (in `pyproject.toml`) deliberately
 does **not** enable pyupgrade, so `%`-formatting stays.
 
