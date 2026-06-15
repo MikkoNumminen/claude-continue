@@ -15,6 +15,8 @@ from __future__ import annotations
 import shutil
 import subprocess
 
+from . import osenv
+
 DEFAULT_WINDOW_TITLE = "Windows Terminal"
 
 # SendKeys treats these as metacharacters; each must be wrapped in braces to be literal.
@@ -66,6 +68,7 @@ def send_keystroke(text: str, *, window_title: str = DEFAULT_WINDOW_TITLE,
             capture_output=True,
             text=True,
             timeout=timeout,
+            **osenv.no_window_kwargs(),
         )
     except FileNotFoundError as e:
         raise RuntimeError("powershell not found: %s" % e) from e
@@ -78,91 +81,75 @@ def send_keystroke(text: str, *, window_title: str = DEFAULT_WINDOW_TITLE,
     return [label]
 
 
-# --- window listing (the GUI's "Claude instances" panel on Windows) ----------
+# --- Claude instance listing (the GUI's "Claude instances" panel on Windows) ---
 #
-# Windows has no per-session "is processing" API (the iTerm2 panel's basis), so
-# the honest analogue is: which top-level terminal windows can I see, and which
-# one will the keystroke land in? ``AppActivate`` activates a window whose title
-# equals, begins with, or ends with the target (NOT any substring), so we mirror
-# exactly that here — the panel then shows the user whether their ``--window-title``
-# target is actually present, and never marks one the keystroke couldn't hit.
+# The macOS panel lists iTerm2 *sessions* running Claude; the honest Windows
+# analogue lists the running Claude Code *processes*. Claude Code runs either as
+# the native ``claude.exe`` or as the npm node CLI (its command line names the
+# ``claude-code`` package); the claude-continue app itself is never one of these,
+# so it can't list itself. There's no Windows equivalent of iTerm2's per-session
+# "is processing" flag, so instances are listed without a working/idle marker.
 
-# A title-listing one-liner (built into Windows; reachable from WSL via interop).
-# MainWindowTitle is the visible top-level window title per process; blanks are
-# dropped (background services), and Sort -Unique de-dupes identical titles.
-_LIST_SCRIPT = (
-    "Get-Process | Where-Object { $_.MainWindowTitle } | "
-    "ForEach-Object { $_.MainWindowTitle } | Sort-Object -Unique"
+# "<pid>\t<name>" per Claude Code process: the native ``claude.exe``, or a
+# ``node.exe`` whose command line names the claude-code package (npm install).
+# The command-line match is SCOPED to node.exe on purpose — otherwise the very
+# PowerShell process running this query self-matches (its own command line
+# contains the literal "claude-code"), and so would any shell that merely
+# mentions the package path. CommandLine reads need no elevation for the user's
+# own processes. Built into Windows; reachable from WSL via interop.
+_INSTANCES_SCRIPT = (
+    "Get-CimInstance Win32_Process | "
+    "Where-Object { $_.Name -eq 'claude.exe' -or "
+    "($_.Name -eq 'node.exe' -and $_.CommandLine -match 'claude-code') } | "
+    "ForEach-Object { \"$($_.ProcessId)`t$($_.Name)\" }"
 )
 
 
-def build_list_script() -> str:
-    return _LIST_SCRIPT
+def build_instances_script() -> str:
+    return _INSTANCES_SCRIPT
 
 
-def _parse_titles(stdout: str) -> list:
-    return [ln.strip() for ln in (stdout or "").splitlines() if ln.strip()]
+def _clean_name(name: str) -> str:
+    name = (name or "").strip()
+    return name[:-4] if name.lower().endswith(".exe") else name
 
 
-def _appactivate_matches(title_low: str, key_low: str) -> bool:
-    """Whether ``WScript.Shell.AppActivate(key)`` would activate a window titled
-    ``title``. Its real contract is exact, else begins-with, else ends-with (all
-    case-insensitive) — NOT a general substring match. ``select_windows`` uses
-    exactly this for the "target" class so the panel never marks a window the
-    keystroke action couldn't actually land in. Both args are pre-lowercased."""
-    return title_low == key_low or title_low.startswith(key_low) or title_low.endswith(key_low)
-
-
-def select_windows(titles, name_filter, window_title: str, *, exclude=()) -> list:
-    """Classify visible window titles for the keystroke panel. Pure/testable.
-
-    Returns ``[(title, status)]`` where status is:
-      - "target": ``AppActivate(window_title)`` would land here — an exact /
-        begins-with / ends-with title match (see ``_appactivate_matches``);
-      - "match":  the title contains one of the ``name_filter`` terms (a likely
-        Claude terminal) but is not the keystroke target.
-
-    Titles in ``exclude`` are dropped (case-insensitive, exact) — the GUI passes
-    its own window title so the app doesn't list itself as a candidate terminal.
-    Targets come first; titles matching neither are dropped. All matching is
-    case-insensitive, de-duplicated by title (case-insensitively), order-stable.
-    """
-    target_key = (window_title or "").lower()
-    terms = [t.lower() for t in (name_filter or []) if t]
-    skip = {x.lower() for x in exclude}
-    targets, matches, seen = [], [], set()
-    for title in titles:
-        low = title.lower()
-        if low in seen or low in skip:
+def parse_instances(stdout: str) -> list:
+    """Parse the ``"<pid>\\t<name>"`` lister output into ``[(name, pid)]`` — name
+    without the ``.exe`` suffix (e.g. "claude"). Deduped by pid, order-stable."""
+    out, seen = [], set()
+    for ln in (stdout or "").splitlines():
+        if "\t" not in ln:
             continue
-        if target_key and _appactivate_matches(low, target_key):
-            seen.add(low)
-            targets.append((title, "target"))
-        elif any(term in low for term in terms):
-            seen.add(low)
-            matches.append((title, "match"))
-    return targets + matches
+        pid, name = ln.split("\t", 1)
+        pid = pid.strip()
+        if not pid.isdigit() or pid in seen:
+            continue
+        seen.add(pid)
+        out.append((_clean_name(name), pid))
+    return out
 
 
-def list_windows(name_filter, *, window_title: str = DEFAULT_WINDOW_TITLE,
-                 timeout: float = 30.0, exclude=(), run=None) -> list:
-    """Return ``[(title, status)]`` for visible terminal windows (see
-    ``select_windows``). ``run`` runs the PowerShell lister and returns its
-    stdout — injectable so the GUI panel is testable without a real shell."""
-    run = run or _run_list
-    return select_windows(_parse_titles(run(timeout)), name_filter, window_title, exclude=exclude)
+def list_claude_instances(*, timeout: float = 30.0, run=None) -> list:
+    """Return ``[(name, pid)]`` for running Claude Code processes (native
+    ``claude.exe`` or the npm node CLI), excluding the claude-continue app.
+    ``run`` runs the PowerShell lister and returns its stdout — injectable so the
+    panel is testable without a real shell."""
+    run = run or _run_instances
+    return parse_instances(run(timeout))
 
 
-def _run_list(timeout: float) -> str:
+def _run_instances(timeout: float) -> str:
     try:
         proc = subprocess.run(
-            [_powershell_bin(), "-NoProfile", "-NonInteractive", "-Command", build_list_script()],
+            [_powershell_bin(), "-NoProfile", "-NonInteractive", "-Command", build_instances_script()],
             capture_output=True,
             text=True,
             timeout=timeout,
+            **osenv.no_window_kwargs(),  # no console-window flash from the GUI poll
         )
     except (OSError, subprocess.SubprocessError) as e:
-        raise RuntimeError("failed to list windows: %s" % e) from e
+        raise RuntimeError("failed to list Claude instances: %s" % e) from e
     if proc.returncode != 0:
-        raise RuntimeError("window list failed (%d): %s" % (proc.returncode, (proc.stderr or "").strip()))
+        raise RuntimeError("instance list failed (%d): %s" % (proc.returncode, (proc.stderr or "").strip()))
     return proc.stdout

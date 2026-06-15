@@ -68,6 +68,18 @@ class TestDetachedKwargs(unittest.TestCase):
             self.assertIn("creationflags", osenv.detached_popen_kwargs())
 
 
+class TestNoWindowKwargs(unittest.TestCase):
+    def test_posix_is_empty(self):
+        with mock.patch.object(osenv.os, "name", "posix"):
+            self.assertEqual(osenv.no_window_kwargs(), {})
+
+    def test_windows_sets_create_no_window(self):
+        with mock.patch.object(osenv.os, "name", "nt"):
+            kw = osenv.no_window_kwargs()
+        # CREATE_NO_WINDOW so a GUI-spawned console child doesn't flash a window
+        self.assertEqual(kw.get("creationflags"), 0x08000000)
+
+
 class TestPidAlive(unittest.TestCase):
     def test_self_is_alive(self):
         self.assertTrue(osenv.pid_alive(os.getpid()))

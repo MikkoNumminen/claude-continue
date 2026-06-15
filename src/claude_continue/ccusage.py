@@ -54,6 +54,7 @@ def get_active_block(timeout: float = 30.0) -> Block | None:
             capture_output=True,
             text=True,
             timeout=timeout,
+            **osenv.no_window_kwargs(),  # no console-window flash from the GUI poll
         )
     except FileNotFoundError as e:
         raise CcusageUnavailable(f"command not found: {cmd[0]!r}") from e

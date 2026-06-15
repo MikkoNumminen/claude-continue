@@ -11,14 +11,14 @@ from claude_continue.config import Config
 from claude_continue.gui import (
     WatchController,
     effective_cfg,
+    format_instances,
     format_sessions,
-    format_windows,
     should_auto_recheck,
     update_button_color,
     update_button_label,
     update_decision,
     watch_explanation,
-    win_keystroke_mode,
+    win_instances_mode,
 )
 from claude_continue.gui import _BTN_UPDATE_AVAILABLE, _BTN_UP_TO_DATE
 from claude_continue.lock import AlreadyRunning
@@ -274,49 +274,45 @@ class TestEffectiveCfg(unittest.TestCase):
         self.assertIn("Windows Terminal", out)  # the default keystroke target
 
 
-class TestWinKeystrokeMode(unittest.TestCase):
-    def test_true_on_windows_keystroke(self):
+class TestWinInstancesMode(unittest.TestCase):
+    def test_true_on_native_windows(self):
         with _ForcePlatform("windows"):
-            self.assertTrue(win_keystroke_mode(Config(keystroke=True)))
+            self.assertTrue(win_instances_mode(Config()))
 
     def test_false_when_tmux(self):
         with _ForcePlatform("windows"):
-            self.assertFalse(win_keystroke_mode(Config(keystroke=True, tmux=True)))
+            self.assertFalse(win_instances_mode(Config(tmux=True)))
 
     def test_false_on_macos(self):
         with _ForcePlatform("macos"):
-            self.assertFalse(win_keystroke_mode(Config(keystroke=True)))
+            self.assertFalse(win_instances_mode(Config()))
+
+    def test_false_on_wsl(self):
+        # WSL's Claude is a Linux process Win32_Process can't see.
+        with _ForcePlatform("wsl"):
+            self.assertFalse(win_instances_mode(Config()))
 
 
-class TestFormatWindows(unittest.TestCase):
+class TestFormatInstances(unittest.TestCase):
     def test_none_shows_checking(self):
-        self.assertIn("checking", format_windows(None, "", watching=False, window_title="Windows Terminal"))
+        self.assertIn("checking", format_instances(None, ""))
 
     def test_none_shows_note(self):
-        self.assertIn("failed", format_windows(None, "window list failed: x", watching=False, window_title="WT"))
+        self.assertIn("failed", format_instances(None, "instance list query failed: x"))
 
-    def test_empty_names_the_target(self):
-        out = format_windows([], "", watching=False, window_title="Windows Terminal")
-        self.assertIn("none titled", out)
-        self.assertIn("Windows Terminal", out)
+    def test_empty_says_none_running(self):
+        self.assertIn("none running", format_instances([], ""))
 
-    def test_target_marked_idle(self):
-        out = format_windows([("claude — WT", "target")], "", watching=False, window_title="WT")
-        self.assertIn("keystroke target", out)
-        self.assertIn("claude — WT", out)
-
-    def test_target_marked_while_watching(self):
-        out = format_windows([("claude — WT", "target")], "", watching=True, window_title="WT")
-        self.assertIn("will type here", out)
-
-    def test_match_listed_without_target_tag(self):
-        out = format_windows([("✳ claude", "match")], "", watching=True, window_title="WT")
-        self.assertIn("✳ claude", out)
-        self.assertNotIn("will type here", out)
+    def test_lists_instances_with_count_and_pid(self):
+        out = format_instances([("claude", "22108"), ("claude", "35552")], "")
+        self.assertIn("Claude instances (2):", out)
+        self.assertIn("22108", out)
+        self.assertIn("35552", out)
+        self.assertIn("claude", out)
 
     def test_long_list_truncated(self):
-        many = [("W%d" % i, "match") for i in range(12)]
-        out = format_windows(many, "", watching=False, window_title="WT")
+        many = [("claude", str(i)) for i in range(12)]
+        out = format_instances(many, "")
         self.assertIn("...and 4 more", out)
 
 
