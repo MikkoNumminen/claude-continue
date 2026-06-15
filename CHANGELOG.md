@@ -4,6 +4,21 @@ All notable changes to `claude-continue`. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **Windows GUI no longer flashes console windows.** The GUI polls ccusage and
+  the process list on a timer; spawned from the windowed `.exe` (which has no
+  console), each `subprocess` briefly popped up — and stole focus from — a console
+  window, swallowing the user's keystrokes mid-type. Every GUI subprocess now
+  spawns with `CREATE_NO_WINDOW`. (Regression introduced in 0.7.0.)
+
+### Changed
+- **Windows "Claude instances" panel now lists running Claude Code processes**
+  (`claude.exe`, or the npm `node` CLI) — the real analogue of the macOS session
+  list — instead of guessing at terminal windows by title. Working/idle isn't
+  shown: Windows has no iTerm2-style "is processing" signal.
+
 ## [0.7.0] — 2026-06-16
 
 ### Added

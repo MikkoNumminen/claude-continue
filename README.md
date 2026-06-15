@@ -157,13 +157,14 @@ config (e.g. "sends 'continue' to idle Claude sessions in iTerm2 … Busy
 sessions are skipped") so there are no surprises. That line is shown in the
 idle state and hidden once watching.
 
-It also shows a live **Claude instances** panel (each session's status —
-working/idle — and, while watching, whether it'll be resumed or skipped). It
-reads iTerm2 on macOS, or tmux panes when you run in `--tmux` mode (any
-platform). On **Windows/WSL** (keystroke mode) it instead lists your visible
-terminal windows and marks the one a keystroke will land in, so you can confirm
-the target before starting. In headless `--exec` mode there are no live sessions
-to show, so the panel says so.
+It also shows a live **Claude instances** panel. On macOS it reads iTerm2 (each
+session's status — working/idle — and, while watching, whether it'll be resumed
+or skipped), or tmux panes in `--tmux` mode (any platform). On **Windows** it
+lists the running Claude Code processes (`claude.exe`, or the npm `node` CLI) —
+the closest equivalent to the macOS session list; Windows has no per-session
+"is processing" signal, so there's no working/idle marker. (On WSL, where Claude
+runs as a Linux process the Windows process query can't see, the panel notes it
+has no live view.)
 
 The **⟳ Update** button checks the latest GitHub release and, if a newer one
 exists, downloads it and restarts the app in place (the standalone `.app`/`.exe`

@@ -23,7 +23,6 @@ from .action import ActionError
 from .config import resolve
 from .lock import AlreadyRunning
 
-WINDOW_TITLE = "claude-continue"  # this app's own Tk window title (excluded from the panel)
 _MAX_SESSIONS_SHOWN = 8
 # Poll iTerm faster while watching (status matters then), slower when idle to
 # avoid spawning osascript every few seconds for the whole time the app is open.
@@ -192,30 +191,30 @@ def effective_cfg(cfg):
     return cfg
 
 
-def win_keystroke_mode(cfg) -> bool:
-    """True when the instances panel should list Windows terminal windows (the
-    keystroke target) rather than iTerm2/tmux sessions."""
-    return cfg.keystroke and not cfg.tmux and osenv.detect() in (osenv.WINDOWS, osenv.WSL)
+def win_instances_mode(cfg) -> bool:
+    """True when the panel should list running Claude Code processes rather than
+    iTerm2/tmux sessions. Scoped to native Windows: WSL's Claude runs as a Linux
+    process that Win32_Process can't see, and macOS/Linux use the other paths."""
+    return osenv.is_windows() and not cfg.tmux
 
 
-def format_windows(windows, note, *, watching, window_title) -> str:
-    """Render the Windows analogue of the 'Claude instances' panel: the visible
-    terminal windows, marking the one a keystroke would land in. ``windows`` is a
-    list of (title, status) from ``winterm.select_windows`` (status target/match),
-    or None when unavailable."""
-    if windows is None:
-        return "Terminal windows: " + (note or "checking…")
-    if not windows:
-        return "Terminal windows: none titled “%s” (open it, or set a window title)" % window_title
-    lines = ["Terminal windows (%d):" % len(windows)]
-    for title, status in windows[:_MAX_SESSIONS_SHOWN]:
-        if status == "target":
-            tag = "→ will type here" if watching else "→ keystroke target"
-        else:
-            tag = "·"
-        lines.append("  %-18s %s" % (tag, title))
-    if len(windows) > _MAX_SESSIONS_SHOWN:
-        lines.append("  ...and %d more" % (len(windows) - _MAX_SESSIONS_SHOWN))
+def format_instances(instances, note) -> str:
+    """Render the Windows 'Claude instances' panel — the running Claude Code
+    processes (``claude.exe`` / node CLI). Windows has no iTerm2-style
+    "is processing" signal, so there's no working/idle marker; each is shown as
+    running. ``instances`` is a list of (name, pid), or None when unavailable."""
+    if instances is None:
+        return "Claude instances: " + (note or "checking…")
+    if not instances:
+        return "Claude instances: none running"
+    lines = ["Claude instances (%d):" % len(instances)]
+    for name, pid in instances[:_MAX_SESSIONS_SHOWN]:
+        # native install lists as "claude"; an npm node CLI lists as "claude (node)"
+        # so it still reads as a Claude instance, not a stray node process.
+        label = name if name == "claude" else "claude (%s)" % name
+        lines.append("  ● %-13s (pid %s)" % (label, pid))
+    if len(instances) > _MAX_SESSIONS_SHOWN:
+        lines.append("  ...and %d more" % (len(instances) - _MAX_SESSIONS_SHOWN))
     return "\n".join(lines)
 
 
@@ -317,7 +316,8 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
     # Config is snapshotted once at startup; edits to the config file / env take
     # effect on the next launch, not mid-session. effective_cfg defaults Windows/WSL
     # to keystroke (so "Continue terminals" works zero-config) and is applied once
-    # here, so the explanation, the instances panel, and the action all agree.
+    # here, so the pre-watch explanation and the keystroke action agree. (The
+    # instances panel is an independent view of running processes, not the action.)
     app_cfg = effective_cfg(resolve())
     # heterogeneous UI state bags mutated by worker threads, read on the main thread
     poll: dict[str, Any] = {"reset_at": None, "note": "", "busy": False,
@@ -331,7 +331,7 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
     watch_mode: dict[str, Any] = {"quota": False}
 
     root = tk.Tk()
-    root.title(WINDOW_TITLE)
+    root.title("claude-continue")
     root.geometry("470x540")
     root.resizable(True, True)
     root.minsize(440, 440)
@@ -400,21 +400,20 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
                         all_sessions=app_cfg.all_sessions, timeout=float(app_cfg.timeout),
                     )
                     poll["sessions_note"] = ""
-                elif win_keystroke_mode(app_cfg):  # Windows/WSL: list terminal windows
-                    poll["sessions"] = winterm.list_windows(
-                        app_cfg.filter, window_title=app_cfg.window_title,
-                        timeout=float(app_cfg.timeout), exclude=(WINDOW_TITLE,),
-                    )
+                elif win_instances_mode(app_cfg):  # native Windows: list Claude processes
+                    poll["sessions"] = winterm.list_claude_instances(timeout=float(app_cfg.timeout))
                     poll["sessions_note"] = ""
                 else:
                     poll["sessions"] = None
-                    poll["sessions_note"] = "no live view in this mode (headless --exec)"
+                    # WSL keystroke / Linux / headless --exec: no listable processes
+                    # here (WSL's Claude is a Linux process Win32_Process can't see).
+                    poll["sessions_note"] = "no live process view on this platform"
             except Exception as e:  # noqa: BLE001
                 poll["sessions"] = None
                 if app_cfg.tmux:
                     src = "tmux"
-                elif win_keystroke_mode(app_cfg):
-                    src = "window list"
+                elif win_instances_mode(app_cfg):
+                    src = "instance list"
                 else:
                     src = "iTerm2"
                 poll["sessions_note"] = "%s query failed: %s" % (src, str(e)[:50])
@@ -480,12 +479,10 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
             detail.config(text="resume terminals at each reset, or just keep a window open")
             note.config(text="")
             set_buttons(None)
-        live = watching and not watch_mode["quota"]
-        if win_keystroke_mode(app_cfg):
-            sessions_label.config(text=format_windows(
-                poll["sessions"], poll["sessions_note"],
-                watching=live, window_title=app_cfg.window_title))
+        if win_instances_mode(app_cfg):
+            sessions_label.config(text=format_instances(poll["sessions"], poll["sessions_note"]))
         else:
+            live = watching and not watch_mode["quota"]
             sessions_label.config(text=format_sessions(
                 poll["sessions"], poll["sessions_note"], watching=live, cfg=app_cfg))
         root.after(1000, refresh)

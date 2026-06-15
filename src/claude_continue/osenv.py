@@ -113,6 +113,17 @@ def detached_popen_kwargs() -> dict:
     return {"start_new_session": True}
 
 
+def no_window_kwargs() -> dict:
+    """subprocess kwargs that suppress the console window a child console program
+    (powershell, npx) would otherwise FLASH on Windows when spawned from a
+    windowed GUI process that has no console of its own. The GUI polls ccusage and
+    the window list on a timer, so without this a console box pops up — and steals
+    focus — every few seconds, swallowing the user's keystrokes. No-op off Windows."""
+    if os.name == "nt":
+        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+    return {}
+
+
 def pid_alive(pid: int) -> bool:
     """True if a process with ``pid`` exists. Cross-platform.
 
