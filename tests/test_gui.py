@@ -1,12 +1,21 @@
+import os
 import threading
 import time
 import unittest
 
 import _support  # noqa: F401
 
+from claude_continue import osenv
 from claude_continue.action import ActionError
 from claude_continue.config import Config
-from claude_continue.gui import WatchController, format_sessions, update_decision, watch_explanation
+from claude_continue.gui import (
+    WatchController,
+    format_sessions,
+    update_button_color,
+    update_decision,
+    watch_explanation,
+)
+from claude_continue.gui import _BTN_UPDATE_AVAILABLE, _BTN_UP_TO_DATE
 from claude_continue.lock import AlreadyRunning
 from claude_continue.update import UpdateInfo
 
@@ -179,6 +188,52 @@ class TestWatchExplanation(unittest.TestCase):
     def test_skip_busy_off(self):
         out = watch_explanation(Config(skip_busy=False))
         self.assertIn("skip-busy is off", out)
+
+    def _on_platform(self, plat, cfg):
+        old = os.environ.get(osenv.PLATFORM_ENV)
+        os.environ[osenv.PLATFORM_ENV] = plat
+        try:
+            return watch_explanation(cfg)
+        finally:
+            if old is None:
+                os.environ.pop(osenv.PLATFORM_ENV, None)
+            else:
+                os.environ[osenv.PLATFORM_ENV] = old
+
+    def test_keystroke_on_windows_describes_window_not_iterm(self):
+        out = self._on_platform("windows", Config(keystroke=True, window_title="My Term"))
+        self.assertIn("My Term", out)
+        self.assertNotIn("iTerm2", out)
+        self.assertNotIn("Busy sessions", out)   # keystroke has no skip-busy concept
+
+    def test_keystroke_on_macos_falls_through_to_iterm(self):
+        # keystroke is a no-op on macOS (action routes to the iTerm broadcast)
+        out = self._on_platform("macos", Config(keystroke=True))
+        self.assertIn("iTerm2", out)
+
+    def test_tmux_wins_over_keystroke_on_windows(self):
+        out = self._on_platform("windows", Config(keystroke=True, tmux=True))
+        self.assertIn("tmux", out)
+
+
+class TestUpdateButtonColor(unittest.TestCase):
+    def test_available_is_green(self):
+        info = UpdateInfo("0.5.0", "v0.6.0", True, "a.zip", "https://x")
+        self.assertEqual(update_button_color(info, frozen=True), _BTN_UPDATE_AVAILABLE)
+
+    def test_up_to_date_is_gray(self):
+        info = UpdateInfo("0.5.0", "v0.5.0", False, None, None)
+        self.assertEqual(update_button_color(info, frozen=True), _BTN_UP_TO_DATE)
+
+    def test_source_install_is_gray(self):
+        # newer exists but not installable from source -> gray, not green
+        info = UpdateInfo("0.5.0", "v0.6.0", True, "a.zip", "https://x")
+        self.assertEqual(update_button_color(info, frozen=False), _BTN_UP_TO_DATE)
+
+    def test_error_or_unknown_is_none(self):
+        self.assertIsNone(update_button_color(None, frozen=True))
+        err = UpdateInfo("0.5.0", None, False, None, None, error="boom")
+        self.assertIsNone(update_button_color(err, frozen=True))
 
 
 class TestUpdateDecision(unittest.TestCase):

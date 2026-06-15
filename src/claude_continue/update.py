@@ -18,6 +18,7 @@ import json
 import os
 import shlex
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -34,6 +35,55 @@ RELEASES_PAGE = "https://github.com/%s/releases/latest" % REPO
 _UA = {"Accept": "application/vnd.github+json", "User-Agent": "claude-continue-updater"}
 # GitHub serves release assets from these hosts (the download URL redirects).
 _ALLOWED_HOSTS = {"github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"}
+
+# System CA bundles to fall back on when the (frozen-app) default context has
+# none. A PyInstaller .app bundles its own OpenSSL whose compiled-in OPENSSLDIR
+# points at the build machine, so create_default_context() can load ZERO CAs and
+# every HTTPS request dies with "unable to get local issuer certificate". These
+# absolute paths exist on the user's real OS regardless of the bundle.
+_CA_FALLBACKS = (
+    "/etc/ssl/cert.pem",                     # macOS + many *nix
+    "/private/etc/ssl/cert.pem",
+    "/opt/homebrew/etc/openssl@3/cert.pem",  # Homebrew (Apple silicon)
+    "/usr/local/etc/openssl@3/cert.pem",     # Homebrew (Intel)
+    "/etc/pki/tls/certs/ca-bundle.crt",      # RHEL/Fedora
+    "/etc/ssl/certs/ca-certificates.crt",    # Debian/Ubuntu
+)
+
+
+def _ca_count(ctx) -> int:
+    try:
+        return ctx.cert_store_stats().get("x509_ca", 0)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _ssl_context():
+    """A verifying TLS context that still works inside the frozen .app.
+
+    Windows pulls CAs from the system store and a from-source run finds the
+    configured bundle, so the default context is fine there. Only the frozen
+    macOS app tends to load zero CAs — when it does, load the OS system bundle.
+    """
+    ctx = ssl.create_default_context()
+    # In a frozen app the bundled OpenSSL may load ZERO CAs, or a stale/partial
+    # bundle missing a needed root — so when frozen, additively merge the OS
+    # system bundle. load_verify_locations only ADDS trust anchors; it never
+    # weakens the (still hostname- and chain-verifying) context.
+    if is_frozen() or _ca_count(ctx) == 0:
+        for path in _CA_FALLBACKS:
+            if os.path.exists(path):
+                try:
+                    ctx.load_verify_locations(cafile=path)
+                except (OSError, ssl.SSLError):
+                    continue
+                break  # one system bundle (e.g. /etc/ssl/cert.pem) is enough
+    return ctx
+
+
+def _open(req, timeout):
+    """Default opener for check(): urlopen with the frozen-app-safe TLS context."""
+    return urllib.request.urlopen(req, timeout=timeout, context=_ssl_context())
 
 
 class UpdateError(Exception):
@@ -100,7 +150,7 @@ def asset_for_platform(assets):
 
 # --- check ------------------------------------------------------------------
 
-def check(*, timeout: float = 15.0, opener=urllib.request.urlopen, current: str | None = None) -> UpdateInfo:
+def check(*, timeout: float = 15.0, opener=_open, current: str | None = None) -> UpdateInfo:
     """Query the latest release and report whether it's newer than us."""
     current = current or __version__
     try:
@@ -161,7 +211,7 @@ def _verify_digest(path: str, digest: str | None) -> None:
 def _download(url: str, dest: str, timeout: float) -> None:
     _check_url(url)
     req = urllib.request.Request(url, headers={"User-Agent": _UA["User-Agent"]})
-    with urllib.request.urlopen(req, timeout=timeout) as resp, open(dest, "wb") as out:
+    with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as resp, open(dest, "wb") as out:
         shutil.copyfileobj(resp, out)
 
 
@@ -208,13 +258,22 @@ def _apply_macos(zip_path: str, tmp: str, relaunch: bool, bundle_override: str |
     bundle = bundle_override or macos_bundle_path()
     if not bundle:
         raise UpdateError("couldn't locate the .app bundle to replace")
-    subprocess.run(["ditto", "-x", "-k", zip_path, tmp], check=True)
+    # Honor apply_update's "raises UpdateError on any problem" contract: ditto and
+    # rename can raise CalledProcessError/OSError, which the CLI would otherwise
+    # surface as a raw traceback (the GUI worker's broad except hid it).
+    try:
+        subprocess.run(["ditto", "-x", "-k", zip_path, tmp], check=True)
+    except (OSError, subprocess.SubprocessError) as e:
+        raise UpdateError("failed to extract the update: %s" % e) from e
     new_app = os.path.join(tmp, "claude-continue.app")
     if not os.path.isdir(new_app):
         raise UpdateError("update archive didn't contain claude-continue.app")
     backup = bundle + ".old"
     shutil.rmtree(backup, ignore_errors=True)
-    os.rename(bundle, backup)  # macOS lets us move an in-use bundle aside
+    try:
+        os.rename(bundle, backup)  # macOS lets us move an in-use bundle aside
+    except OSError as e:
+        raise UpdateError("couldn't move the current app aside: %s" % e) from e
     try:
         subprocess.run(["ditto", new_app, bundle], check=True)
     except Exception as e:  # noqa: BLE001 - roll back to the old bundle
@@ -262,7 +321,10 @@ def windows_swap_script(new_exe: str, target_exe: str, pid: int, relaunch: bool)
 def _apply_windows(new_exe: str, relaunch: bool) -> str:
     target = os.path.realpath(sys.executable)
     script_path = os.path.join(tempfile.gettempdir(), "claude-continue-update.cmd")
-    with open(script_path, "w") as f:
-        f.write(windows_swap_script(new_exe, target, os.getpid(), relaunch))
-    subprocess.Popen(["cmd", "/c", script_path], **osenv.detached_popen_kwargs())
+    try:
+        with open(script_path, "w") as f:
+            f.write(windows_swap_script(new_exe, target, os.getpid(), relaunch))
+        subprocess.Popen(["cmd", "/c", script_path], **osenv.detached_popen_kwargs())
+    except (OSError, subprocess.SubprocessError) as e:
+        raise UpdateError("couldn't launch the Windows update helper: %s" % e) from e
     return target

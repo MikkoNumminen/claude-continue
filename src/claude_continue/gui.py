@@ -183,6 +183,20 @@ def update_decision(info, *, frozen):
     return "prompt", "%s available" % info.latest
 
 
+_BTN_UPDATE_AVAILABLE = "#34c759"  # green: an installable update is waiting
+_BTN_UP_TO_DATE = "#c9c9c9"        # gray: current / nothing to install
+
+
+def update_button_color(info, *, frozen):
+    """Tint for the Update button: green when an installable update is available,
+    gray when up-to-date (or not installable), None when unknown (no check yet /
+    error) so the caller leaves the default."""
+    if info is None or info.error:
+        return None
+    kind, _ = update_decision(info, frozen=frozen)
+    return _BTN_UPDATE_AVAILABLE if kind == "prompt" else _BTN_UP_TO_DATE
+
+
 def watch_explanation(cfg) -> str:
     """Plain-language description of what 'Start watching' will do, given the
     config. Shown in the idle state so the user knows the effect before clicking.
@@ -190,6 +204,12 @@ def watch_explanation(cfg) -> str:
     when = "When you start watching, claude-continue waits for your Claude usage window to reset, then "
     if cfg.exec_cmd:
         return when + ("runs `%s` headlessly — so work resumes the instant your quota refreshes." % cfg.exec_cmd)
+    # --keystroke is the Windows/WSL path: it types into a single titled window
+    # (no session/skip-busy concept). tmux wins over it (matches action._resume),
+    # and on macOS keystroke is a no-op that falls through to the iTerm2 broadcast.
+    if cfg.keystroke and not cfg.tmux and osenv.detect() in (osenv.WINDOWS, osenv.WSL):
+        return when + ('types “%s” into the “%s” window — so paused work resumes the instant your quota refreshes.'
+                       % (cfg.text, cfg.window_title))
     if cfg.session:
         target = "the “%s” session" % cfg.session
     elif cfg.tmux:
@@ -219,7 +239,8 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
     poll = {"reset_at": None, "note": "", "busy": False,
             "sessions": None, "sessions_note": "", "sessions_busy": False}
     # self-update state machine: idle -> checking -> checked -> [applying -> done] / error
-    upd = {"phase": "idle", "info": None, "msg": "", "error": None}
+    # `auto` marks a background (startup) check that colours the button without prompting.
+    upd = {"phase": "idle", "info": None, "msg": "", "error": None, "auto": False}
 
     root = tk.Tk()
     root.title("claude-continue")
@@ -360,13 +381,14 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
 
     button.config(command=toggle)
 
-    def check_for_update():
+    def check_for_update(auto=False):
         if upd["phase"] in ("checking", "applying"):
             return
         upd["phase"] = "checking"
         upd["info"] = None
         upd["error"] = None
-        upd["msg"] = "checking for updates…"
+        upd["auto"] = auto
+        upd["msg"] = "" if auto else "checking for updates…"
 
         def work():
             try:
@@ -398,7 +420,8 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
         if phase == "checked":
             info = upd["info"]
             kind, msg = update_decision(info, frozen=update.is_frozen())
-            if kind == "prompt":
+            auto = upd.get("auto", False)
+            if kind == "prompt" and not auto:
                 upd["phase"] = "prompting"
                 if messagebox.askyesno(
                     "Update available",
@@ -409,7 +432,9 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
                     upd["msg"] = "update postponed"
                     upd["phase"] = "idle"
             else:
-                upd["msg"] = msg
+                # a startup auto-check (or any non-installable result) just reports
+                # status + colours the button; it never pops a dialog.
+                upd["msg"] = ("%s available — click ⟳ to update" % info.latest) if kind == "prompt" else msg
                 upd["phase"] = "idle"
         elif phase == "done":
             upd["msg"] = "updated — restarting…"
@@ -423,6 +448,12 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
         busy = upd["phase"] in ("checking", "applying", "prompting", "quitting")
         update_button.config(state="disabled" if busy else "normal")
         update_status.config(text=upd["msg"])
+        # green when an update is installable, gray when up to date (None until the
+        # first check completes). Set both bg (Linux/Win) and highlightbackground
+        # (the macOS tk.Button face tint) so it shows on every platform.
+        color = update_button_color(upd["info"], frozen=update.is_frozen())
+        if color:
+            update_button.config(bg=color, highlightbackground=color)
         root.after(500, update_poll)
 
     update_button.config(command=check_for_update)
@@ -449,4 +480,5 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
     root.after(30000, poll_loop)
     root.after(_SESSION_POLL_IDLE_MS, sessions_loop)
     root.after(500, update_poll)
+    root.after(900, lambda: check_for_update(auto=True))  # colour the button on launch
     root.mainloop()

@@ -282,6 +282,35 @@ def cmd_uninstall(args) -> int:
     return 0
 
 
+def cmd_update(args) -> int:
+    from . import update
+    info = update.check()
+    if info.error:
+        print("update check failed: %s" % info.error)
+        return 1
+    if not info.newer:
+        print("up to date (v%s)" % info.current)
+        return 0
+    print("%s is available (you have v%s)." % (info.latest, info.current))
+    if not update.is_frozen():
+        print("  running from source — update with `git pull` (or pip), not here.")
+        return 0
+    if not info.asset_url:
+        print("  no downloadable build for this platform — see %s" % update.RELEASES_PAGE)
+        return 0
+    if not args.apply:
+        print("  run `claude-continue update --apply` to download and replace this build.")
+        return 0
+    try:
+        print("downloading %s…" % info.asset_name)
+        target = update.apply_update(info, relaunch=False)
+        print("installed %s -> %s" % (info.latest, target))
+    except update.UpdateError as e:
+        print("update failed: %s" % e)
+        return 1
+    return 0
+
+
 # --- entrypoint --------------------------------------------------------------
 
 def build_parser() -> argparse.ArgumentParser:
@@ -324,6 +353,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_uninstall = sub.add_parser("uninstall", help="remove the unattended agent (launchd / Task Scheduler)")
     p_uninstall.add_argument("--purge", action="store_true", help="also delete the launchd plist file (macOS only)")
     p_uninstall.set_defaults(func=cmd_uninstall)
+
+    p_update = sub.add_parser("update", help="check for a newer release (--apply to download + replace this build)")
+    p_update.add_argument("--apply", action="store_true", help="download and replace the running build if newer")
+    p_update.set_defaults(func=cmd_update)
 
     return p
 
