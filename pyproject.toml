@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-continue"
-version = "0.5.5"
+version = "0.6.0"
 description = "Auto-resume Claude Code work the instant each 5-hour usage window resets, so windows run back-to-back."
 readme = "README.md"
 requires-python = ">=3.9"

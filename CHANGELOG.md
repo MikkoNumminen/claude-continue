@@ -4,7 +4,7 @@ All notable changes to `claude-continue`. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.6.0] — 2026-06-16
 
 ### Added
 - AI-first / contributor docs: `AGENTS.md`, `ARCHITECTURE.md`, `CONTRIBUTING.md`,
@@ -13,6 +13,9 @@ All notable changes to `claude-continue`. Format follows
   windows}** (the 3.9 job guards the "no 3.10+ syntax" runtime invariant),
   `ruff` lint, and `mypy` type-check. Added `py.typed` and typed the watch-loop
   ports.
+
+(No runtime/behavior change vs 0.5.5 — this release ships the documentation and
+quality-gate layer and stamps the version.)
 
 ## [0.5.5] — 2026-06-15
 
@@ -103,6 +106,7 @@ All notable changes to `claude-continue`. Format follows
   skip-busy, launchd / Windows Task Scheduler agents, and the standalone macOS
   `.app` / Windows `.exe` builds.
 
+[0.6.0]: https://github.com/MikkoNumminen/claude-continue/releases/tag/v0.6.0
 [0.5.5]: https://github.com/MikkoNumminen/claude-continue/releases/tag/v0.5.5
 [0.5.4]: https://github.com/MikkoNumminen/claude-continue/releases/tag/v0.5.4
 [0.5.3]: https://github.com/MikkoNumminen/claude-continue/releases/tag/v0.5.3
