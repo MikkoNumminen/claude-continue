@@ -32,6 +32,21 @@ class TestUninstallApp(unittest.TestCase):
         rm.assert_not_called()
 
 
+class TestStatusQuotaMode(unittest.TestCase):
+    def test_status_shows_open_window_not_send_continue(self):
+        import contextlib
+        import io
+        from claude_continue.ccusage import CcusageUnavailable
+        args = cli.build_parser().parse_args(["status", "--start-window"])
+        buf = io.StringIO()
+        with mock.patch("claude_continue.cli.get_active_block", side_effect=CcusageUnavailable("x")), \
+             contextlib.redirect_stdout(buf):
+            cli.cmd_status(args)
+        out = buf.getvalue()
+        self.assertIn("open window (quota)", out)
+        self.assertNotIn("send", out)  # not the resume/broadcast wording
+
+
 class TestUpdateCommand(unittest.TestCase):
     def _run(self, info, apply=False):
         from claude_continue import update
@@ -142,6 +157,19 @@ class TestOverridesRoundTrip(unittest.TestCase):
     def test_tmux_true_emits_bare_flag_not_value(self):
         argv = cli.overrides_to_argv({"tmux": True})
         self.assertEqual(argv, ["--tmux"])  # not ["--tmux", "True"]
+
+    def test_start_window_flags_roundtrip(self):
+        p = cli.build_parser()
+        install_args = p.parse_args(["install", "--start-window", "--window-cmd", "claude -p hi"])
+        argv = cli.overrides_to_argv(cli.build_overrides(install_args))
+        self.assertIn("--start-window", argv)
+        self.assertIn("--window-cmd", argv)
+        watch_args = p.parse_args(["watch"] + argv)
+        self.assertTrue(watch_args.start_window)
+        self.assertEqual(watch_args.window_cmd, "claude -p hi")
+
+    def test_start_window_true_emits_bare_flag(self):
+        self.assertEqual(cli.overrides_to_argv({"start_window": True}), ["--start-window"])
 
 
 class TestFireCommand(unittest.TestCase):

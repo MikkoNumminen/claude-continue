@@ -88,6 +88,11 @@ class TestPrecedence(unittest.TestCase):
         cfg = resolve(config_path=Path(path))
         self.assertEqual(cfg.buffer, 90)  # default, no crash
 
+    def test_blank_window_cmd_restored_to_default(self):
+        # a blanked window_cmd would make quota mode try to run an empty command
+        cfg = resolve({"window_cmd": "   "}, config_path=Path("/nonexistent/config.json"))
+        self.assertEqual(cfg.window_cmd, Config.window_cmd)
+
 
 class TestTimingClamp(unittest.TestCase):
     def test_sane_values_report_no_issues(self):

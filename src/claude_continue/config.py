@@ -17,7 +17,7 @@ CONFIG_PATH = Path.home() / ".config" / "claude-continue" / "config.json"
 # Default session name-substrings to target (matches the original script).
 DEFAULT_FILTER = ["claude", "✳"]
 
-_BOOL_FIELDS = {"skip_busy", "all_sessions", "force", "keystroke", "tmux"}
+_BOOL_FIELDS = {"skip_busy", "all_sessions", "force", "keystroke", "tmux", "start_window"}
 _INT_FIELDS = {
     "buffer",
     "verify_delay",
@@ -60,6 +60,8 @@ class Config:
     window_title: str = "Windows Terminal"  # window to target in keystroke mode
     tmux: bool = False  # resume via `tmux send-keys` — terminal-agnostic (any terminal, macOS/Linux)
     tmux_busy_pattern: str = "esc to interrupt"  # pane content marking a mid-turn (busy) session
+    start_window: bool = False  # "quota mode": open a fresh window headlessly instead of resuming terminals
+    window_cmd: str = 'claude -p "Reply with only: ok"'  # headless command that opens a window in quota mode
 
     # --- timing ---
     buffer: int = 90  # seconds past the reset before firing
@@ -130,6 +132,11 @@ def resolve(overrides: dict | None = None, *, config_path: Path = CONFIG_PATH) -
     # would route the action to the (empty) exec path.
     if cfg.exec_cmd is not None and not cfg.exec_cmd.strip():
         cfg.exec_cmd = None
+
+    # A blanked window_cmd would make quota mode try to run an empty command;
+    # restore the default so --start-window always has something to open with.
+    if not (cfg.window_cmd or "").strip():
+        cfg.window_cmd = Config.window_cmd
 
     return cfg
 

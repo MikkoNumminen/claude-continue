@@ -128,11 +128,21 @@ dependencies; for an unattended, survives-reboot setup use `install` instead.
 │   Claude instances (2):              │
 │     ● working  -- skipped (busy)  …  │
 │     ○ idle     -> will resume     …  │
-│        [  ⏹  Stop watching  ]        │
-│   [ ⟳ Update ]                       │
+│      [  ⏹  Stop  ]                   │
+│      [  ＋ Start quota  ]            │
+│   [ 🟢 Update ]                      │
 │        Remove app…                   │
 └──────────────────────────────────────┘
 ```
+
+Two action buttons:
+- **▶ Continue terminals** — start watching; at each reset, resume your paused
+  Claude sessions (the default). Click again to stop.
+- **＋ Start quota** — start watching in *quota mode*: open a fresh 5-hour window
+  **headlessly, without touching any terminal** (a tiny `claude -p`), right away
+  if you have none and again at each reset — so windows stay back-to-back even
+  when you're not resuming work. The automated version of "type something to
+  start the window". (CLI: `--start-window`, with `--window-cmd` to customise.)
 
 Before you start, the window spells out **what watching will do** given your
 config (e.g. "sends 'continue' to idle Claude sessions in iTerm2 … Busy

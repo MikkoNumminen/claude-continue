@@ -75,6 +75,10 @@ def _next_plan(cfg: Config, now: datetime, get_block, logger) -> _Plan:
         return _Plan("poll", reason="ccusage unavailable")
 
     if block is None:
+        # Quota mode wants a window OPEN; with none active, open one now. Resume
+        # mode has nothing to resume when idle, so it just polls.
+        if cfg.start_window:
+            return _Plan("fire", target=now, reason="quota: no active window — opening one")
         return _Plan("poll", reason="idle (no active window)")
 
     target = schedule.next_target(block, cfg.buffer)
@@ -92,48 +96,51 @@ def _sleep_until(target: datetime, *, clock, sleep, stop, slice_s: int = 60) -> 
         sleep(min(float(slice_s), remaining))
 
 
-def _verify_and_retry(cfg, old_block, *, clock, sleep, get_block, perform, logger, stop) -> None:
-    """After firing, confirm the window actually rolled; retry if it didn't.
+def _verify_and_retry(cfg, old_block, *, clock, sleep, get_block, perform, logger, stop) -> bool:
+    """After firing, confirm the window actually rolled. Returns True if a newer
+    window became active, False if we gave up without one.
 
-    The only proof a resume *took* is a NEW active window whose reset is later
-    than the one we fired for — resuming a session makes Claude work again, which
-    creates a fresh ccusage block. Anything else means the resume did NOT land:
+    RESUME (old_block set): the only proof a resume *took* is a NEW window whose
+    reset is later than the one we fired for. Same block / earlier reset / no
+    active block all mean it didn't land — ccusage was early and the session is
+    still limited — so re-fire `continue` each check until a later window appears
+    or we hit the retry cap.
 
-      - same block / earlier reset  -> ccusage was early; we fired before the
-        real reset and the session is still limited.
-      - NO active block             -> the early estimate "ended" the window in
-        ccusage's view, but the paused session generates no activity, so there's
-        nothing active yet. This is NOT success — it's the classic early-fire
-        case; bailing here is exactly what left sessions un-resumed.
-
-    So we keep re-firing `continue` on each check until a later window appears or
-    we hit the retry cap. Verification happens at the top of every iteration, so
-    even the last re-fire before giving up gets checked.
+    QUOTA idle-open (old_block None): we opened a window from idle; success is
+    *any* active window appearing. We do a SINGLE check rather than re-opening in
+    a tight retry loop (each retry would spawn another `claude -p`); if no window
+    registered, return False and let the caller back off at poll cadence before
+    opening again.
     """
     attempts = 0
     while True:
         delay = cfg.verify_delay if attempts == 0 else cfg.retry_interval
         if _sleep_until(clock() + timedelta(seconds=delay), clock=clock, sleep=sleep, stop=stop) == "stopped":
-            return
+            return True  # shutting down; nothing for the caller to back off on
         try:
             new_block = get_block(cfg.timeout)
         except ccusage_mod.CcusageUnavailable as e:
             logger.warning("post-fire ccusage check failed: %s; assuming ok", e)
-            return
-        if new_block is not None and new_block.reset_at > old_block.reset_at:
-            logger.info("window rolled: next reset %s", _fmt(new_block.reset_at))
-            return
+            return True
+        # Success = a window newer than what we fired against. When old_block is
+        # None (quota opened from idle), any active window counts.
+        if new_block is not None and (old_block is None or new_block.reset_at > old_block.reset_at):
+            logger.info("window active: next reset %s", _fmt(new_block.reset_at))
+            return True
+        if old_block is None:
+            # quota idle-open didn't register a window; don't hammer with re-opens
+            logger.info("opened a window but none is active yet; will retry next cycle")
+            return False
         if attempts >= cfg.retry_cap:
             minutes = (cfg.verify_delay + cfg.retry_cap * cfg.retry_interval) // 60
             logger.warning(
                 "gave up after %d retries (~%dm): window never rolled — quota coverage "
-                "has lapsed; will resume only when ccusage next reports a new window",
+                "has lapsed; will retry when ccusage next reports a window",
                 cfg.retry_cap, minutes,
             )
-            return
+            return False
         attempts += 1
-        state = "no active window yet" if new_block is None else "still on the old window"
-        logger.warning("%s (retry %d/%d) — re-firing", state, attempts, cfg.retry_cap)
+        logger.warning("still on the old window (retry %d/%d) — re-firing", attempts, cfg.retry_cap)
         fired = _fire(cfg, perform, logger)
         logger.info("re-fired -> %s", fired if fired is not None else "(fire failed)")
 
@@ -191,7 +198,12 @@ def run(
     fires = 0
     last_fired_block_id = None
     try:
-        action_label = "exec" if cfg.exec_cmd else ("send %r" % cfg.text)
+        if cfg.exec_cmd:
+            action_label = "exec"
+        elif cfg.start_window:
+            action_label = "open window (quota mode)"
+        else:
+            action_label = "send %r" % cfg.text
         logger.info("watch started (action: %s)", action_label)
         while not stop():
             plan = _next_plan(cfg, clock(), get_block, logger)
@@ -220,10 +232,20 @@ def run(
                 logger.info("fired -> %s", fired or "(no matching sessions)")
                 if plan.block is not None:
                     last_fired_block_id = plan.block.id
-                    _verify_and_retry(
+                # Verify resume fires (block set) and quota opens-from-idle
+                # (block None, but quota mode): confirm a window is active, retry
+                # if not. plan.block may be None here — _verify_and_retry handles it.
+                if plan.block is not None or cfg.start_window:
+                    confirmed = _verify_and_retry(
                         cfg, plan.block, clock=clock, sleep=sleep, get_block=get_block,
                         perform=perform, logger=logger, stop=stop,
                     )
+                    # quota opened from idle but no window registered: back off at
+                    # poll cadence instead of re-opening back-to-back forever.
+                    if plan.block is None and not confirmed:
+                        if _sleep_until(clock() + timedelta(seconds=cfg.poll_interval),
+                                        clock=clock, sleep=sleep, stop=stop) == "stopped":
+                            break
             else:
                 # A failed fire is NOT a handled window — deliberately do not set
                 # last_fired_block_id, so the next cycle retries this same window.

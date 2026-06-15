@@ -31,6 +31,10 @@ def perform(cfg: Config, dry_run: bool = False) -> list:
     what was acted on (session names, the keystroke target, or the exec command)."""
     if cfg.exec_cmd:
         return _run_exec(cfg.exec_cmd, dry_run=dry_run)
+    # "quota mode": open a fresh usage window headlessly without touching any
+    # terminal (the automated version of typing a throwaway message into chat).
+    if cfg.start_window:
+        return _run_exec(cfg.window_cmd, dry_run=dry_run, label="open window")
     return _resume(cfg, dry_run=dry_run)
 
 
@@ -91,15 +95,15 @@ def _broadcast_iterm(cfg: Config, dry_run: bool) -> list:
         raise ActionError("iTerm2 broadcast failed: %s" % e) from e
 
 
-def _run_exec(command: str, dry_run: bool = False) -> list:
+def _run_exec(command: str, dry_run: bool = False, label: str = "exec") -> list:
     try:
         argv = osenv.split_command(command)
     except ValueError as e:
-        raise ActionError("invalid exec command %r: %s" % (command, e)) from e
+        raise ActionError("invalid %s command %r: %s" % (label, command, e)) from e
     if not argv:
-        raise ActionError("exec command is empty")
+        raise ActionError("%s command is empty" % label)
 
-    label = "exec: " + command
+    label = "%s: %s" % (label, command)
     if dry_run:
         return [label]
     # Detach so the headless run outlives this process and doesn't tie up the
