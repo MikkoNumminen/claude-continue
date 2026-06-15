@@ -1,0 +1,43 @@
+# claude-continue
+
+> A stdlib-only Python CLI + tiny Tkinter GUI that keeps Claude Code's rolling
+> 5-hour usage windows running back-to-back: the instant a window resets, it
+> resumes paused Claude sessions (or opens a fresh window) so quota is never
+> left idle. Packaged as a macOS .app and Windows .exe. Runs on macOS, Windows,
+> WSL, and Linux.
+
+Key facts for an LLM working with this repo:
+
+- Runtime deps: none (Python standard library only); target Python 3.9+.
+- Reset detection: `npx ccusage blocks --active --json --offline` (estimate;
+  verified after firing). Fixed-schedule fallback via `--at` / `--every`.
+- Reset action (dispatch order): `--exec` headless > `--start-window` (quota
+  mode, headless `claude -p`) > `--tmux` > macOS iTerm2 broadcast > Windows/WSL
+  `--keystroke`. Busy sessions are skipped unless `--force`.
+- Self-update from GitHub releases with SHA-256 verification; "remove completely"
+  tears down agent + config + the bundle.
+
+## Docs
+
+- [README](README.md): product overview, install, usage, platform support, caveats.
+- [AGENTS.md](AGENTS.md): agent/dev guide — setup, build, test, run, conventions.
+- [ARCHITECTURE.md](ARCHITECTURE.md): module map and data flow.
+- [CONTRIBUTING.md](CONTRIBUTING.md): dev setup, testing model, release flow.
+- [CHANGELOG.md](CHANGELOG.md): version history.
+- [SECURITY.md](SECURITY.md): trust model and self-update integrity.
+
+## Commands
+
+- `claude-continue status` — show the active window + what would fire.
+- `claude-continue doctor` — preflight checks.
+- `claude-continue watch` — the self-rescheduling loop (foreground / agent).
+- `claude-continue once|fire` — wait-then-fire once / fire now.
+- `claude-continue gui` — one-window toggle UI.
+- `claude-continue install|uninstall` — manage the unattended agent.
+- `claude-continue update [--apply]` — check / install a newer release.
+
+## Build & test
+
+- Tests: `python3 -m unittest discover -s tests -q` (offline, ~300 tests).
+- Build app: `./packaging/build-macos.sh` / `.\packaging\build-windows.ps1`.
+- Run from source: `PYTHONPATH=src python3 -m claude_continue.cli` or `./bin/claude-continue`.

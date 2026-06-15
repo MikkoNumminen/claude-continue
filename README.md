@@ -9,6 +9,11 @@ Built for long autonomous runs on a Max plan: start a job, let it hit the limit,
 walk away. When the window rolls over, the paused sessions get a `continue` and
 keep going.
 
+**Docs:** [AGENTS.md](AGENTS.md) (agent/dev guide) ·
+[ARCHITECTURE.md](ARCHITECTURE.md) (module map) ·
+[CONTRIBUTING.md](CONTRIBUTING.md) · [CHANGELOG.md](CHANGELOG.md) ·
+[SECURITY.md](SECURITY.md)
+
 ## How the limit actually works
 
 Claude Code's usage window is **consumption-triggered**, not a wall clock. It
