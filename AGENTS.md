@@ -41,9 +41,10 @@ PYTHONPATH=src python3 -m claude_continue.cli --help
 # Run the full test suite (offline, fast — ~0.4s, ~300 tests)
 python3 -m unittest discover -s tests -q
 
-# Run one test module / case
-python3 -m unittest tests.test_watch
-python3 -m unittest tests.test_update.TestSslContext
+# Run one test module / filter to one case (use discover so tests/_support, which
+# sets up sys.path, is importable — the dotted `unittest tests.x` form won't find it)
+python3 -m unittest discover -s tests -p "test_watch.py"
+python3 -m unittest discover -s tests -p "test_update.py" -k SslContext
 
 # Feed canned ccusage JSON instead of calling the real tool (no Node needed)
 CLAUDE_CONTINUE_CCUSAGE_CMD="cat tests/fixtures/active.json" ./bin/claude-continue status

@@ -18,9 +18,9 @@ PYTHONPATH=src python3 -m claude_continue.cli --help   # or: ./bin/claude-contin
 ## Running tests
 
 ```bash
-python3 -m unittest discover -s tests -q          # all (~300, offline, ~0.4s)
-python3 -m unittest tests.test_watch              # one module
-python3 -m unittest tests.test_update.TestSslContext   # one case
+python3 -m unittest discover -s tests -q                       # all (~300, offline, ~0.4s)
+python3 -m unittest discover -s tests -p "test_watch.py"       # one module
+python3 -m unittest discover -s tests -p "test_update.py" -k SslContext   # filter to one case
 ```
 
 Tests must stay **offline and fast**. Don't call real `ccusage`, `osascript`,

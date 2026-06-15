@@ -1,9 +1,26 @@
+import io
+import sys
 import unittest
 from unittest import mock
 
 import _support  # noqa: F401
 
 from claude_continue import cli
+
+# Commands under test print() and argparse writes usage to stderr; capture both so
+# a passing run is silent (and can't be mistaken for failure output). The test
+# runner grabbed the real streams before this ran, so failures still surface.
+_streams = {}
+
+
+def setUpModule():
+    _streams["out"], _streams["err"] = sys.stdout, sys.stderr
+    sys.stdout = io.StringIO()
+    sys.stderr = io.StringIO()
+
+
+def tearDownModule():
+    sys.stdout, sys.stderr = _streams["out"], _streams["err"]
 
 
 def _non_none(d):
