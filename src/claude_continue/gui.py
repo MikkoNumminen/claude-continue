@@ -15,7 +15,7 @@ import logging
 import threading
 from datetime import datetime, timezone
 
-from . import ccusage, iterm, osenv, watch
+from . import __version__, ccusage, iterm, osenv, update, watch
 from .action import ActionError
 from .config import resolve
 from .lock import AlreadyRunning
@@ -167,11 +167,27 @@ def format_sessions(sessions, note, *, watching, cfg) -> str:
     return "\n".join(lines)
 
 
+def update_decision(info, *, frozen):
+    """Pure decision for the 'checked' phase. Returns (kind, message) where kind
+    is 'prompt' (offer to download+restart) or 'none' (just show the message).
+    Kept side-effect-free so it's unit-testable without Tk."""
+    if info is None or info.error:
+        return "none", "update check failed: %s" % (info.error if info else "no data")
+    if not info.newer:
+        return "none", "up to date (v%s)" % info.current
+    # info.latest is the tag (already "vX.Y.Z"); info.current is bare (e.g. "0.3.0").
+    if not frozen:
+        return "none", "%s available — update from source with `git pull`" % info.latest
+    if not info.asset_url:
+        return "none", "%s available, but no build for this platform" % info.latest
+    return "prompt", "%s available" % info.latest
+
+
 def run() -> None:  # pragma: no cover - exercised manually; logic lives in WatchController
     """Open the toggle window. Imports tkinter lazily so the rest of the package
     doesn't require a display."""
     import tkinter as tk
-    from tkinter import font as tkfont
+    from tkinter import font as tkfont, messagebox
 
     controller = WatchController()
     # Config is snapshotted once at startup; edits to the config file / env take
@@ -179,12 +195,14 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
     app_cfg = resolve()
     poll = {"reset_at": None, "note": "", "busy": False,
             "sessions": None, "sessions_note": "", "sessions_busy": False}
+    # self-update state machine: idle -> checking -> checked -> [applying -> done] / error
+    upd = {"phase": "idle", "info": None, "msg": "", "error": None}
 
     root = tk.Tk()
     root.title("claude-continue")
-    root.geometry("470x400")
+    root.geometry("470x470")
     root.resizable(True, True)
-    root.minsize(430, 320)
+    root.minsize(440, 380)
 
     dot = tk.Label(root, text="○", font=tkfont.Font(size=30))
     dot.pack(pady=(18, 0))
@@ -199,6 +217,10 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
     button.pack()
     note = tk.Label(root, text="", fg="#a00", wraplength=420)
     note.pack(pady=(8, 0))
+    update_button = tk.Button(root, text="⟳  Update", width=14)
+    update_button.pack(side="bottom", pady=(0, 10))
+    update_status = tk.Label(root, text="", fg="#666", wraplength=430)
+    update_status.pack(side="bottom")
 
     def poll_ccusage():
         if poll["busy"]:
@@ -303,6 +325,73 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
 
     button.config(command=toggle)
 
+    def check_for_update():
+        if upd["phase"] in ("checking", "applying"):
+            return
+        upd["phase"] = "checking"
+        upd["info"] = None
+        upd["error"] = None
+        upd["msg"] = "checking for updates…"
+
+        def work():
+            try:
+                upd["info"] = update.check()
+            except Exception as e:  # noqa: BLE001 - check() shouldn't raise, but never wedge the UI
+                upd["info"] = update.UpdateInfo(__version__, None, False, None, None, error=str(e))
+            upd["phase"] = "checked"
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _start_apply(info):
+        upd["phase"] = "applying"
+        upd["msg"] = "downloading %s…" % info.latest
+
+        def work():
+            try:
+                update.apply_update(info)
+                upd["phase"] = "done"
+            except Exception as e:  # noqa: BLE001 - surfaced in the UI
+                upd["error"] = str(e)
+                upd["phase"] = "error"
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def update_poll():
+        # main-thread state machine: workers only mutate `upd`; the dialog,
+        # relaunch and quit all happen here so Tk is only touched on this thread.
+        phase = upd["phase"]
+        if phase == "checked":
+            info = upd["info"]
+            kind, msg = update_decision(info, frozen=update.is_frozen())
+            if kind == "prompt":
+                upd["phase"] = "prompting"
+                if messagebox.askyesno(
+                    "Update available",
+                    "%s is available (you have v%s).\nDownload it and restart now?" % (info.latest, info.current),
+                ):
+                    _start_apply(info)
+                else:
+                    upd["msg"] = "update postponed"
+                    upd["phase"] = "idle"
+            else:
+                upd["msg"] = msg
+                upd["phase"] = "idle"
+        elif phase == "done":
+            upd["msg"] = "updated — restarting…"
+            upd["phase"] = "quitting"
+            controller.request_stop()
+            root.after(800, root.destroy)  # the new version was already launched
+        elif phase == "error":
+            upd["msg"] = "update failed: %s" % (upd["error"] or "")
+            upd["phase"] = "idle"
+
+        busy = upd["phase"] in ("checking", "applying", "prompting", "quitting")
+        update_button.config(state="disabled" if busy else "normal")
+        update_status.config(text=upd["msg"])
+        root.after(500, update_poll)
+
+    update_button.config(command=check_for_update)
+
     def poll_loop():
         if controller.is_watching():
             poll_ccusage()
@@ -324,4 +413,5 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
     refresh()
     root.after(30000, poll_loop)
     root.after(_SESSION_POLL_IDLE_MS, sessions_loop)
+    root.after(500, update_poll)
     root.mainloop()

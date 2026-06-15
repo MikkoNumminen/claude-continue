@@ -119,12 +119,24 @@ agent is installed). Tkinter ships with Python, so there are no extra
 dependencies; for an unattended, survives-reboot setup use `install` instead.
 
 ```
-┌──────── claude-continue ────────┐
-│            ●  WATCHING           │
-│   next reset 19:00 · in 2h13m    │
-│        [  ⏹  Stop watching  ]    │
-└──────────────────────────────────┘
+┌──────── claude-continue ────────────┐
+│            ●  WATCHING               │
+│   next reset 19:00 · in 2h13m        │
+│   Claude instances (2):              │
+│     ● working  -- skipped (busy)  …  │
+│     ○ idle     -> will resume     …  │
+│        [  ⏹  Stop watching  ]        │
+│   [ ⟳ Update ]                       │
+└──────────────────────────────────────┘
 ```
+
+It also shows a live **Claude instances** panel (each iTerm2 session's
+status — working/idle — and, while watching, whether it'll be resumed or
+skipped). *macOS only*; on Windows the panel notes it isn't available.
+
+The **⟳ Update** button checks the latest GitHub release and, if a newer one
+exists, downloads it and restarts the app in place (the standalone `.app`/`.exe`
+builds). Run from source instead? It tells you to `git pull`.
 
 ### Standalone macOS app (no Python required)
 
