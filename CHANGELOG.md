@@ -4,6 +4,18 @@ All notable changes to `claude-continue`. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **Windows/WSL GUI parity.** The GUI is now zero-config on Windows the same way
+  it is on macOS: **Continue terminals** defaults to keystroke mode (types
+  `continue` into your terminal window) instead of erroring with "no resume
+  action", and the pre-watch explanation describes that instead of iTerm2. The
+  **Claude instances** panel, previously "macOS/iTerm2 only", now lists your
+  visible terminal windows and marks the one a keystroke will land in. The CLI
+  keeps keystroke opt-in (a focus-stealing SendKeys shouldn't be a silent default
+  for an unattended `watch`/`fire`).
+
 ## [0.6.1] — 2026-06-16
 
 ### Added

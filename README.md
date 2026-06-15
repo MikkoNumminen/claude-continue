@@ -142,7 +142,10 @@ dependencies; for an unattended, survives-reboot setup use `install` instead.
 
 Two action buttons:
 - **▶ Continue terminals** — start watching; at each reset, resume your paused
-  Claude sessions (the default). Click again to stop.
+  Claude sessions (the default). Click again to stop. On macOS this broadcasts
+  `continue` to iTerm2; on **Windows/WSL** the GUI works zero-config too — it
+  defaults to keystroke mode and types `continue` into your terminal window
+  (`--window-title`, default "Windows Terminal"). The CLI keeps keystroke opt-in.
 - **＋ Start quota** — start watching in *quota mode*: open a fresh 5-hour window
   **headlessly, without touching any terminal** (a tiny `claude -p`), right away
   if you have none and again at each reset — so windows stay back-to-back even
@@ -157,7 +160,10 @@ idle state and hidden once watching.
 It also shows a live **Claude instances** panel (each session's status —
 working/idle — and, while watching, whether it'll be resumed or skipped). It
 reads iTerm2 on macOS, or tmux panes when you run in `--tmux` mode (any
-platform); otherwise the panel notes it isn't available.
+platform). On **Windows/WSL** (keystroke mode) it instead lists your visible
+terminal windows and marks the one a keystroke will land in, so you can confirm
+the target before starting. In headless `--exec` mode there are no live sessions
+to show, so the panel says so.
 
 The **⟳ Update** button checks the latest GitHub release and, if a newer one
 exists, downloads it and restarts the app in place (the standalone `.app`/`.exe`
