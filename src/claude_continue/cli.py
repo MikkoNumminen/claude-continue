@@ -60,6 +60,10 @@ def add_action_args(p: argparse.ArgumentParser, *, dry_run: bool = False) -> Non
                    help="Windows/WSL: type the text into a terminal window (opt-in, best-effort)")
     a.add_argument("--window-title", dest="window_title", default=None, metavar="TITLE",
                    help="window title to target in --keystroke mode (default: Windows Terminal)")
+    a.add_argument("--tmux", dest="tmux", action="store_true", default=None,
+                   help="resume Claude panes running inside tmux (any terminal, macOS/Linux)")
+    a.add_argument("--tmux-busy-pattern", dest="tmux_busy_pattern", default=None, metavar="TEXT",
+                   help="pane content marking a busy session in --tmux mode (default: 'esc to interrupt')")
 
     t = p.add_argument_group("timing")
     t.add_argument("--buffer", type=int, default=None, metavar="S",
@@ -101,6 +105,9 @@ def overrides_to_argv(overrides: dict) -> list:
         elif name == "keystroke":
             if value:
                 argv.append("--keystroke")
+        elif name == "tmux":
+            if value:
+                argv.append("--tmux")
         elif name == "exec_cmd":
             argv += ["--exec", str(value)]
         elif name == "every_hours":

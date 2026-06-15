@@ -93,5 +93,33 @@ class TestBroadcastRouting(unittest.TestCase):
                 perform(Config(), dry_run=False)
 
 
+class TestTmuxRouting(unittest.TestCase):
+    def test_tmux_takes_priority_over_iterm_on_macos(self):
+        # cfg.tmux must route to tmux even on macOS (where iTerm is the default)
+        with _ForcePlatform("macos"), \
+             mock.patch("claude_continue.action.tmux.broadcast", return_value=["pane1"]) as bc, \
+             mock.patch("claude_continue.action.iterm.broadcast") as ib:
+            out = perform(Config(tmux=True, text="continue"), dry_run=True)
+        self.assertEqual(out, ["pane1"])
+        ib.assert_not_called()
+        _, kwargs = bc.call_args
+        self.assertTrue(kwargs["dry_run"])
+        self.assertEqual(kwargs["busy_pattern"], "esc to interrupt")
+
+    def test_tmux_works_on_linux(self):
+        # the whole point: a Linux user (no iTerm) can resume via tmux
+        with _ForcePlatform("linux"), \
+             mock.patch("claude_continue.action.tmux.broadcast", return_value=["p"]):
+            out = perform(Config(tmux=True), dry_run=True)
+        self.assertEqual(out, ["p"])
+
+    def test_tmux_error_becomes_actionerror(self):
+        from claude_continue import tmux as tmux_mod
+        with _ForcePlatform("linux"), \
+             mock.patch("claude_continue.action.tmux.broadcast", side_effect=tmux_mod.TmuxError("no tmux")):
+            with self.assertRaises(ActionError):
+                perform(Config(tmux=True), dry_run=False)
+
+
 if __name__ == "__main__":
     unittest.main()
