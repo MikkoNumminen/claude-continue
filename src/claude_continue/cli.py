@@ -387,7 +387,21 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _force_utf8_stdio() -> None:
+    """Make stdout/stderr UTF-8 on Windows so the doctor/status glyphs (✓ ✳ ●)
+    don't raise UnicodeEncodeError on a legacy console code page (cp1252/cp850).
+    Best-effort: a frozen GUI exe may have no real streams to reconfigure."""
+    if os.name != "nt":
+        return
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]  # TextIOWrapper-only
+        except (AttributeError, OSError, ValueError):
+            pass
+
+
 def main(argv=None) -> int:
+    _force_utf8_stdio()
     args = build_parser().parse_args(argv)
     try:
         return args.func(args) or 0
