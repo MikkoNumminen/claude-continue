@@ -62,8 +62,8 @@ def add_action_args(p: argparse.ArgumentParser, *, dry_run: bool = False) -> Non
     a.add_argument("--window-title", dest="window_title", default=None, metavar="TITLE",
                    help="window title to target in --keystroke mode (default: Windows Terminal)")
     a.add_argument("--keystroke-all", dest="keystroke_all", action="store_true", default=None,
-                   help="Windows: continue EVERY running Claude session (cycles a terminal's "
-                        "tabs), instead of one window — the GUI's default")
+                   help="Windows: continue EVERY running Claude session by writing into each "
+                        "one's console input (any window/tab/pane, no focus stealing) — the GUI's default")
     a.add_argument("--tmux", dest="tmux", action="store_true", default=None,
                    help="resume Claude panes running inside tmux (any terminal, macOS/Linux)")
     a.add_argument("--tmux-busy-pattern", dest="tmux_busy_pattern", default=None, metavar="TEXT",

@@ -242,6 +242,16 @@ _KEY_EVENT = 0x0001
 _VK_RETURN = 0x0D
 
 
+def _utf16_units(text: str) -> list:
+    """Split ``text`` into UTF-16 code units (each a 1-character string). A console
+    INPUT_RECORD's ``UnicodeChar`` is a single UTF-16 code unit, so a non-BMP char
+    (e.g. an emoji in a customized resume text) must be sent as its two surrogate
+    halves — assigning the whole char to a WCHAR would raise TypeError. Pure, so
+    it's testable without ctypes / Windows."""
+    raw = text.encode("utf-16-le")
+    return [raw[i:i + 2].decode("utf-16-le", "surrogatepass") for i in range(0, len(raw), 2)]
+
+
 def _inject_one(pid, text: str) -> None:
     """Write ``text`` to process ``pid``'s console input via AttachConsole +
     WriteConsoleInput. Raises RuntimeError if the process can't be attached (it
@@ -266,14 +276,14 @@ def _inject_one(pid, text: str) -> None:
         _fields_ = [("EventType", wintypes.WORD), ("Event", _Ev)]
 
     records = []
-    for ch in text:
-        for down in (1, 0):  # each char needs a key-down then key-up record
+    for cu in _utf16_units(text):  # UTF-16 code units: non-BMP chars stay valid WCHARs
+        for down in (1, 0):  # each unit needs a key-down then key-up record
             r = _InputRecord()
             r.EventType = _KEY_EVENT
             r.KeyEvent.bKeyDown = down
             r.KeyEvent.wRepeatCount = 1
-            r.KeyEvent.wVirtualKeyCode = _VK_RETURN if ch == "\r" else 0
-            r.KeyEvent.uChar.UnicodeChar = ch
+            r.KeyEvent.wVirtualKeyCode = _VK_RETURN if cu == "\r" else 0
+            r.KeyEvent.uChar.UnicodeChar = cu
             records.append(r)
 
     k32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -300,17 +310,25 @@ def _inject_one(pid, text: str) -> None:
 
 
 def continue_instances(text: str, *, instances=None, dry_run: bool = False,
-                       timeout: float = 30.0, inject=None, list_fn=None) -> list:
+                       timeout: float = 30.0, inject=None, list_fn=None, is_alive=None) -> list:
     """Send ``text``+Enter to EVERY running Claude session by injecting into each
-    one's console input. Returns one label per session actually resumed.
+    one's console input. Returns one label per session acted on.
 
-    Best-effort per session: a process that exited between listing and injection
-    is skipped (logged in the label set as a miss), so one dead session never
-    aborts the rest — and because only successes are returned, the watch loop
-    marks the window handled and won't re-inject `continue` into sessions that
-    already got it. ``instances``/``inject``/``list_fn`` are injectable for tests."""
+    Best-effort per session: a process that exited (or denies attach) is skipped,
+    so one dead session never aborts the rest. We re-check ``pid_alive`` right
+    before attaching to shrink the TOCTOU window where a just-exited PID could be
+    recycled and the keystroke land in an unrelated console (it can't be fully
+    closed — only AttachConsole's own "must own a console" check bounds the rest).
+
+    NOTE: unlike the iTerm2/tmux paths, this has NO skip-busy guard — Windows
+    exposes no per-session "is processing" flag. So if the watch loop's verify
+    retry re-fires (ccusage's reset estimate was early), a session that already
+    resumed and is mid-work can receive a second `continue`. That's the platform
+    tradeoff for resuming sessions that SendKeys can't reach at all.
+    ``instances``/``inject``/``list_fn``/``is_alive`` are injectable for tests."""
     list_fn = list_fn or list_claude_instances
     inject = inject or _inject_one
+    is_alive = is_alive or osenv.pid_alive
     if instances is None:
         instances = list_fn(timeout=timeout)
     keys = text + "\r"
@@ -320,6 +338,11 @@ def continue_instances(text: str, *, instances=None, dry_run: bool = False,
         if dry_run:
             out.append(label)
             continue
+        try:
+            if not is_alive(int(pid)):
+                continue  # exited between listing and now — nothing to resume, skip quietly
+        except (ValueError, OSError):
+            pass  # liveness check is only a narrowing optimization; fall through to inject
         try:
             inject(pid, keys)
             out.append(label)

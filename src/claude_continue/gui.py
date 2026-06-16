@@ -232,9 +232,9 @@ def effective_cfg(cfg):
     """
     if cfg.exec_cmd or cfg.tmux or cfg.keystroke or cfg.keystroke_all:
         return cfg  # an action is already configured — don't override it
-    # Native Windows: continue EVERY running Claude session (the panel lists them),
-    # cycling a terminal's tabs — the honest match for the macOS broadcast, which
-    # resumes all sessions, not one window.
+    # Native Windows: continue EVERY running Claude session (the panel lists them)
+    # by writing into each one's console input — the honest match for the macOS
+    # broadcast, which resumes all sessions, not one window.
     if osenv.is_windows():
         return replace(cfg, keystroke=True, keystroke_all=True)
     # WSL: Claude runs as a Linux process Win32_Process can't enumerate, so the
@@ -309,6 +309,30 @@ def should_auto_recheck(last_check, now, *, min_interval=_UPDATE_MIN_AUTO_S):
     if last_check is None:
         return True
     return (now - last_check) >= min_interval
+
+
+_NOTE_WARN = "#a00"
+_NOTE_OK = "#2a2"
+
+
+def watching_note(last_warning, last_fired, fires):
+    """The status note shown while watching, as (text, color). The latest warning
+    wins over the 'last fired' confirmation when it's at least as recent — a failed
+    fire isn't fatal (the loop keeps retrying), but the user must SEE it, else
+    "WATCHING" looks fine while nothing is resuming. ('', None) when there's nothing
+    to show. Pure so the precedence is testable (it used to live inline in run())."""
+    if last_warning is not None and (last_fired is None or last_warning[0] >= last_fired):
+        return ("⚠ %s" % last_warning[1], _NOTE_WARN)
+    if last_fired is not None:
+        return ("last fired %s ✓  (%d total)" % (last_fired.strftime("%H:%M"), fires), _NOTE_OK)
+    return ("", None)
+
+
+def should_annotate_continue(watching, quota, keystroke_all):
+    """Whether the Windows instances panel should mark each row '-> will continue':
+    only while actively continuing every session (continue-all), never in quota
+    mode (which just opens a window and doesn't touch the listed PIDs). Pure."""
+    return bool(watching and not quota and keystroke_all)
 
 
 def update_button_color(info, *, frozen):
@@ -536,17 +560,11 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
             status.config(text="WATCHING · quota" if watch_mode["quota"] else "WATCHING")
             detail.config(text=countdown_text())
             set_buttons(mode)
-            warn = controller.last_warning
-            fired = controller.last_fired
-            if warn is not None and (fired is None or warn[0] >= fired):
-                # a failed/abandoned fire isn't fatal (the loop keeps retrying),
-                # but the user must SEE it — otherwise "WATCHING" looks fine while
-                # nothing is actually resuming.
-                note.config(text="⚠ %s" % warn[1], fg="#a00")
-            elif fired is not None:
-                note.config(text="last fired %s ✓  (%d total)" % (fired.strftime("%H:%M"), controller.fires), fg="#2a2")
+            text, color = watching_note(controller.last_warning, controller.last_fired, controller.fires)
+            if color:
+                note.config(text=text, fg=color)
             else:
-                note.config(text="")
+                note.config(text=text)
         else:
             dot.config(text="○", fg="#999")
             status.config(text="Idle")
@@ -554,9 +572,7 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
             note.config(text="")
             set_buttons(None)
         if win_instances_mode(app_cfg):
-            # continue-all resumes every listed instance; quota mode just opens a
-            # window, so only annotate when actually continuing.
-            live = watching and not watch_mode["quota"] and app_cfg.keystroke_all
+            live = should_annotate_continue(watching, watch_mode["quota"], app_cfg.keystroke_all)
             sessions_label.config(text=format_instances(poll["sessions"], poll["sessions_note"], watching=live))
         else:
             live = watching and not watch_mode["quota"]

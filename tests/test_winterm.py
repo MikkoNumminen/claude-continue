@@ -132,16 +132,32 @@ class TestWindowTitles(unittest.TestCase):
                 winterm._run_window_titles(30.0)
 
 
+class TestUtf16Units(unittest.TestCase):
+    # a console UnicodeChar is a single UTF-16 code unit, so non-BMP text must be
+    # split into surrogate halves or assigning it to a WCHAR raises TypeError.
+    def test_bmp_text_is_one_unit_per_char(self):
+        self.assertEqual(winterm._utf16_units("continue\r"), list("continue\r"))
+
+    def test_non_bmp_char_splits_into_two_surrogate_units(self):
+        units = winterm._utf16_units("a😀b")  # emoji is non-BMP -> 2 code units
+        self.assertEqual(len(units), 4)        # a, hi-surrogate, lo-surrogate, b
+        self.assertTrue(all(len(u) == 1 for u in units))  # each a valid 1-char WCHAR
+        self.assertEqual(units[0], "a")
+        self.assertEqual(units[-1], "b")
+
+
 class TestContinueInstances(unittest.TestCase):
     # console-input injection: continue EVERY running Claude session by PID, no
     # tabs/panes/focus. _inject_one is Windows-ctypes (not unit-tested off-Windows);
-    # the orchestration is tested with an injected `inject` + `instances`/`list_fn`.
+    # the orchestration is tested with injected inject/is_alive/instances/list_fn.
+    _ALIVE = staticmethod(lambda pid: True)
+
     def test_injects_continue_plus_enter_into_each_pid(self):
         calls = []
         out = winterm.continue_instances(
             "continue",
             instances=[("claude", "22108"), ("claude", "35552")],
-            inject=lambda pid, keys: calls.append((pid, keys)),
+            inject=lambda pid, keys: calls.append((pid, keys)), is_alive=self._ALIVE,
         )
         self.assertEqual(calls, [("22108", "continue\r"), ("35552", "continue\r")])
         self.assertEqual(len(out), 2)
@@ -158,18 +174,30 @@ class TestContinueInstances(unittest.TestCase):
     def test_uses_list_fn_when_instances_not_given(self):
         out = winterm.continue_instances(
             "continue", list_fn=lambda timeout: [("claude", "7")],
-            inject=lambda pid, keys: None)
+            inject=lambda pid, keys: None, is_alive=self._ALIVE)
         self.assertEqual(len(out), 1)
         self.assertIn("pid 7", out[0])
 
-    def test_one_dead_session_does_not_abort_the_rest(self):
-        # a session that exited (inject raises) is skipped; the others still resume
+    def test_dead_pid_skipped_without_injecting(self):
+        # a session that exited between listing and now -> skipped quietly (the
+        # pid_alive recheck narrows the TOCTOU window before AttachConsole)
+        injected = []
+        out = winterm.continue_instances(
+            "continue", instances=[("claude", "1"), ("claude", "2")],
+            inject=lambda pid, keys: injected.append(pid),
+            is_alive=lambda pid: pid == 2)  # is_alive sees int(pid); pid 1 has exited
+        self.assertEqual(injected, ["2"])   # inject receives the original pid value
+        self.assertEqual(len(out), 1)
+        self.assertIn("pid 2", out[0])
+
+    def test_one_failed_inject_does_not_abort_the_rest(self):
+        # inject raising (e.g. attach denied) is isolated; the others still resume
         def inject(pid, keys):
             if pid == "1":
-                raise RuntimeError("attach failed: process gone")
+                raise RuntimeError("attach failed")
         out = winterm.continue_instances(
-            "continue", instances=[("claude", "1"), ("claude", "2")], inject=inject)
-        self.assertEqual(len(out), 1)       # only the live one
+            "continue", instances=[("claude", "1"), ("claude", "2")], inject=inject, is_alive=self._ALIVE)
+        self.assertEqual(len(out), 1)
         self.assertIn("pid 2", out[0])
 
     def test_total_failure_raises(self):
@@ -177,7 +205,7 @@ class TestContinueInstances(unittest.TestCase):
             raise RuntimeError("attach failed")
         with self.assertRaises(RuntimeError):
             winterm.continue_instances(
-                "continue", instances=[("claude", "1")], inject=inject)
+                "continue", instances=[("claude", "1")], inject=inject, is_alive=self._ALIVE)
 
     def test_no_instances_returns_empty(self):
         self.assertEqual(winterm.continue_instances("continue", instances=[]), [])

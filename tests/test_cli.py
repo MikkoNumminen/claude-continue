@@ -236,6 +236,16 @@ class TestParser(unittest.TestCase):
         with self.assertRaises(SystemExit):
             cli.build_parser().parse_args([])
 
+    def test_keystroke_all_help_describes_console_injection_not_tabs(self):
+        # the mechanism is console-input injection, NOT tab cycling — the help must
+        # not promise a focus-stealing tab walk that never happens.
+        import argparse
+        p = cli.build_parser()
+        sub = next(a for a in p._actions if isinstance(a, argparse._SubParsersAction))
+        help_text = sub.choices["watch"].format_help()
+        self.assertIn("console input", help_text)
+        self.assertNotIn("cycles a terminal", help_text)
+
 
 class TestOverridesRoundTrip(unittest.TestCase):
     def test_install_flags_reconstruct_to_watch(self):

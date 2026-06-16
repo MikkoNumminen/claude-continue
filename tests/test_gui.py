@@ -2,6 +2,7 @@ import os
 import threading
 import time
 import unittest
+from datetime import datetime, timedelta
 
 import _support  # noqa: F401
 
@@ -13,11 +14,13 @@ from claude_continue.gui import (
     effective_cfg,
     format_instances,
     format_sessions,
+    should_annotate_continue,
     should_auto_recheck,
     update_button_color,
     update_button_label,
     update_decision,
     watch_explanation,
+    watching_note,
     win_instances_mode,
 )
 from claude_continue.gui import _BTN_UPDATE_AVAILABLE, _BTN_UP_TO_DATE
@@ -431,6 +434,54 @@ class TestFormatInstances(unittest.TestCase):
     def test_watching_marks_each_instance_will_continue(self):
         out = format_instances([("claude", "22108"), ("claude", "35552")], "", watching=True)
         self.assertEqual(out.count("-> will continue"), 2)  # both get a continue
+
+
+class TestWatchingNote(unittest.TestCase):
+    def test_nothing_to_show(self):
+        self.assertEqual(watching_note(None, None, 0), ("", None))
+
+    def test_fired_only_is_green_confirmation(self):
+        fired = datetime(2026, 6, 16, 14, 30)
+        text, color = watching_note(None, fired, 3)
+        self.assertIn("last fired 14:30", text)
+        self.assertIn("(3 total)", text)
+        self.assertEqual(color, "#2a2")
+
+    def test_warning_newer_than_fire_wins(self):
+        fired = datetime(2026, 6, 16, 14, 30)
+        warn = (fired + timedelta(minutes=1), "fire failed: nothing attached")
+        text, color = watching_note(warn, fired, 3)
+        self.assertIn("⚠", text)
+        self.assertIn("nothing attached", text)
+        self.assertEqual(color, "#a00")
+
+    def test_older_warning_does_not_mask_a_later_fire(self):
+        fired = datetime(2026, 6, 16, 14, 30)
+        warn = (fired - timedelta(minutes=1), "earlier hiccup")  # before the fire
+        text, color = watching_note(warn, fired, 1)
+        self.assertIn("last fired", text)
+        self.assertEqual(color, "#2a2")
+
+    def test_warning_with_no_fire_shows(self):
+        warn = (datetime(2026, 6, 16, 14, 30), "boom")
+        text, color = watching_note(warn, None, 0)
+        self.assertIn("boom", text)
+        self.assertEqual(color, "#a00")
+
+
+class TestShouldAnnotateContinue(unittest.TestCase):
+    def test_only_when_watching_continue_all_and_not_quota(self):
+        self.assertTrue(should_annotate_continue(True, False, True))
+
+    def test_false_when_not_watching(self):
+        self.assertFalse(should_annotate_continue(False, False, True))
+
+    def test_false_in_quota_mode(self):
+        # quota just opens a window; it does NOT continue the listed PIDs
+        self.assertFalse(should_annotate_continue(True, True, True))
+
+    def test_false_when_not_continue_all(self):
+        self.assertFalse(should_annotate_continue(True, False, False))
 
 
 class TestShouldAutoRecheck(unittest.TestCase):
