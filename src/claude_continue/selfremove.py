@@ -45,32 +45,39 @@ def macos_self_delete_script(target: str, pid: int) -> str:
     )
 
 
-def windows_self_delete_script(target: str, pid: int) -> str:
-    """Detached .cmd: wait for our PID to exit, then delete the exe + itself."""
+def windows_self_delete_script(target: str, *, wait_s: int = 5) -> str:
+    """Detached .cmd: wait for our process to exit, then delete the exe + itself.
+
+    Runs console-less (CREATE_NO_WINDOW), where ``ping``/``timeout`` don't delay
+    and a ``tasklist | find`` PID-poll pipe won't connect — so it uses a fixed
+    ``waitfor /t`` sleep (the same fix as the self-update swap). The exe stays
+    locked until the PyInstaller bootstrap + child both exit, so the delete gets a
+    second attempt after another wait."""
     return "\r\n".join([
         "@echo off",
-        ":wait",
-        'tasklist /FI "PID eq %d" 2>NUL | find "%d" >NUL && (ping -n 2 127.0.0.1 >NUL & goto wait)' % (pid, pid),
+        "waitfor /t %d ClaudeContinueRemove 2>NUL" % wait_s,
         'del /F /Q "%s" >NUL 2>&1' % target,
+        'if exist "%s" (waitfor /t %d ClaudeContinueRemove2 2>NUL & del /F /Q "%s" >NUL 2>&1)' % (target, wait_s, target),
         'del "%~f0"',
     ]) + "\r\n"
 
 
 def _spawn_self_delete(target: str) -> None:
-    pid = os.getpid()
     if osenv.is_macos():
-        script = macos_self_delete_script(target, pid)
+        script = macos_self_delete_script(target, os.getpid())
         path = os.path.join(tempfile.gettempdir(), "claude-continue-remove.sh")
-        cmd = ["/bin/sh", path]
-    else:
-        script = windows_self_delete_script(target, pid)
-        path = os.path.join(tempfile.gettempdir(), "claude-continue-remove.cmd")
-        cmd = ["cmd", "/c", path]
-    with open(path, "w") as f:
-        f.write(script)
-    if osenv.is_macos():
+        with open(path, "w") as f:
+            f.write(script)
         os.chmod(path, 0o755)
-    subprocess.Popen(cmd, **osenv.detached_popen_kwargs())
+        subprocess.Popen(["/bin/sh", path], **osenv.detached_popen_kwargs())
+    else:
+        script = windows_self_delete_script(target)
+        path = os.path.join(tempfile.gettempdir(), "claude-continue-remove.cmd")
+        # newline="" so \r\n isn't doubled; CREATE_NO_WINDOW (not DETACHED) so the
+        # waitfor-based script runs correctly and no console flashes.
+        with open(path, "w", newline="") as f:
+            f.write(script)
+        subprocess.Popen(["cmd", "/c", path], **osenv.no_window_kwargs())
 
 
 def remove(*, purge_config: bool = True, logger=None) -> dict:

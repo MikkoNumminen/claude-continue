@@ -178,21 +178,123 @@ class TestCheckRetry(unittest.TestCase):
 
 
 class TestWindowsSwapScript(unittest.TestCase):
-    def test_contains_wait_copy_relaunch_selfdelete(self):
-        s = update.windows_swap_script(r"C:\tmp\new.exe", r"C:\app\claude-continue.exe", 4321, relaunch=True)
-        self.assertIn('PID eq 4321', s)            # wait for our process to exit
-        self.assertIn('copy /Y', s)                # overwrite the exe
-        self.assertIn(r'C:\app\claude-continue.exe', s)
+    def test_move_then_copy_relaunch_selfdelete(self):
+        s = update.windows_swap_script(r"C:\tmp\new.exe", r"C:\app\claude-continue.exe", relaunch=True)
+        # move the running exe aside (can't overwrite it), then copy the new one in
+        self.assertIn(r'move /Y "C:\app\claude-continue.exe" "C:\app\claude-continue.exe.old"', s)
+        self.assertIn(r'copy /Y "C:\tmp\new.exe" "C:\app\claude-continue.exe"', s)
         self.assertIn('start ""', s)               # relaunch
         self.assertIn('del "%~f0"', s)             # self-delete
 
-    def test_no_relaunch(self):
-        s = update.windows_swap_script("new.exe", "old.exe", 1, relaunch=False)
-        self.assertNotIn("start ", s)
+    def test_uses_waitfor_not_ping_or_tasklist(self):
+        # The helper runs console-less, where ping/timeout don't delay and a
+        # tasklist|find pipe won't connect — both silently hang the old script.
+        s = update.windows_swap_script("new.exe", "old.exe", relaunch=True)
+        self.assertIn("waitfor /t", s)
+        self.assertNotIn("ping", s)
+        self.assertNotIn("tasklist", s)
+        self.assertNotIn("| find", s)
 
-    def test_deletes_downloaded_exe(self):
-        s = update.windows_swap_script(r"C:\tmp\new.exe", r"C:\app\cc.exe", 1, relaunch=True)
-        self.assertIn(r'del "C:\tmp\new.exe"', s)  # don't leak the download
+    def test_wait_s_lands_in_waitfor(self):
+        self.assertIn("waitfor /t 7 ", update.windows_swap_script("n", "o", relaunch=False, wait_s=7))
+        self.assertIn("waitfor /t 5 ", update.windows_swap_script("n", "o", relaunch=False))  # default
+
+    def test_rolls_back_if_copy_fails(self):
+        # if the copy didn't land, restore the moved-aside exe so the path is never
+        # left empty, and only relaunch when an exe actually exists.
+        s = update.windows_swap_script(r"C:\tmp\new.exe", r"C:\app\cc.exe", relaunch=True)
+        self.assertIn(r'if not exist "C:\app\cc.exe" move /Y "C:\app\cc.exe.old" "C:\app\cc.exe"', s)
+        self.assertIn(r'if exist "C:\app\cc.exe" start "" "C:\app\cc.exe"', s)
+
+    def test_no_relaunch(self):
+        s = update.windows_swap_script("new.exe", "old.exe", relaunch=False)
+        self.assertNotIn('start ""', s)
+
+    def test_deletes_downloaded_exe_and_old(self):
+        s = update.windows_swap_script(r"C:\tmp\new.exe", r"C:\app\cc.exe", relaunch=True)
+        self.assertIn(r'del "C:\tmp\new.exe"', s)       # don't leak the download
+        self.assertIn(r'del "C:\app\cc.exe.old"', s)    # best-effort .old cleanup
+
+
+class TestApplyWindows(unittest.TestCase):
+    def test_launches_helper_with_no_window_kwargs(self):
+        exe = os.path.join(tempfile.mkdtemp(), "claude-continue.exe")
+        new = os.path.join(tempfile.mkdtemp(), "claude-continue-update.exe")
+        with mock.patch("claude_continue.update.osenv.no_window_kwargs", return_value={"creationflags": 0x08000000}) as nwk, \
+             mock.patch("claude_continue.update.osenv.detect", return_value="windows"), \
+             mock.patch("claude_continue.update.sys.executable", exe), \
+             mock.patch("claude_continue.update._allow_foreground_handoff"), \
+             mock.patch("claude_continue.update.subprocess.Popen") as popen:
+            update._apply_windows(new, relaunch=True)
+        nwk.assert_called()                                 # CREATE_NO_WINDOW, not DETACHED
+        argv, kwargs = popen.call_args
+        self.assertEqual(argv[0][:2], ["cmd", "/c"])        # cmd /c <script>
+        self.assertEqual(kwargs.get("creationflags"), 0x08000000)
+        with open(argv[0][2], "rb") as f:                   # binary: see the real bytes
+            raw = f.read()
+        self.assertIn(b"waitfor /t", raw)                   # the real swap script was written
+        self.assertIn(b"\r\n", raw)                         # CRLF preserved (newline="")
+        self.assertNotIn(b"\r\r\n", raw)                    # not doubled
+
+    def test_refuses_path_with_percent(self):
+        # a '%' in the install path triggers cmd var-expansion and would corrupt
+        # the script -> fail the update cleanly rather than emit a broken .cmd.
+        with mock.patch("claude_continue.update.sys.executable", r"C:\50%done\cc.exe"):
+            with self.assertRaises(update.UpdateError):
+                update._apply_windows(r"C:\tmp\new.exe", relaunch=False)
+
+
+class TestCleanupStaleUpdate(unittest.TestCase):
+    def test_removes_old_sibling_when_frozen_on_windows(self):
+        d = tempfile.mkdtemp()
+        exe = os.path.join(d, "claude-continue.exe")
+        old = exe + ".old"
+        open(exe, "w").close()
+        open(old, "w").close()
+        with mock.patch("claude_continue.update.is_frozen", return_value=True), \
+             mock.patch("claude_continue.update.sys.executable", exe), \
+             mock.patch("claude_continue.update.osenv.detect", return_value="windows"):
+            update.cleanup_stale_update()
+        self.assertFalse(os.path.exists(old))  # leftover removed
+        self.assertTrue(os.path.exists(exe))   # the live exe untouched
+
+    def test_noop_when_no_old_present(self):
+        exe = os.path.join(tempfile.mkdtemp(), "claude-continue.exe")
+        open(exe, "w").close()
+        with mock.patch("claude_continue.update.is_frozen", return_value=True), \
+             mock.patch("claude_continue.update.sys.executable", exe), \
+             mock.patch("claude_continue.update.osenv.detect", return_value="windows"):
+            update.cleanup_stale_update()  # no .old -> silent no-op, no raise
+        self.assertTrue(os.path.exists(exe))
+
+    def test_does_not_delete_old_when_exe_missing(self):
+        # a stranded rollback target: exe absent, .old is the only surviving copy
+        d = tempfile.mkdtemp()
+        exe = os.path.join(d, "claude-continue.exe")  # not created
+        old = exe + ".old"
+        open(old, "w").close()
+        with mock.patch("claude_continue.update.is_frozen", return_value=True), \
+             mock.patch("claude_continue.update.sys.executable", exe), \
+             mock.patch("claude_continue.update.osenv.detect", return_value="windows"):
+            update.cleanup_stale_update()
+        self.assertTrue(os.path.exists(old))  # NEVER delete the only copy
+
+    def test_locked_old_is_swallowed(self):
+        d = tempfile.mkdtemp()
+        exe = os.path.join(d, "claude-continue.exe")
+        old = exe + ".old"
+        open(exe, "w").close()
+        open(old, "w").close()
+        with mock.patch("claude_continue.update.is_frozen", return_value=True), \
+             mock.patch("claude_continue.update.sys.executable", exe), \
+             mock.patch("claude_continue.update.osenv.detect", return_value="windows"), \
+             mock.patch("claude_continue.update.os.remove", side_effect=OSError("locked")):
+            update.cleanup_stale_update()  # OSError swallowed, never raises
+
+    def test_noop_from_source(self):
+        # not frozen -> nothing to clean, never raises
+        with mock.patch("claude_continue.update.is_frozen", return_value=False):
+            update.cleanup_stale_update()
 
 
 class TestDigestVerify(unittest.TestCase):

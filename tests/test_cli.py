@@ -27,6 +27,18 @@ def _non_none(d):
     return {k: v for k, v in d.items() if v is not None}
 
 
+class TestGuiCommand(unittest.TestCase):
+    def test_clears_stale_update_before_launching_gui(self):
+        # cmd_gui is the only caller of cleanup_stale_update — it must run it (to
+        # reap a leftover <exe>.old from a prior self-update) BEFORE opening the GUI.
+        from claude_continue import gui, update
+        order = []
+        with mock.patch.object(update, "cleanup_stale_update", side_effect=lambda: order.append("cleanup")), \
+             mock.patch.object(gui, "run", side_effect=lambda: order.append("run")):
+            cli.cmd_gui(cli.build_parser().parse_args(["gui"]))
+        self.assertEqual(order, ["cleanup", "run"])
+
+
 class TestUninstallApp(unittest.TestCase):
     def test_app_flag_routes_to_complete_removal(self):
         from claude_continue import selfremove

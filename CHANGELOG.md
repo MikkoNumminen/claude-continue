@@ -4,6 +4,26 @@ All notable changes to `claude-continue`. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **Windows self-update now actually updates and restarts.** Clicking **Update**
+  (or **Remove app…**) on the Windows `.exe` closed the app but left it un-updated
+  and never relaunched. The helper `.cmd` ran in a console-less window where its
+  `tasklist | find` wait-pipe and `ping` delay both silently fail, so it hung
+  before ever swapping the exe — and even if it hadn't, a running `.exe` can't be
+  `copy`-overwritten. The helper now waits with `waitfor /t` (works without a
+  console), **moves** the old exe aside and copies the new one into the freed path
+  (you can rename a running exe even though you can't overwrite it), **rolls back**
+  if the copy fails so the install is never left empty, relaunches, and clears the
+  leftover `.old` on next launch. `Remove app…` got the same `waitfor` fix.
+
+  ⚠️ **Upgrading from 0.7.1 or earlier on Windows needs a one-time manual
+  download** — the *old, broken* updater is what runs for that final hop, so the
+  in-app button can't perform it. Grab the `.exe` from the
+  [latest release](https://github.com/MikkoNumminen/claude-continue/releases/latest)
+  once; the in-app Update button works normally from this version on.
+
 ## [0.7.1] — 2026-06-16
 
 ### Fixed
