@@ -4,7 +4,7 @@ All notable changes to `claude-continue`. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.7.1] — 2026-06-16
 
 ### Fixed
 - **Windows GUI no longer flashes console windows.** The GUI polls ccusage and
