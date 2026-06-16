@@ -199,7 +199,8 @@ def cmd_doctor(args) -> int:
 
 
 def cmd_gui(args) -> int:
-    from . import gui  # gui module is import-safe; tkinter is imported inside run()
+    from . import gui, update  # gui module is import-safe; tkinter is imported inside run()
+    update.cleanup_stale_update()  # clear a <exe>.old left by a prior Windows self-update
     try:
         gui.run()
     except ImportError as e:

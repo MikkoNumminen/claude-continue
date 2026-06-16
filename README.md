@@ -171,6 +171,12 @@ exists, downloads it and restarts the app in place (the standalone `.app`/`.exe`
 builds). It's checked once on launch and tinted green when an update is waiting,
 gray when you're up to date. Run from source instead? It tells you to `git pull`.
 
+> **Windows, upgrading from 0.7.1 or earlier:** those builds shipped a broken
+> in-app updater (it closed the app without updating), and that old updater is
+> what runs for the upgrade itself — so download the new `.exe` from the
+> [latest release](https://github.com/MikkoNumminen/claude-continue/releases/latest)
+> **once**, by hand. The Update button works normally from that version on.
+
 The **Remove app…** button removes claude-continue **completely** — after a
 confirmation it stops watching, removes the background agent, deletes your
 settings + logs, and deletes the app bundle itself (a detached helper removes

@@ -21,10 +21,19 @@ class TestSelfDeleteScripts(unittest.TestCase):
         self.assertIn("'/Applications/My App.app'", s)         # shlex.quote
 
     def test_windows_script_waits_then_dels(self):
-        s = selfremove.windows_self_delete_script(r"C:\a\cc.exe", 42)
-        self.assertIn("PID eq 42", s)
+        s = selfremove.windows_self_delete_script(r"C:\a\cc.exe")
+        # waitfor (not ping/tasklist|find, which hang in a console-less cmd)
+        self.assertIn("waitfor /t", s)
+        self.assertNotIn("ping", s)
+        self.assertNotIn("tasklist", s)
         self.assertIn(r'del /F /Q "C:\a\cc.exe"', s)
         self.assertIn('del "%~f0"', s)
+
+    def test_windows_script_retries_delete(self):
+        # the exe stays locked until the bootstrap+child exit -> a 2nd attempt
+        s = selfremove.windows_self_delete_script(r"C:\a\cc.exe", wait_s=4)
+        self.assertIn("waitfor /t 4 ", s)
+        self.assertEqual(s.count(r'del /F /Q "C:\a\cc.exe"'), 2)
 
 
 class TestRemovalTarget(unittest.TestCase):

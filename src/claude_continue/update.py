@@ -328,29 +328,116 @@ def _spawn_macos_relauncher(bundle: str) -> None:
     subprocess.Popen(["/bin/sh", path], **osenv.detached_popen_kwargs())
 
 
-def windows_swap_script(new_exe: str, target_exe: str, pid: int, relaunch: bool) -> str:
-    """The .cmd that waits for us to exit, overwrites the exe, relaunches, cleans up.
-    All paths here are app-controlled (never the GitHub asset name)."""
+# Characters that would break the swap .cmd if they appeared in a substituted
+# path. ``"`` ends the quoted token; ``%`` triggers cmd variable expansion even
+# inside quotes; ``& < > | ^`` are cmd operators/escape; CR/LF end a statement.
+# Of these only ``%`` is actually legal in a Windows path — the rest can't occur
+# in a filename — but we refuse all of them rather than emit a malformed script.
+_BAT_UNSAFE_CHARS = set('%&<>|^"') | {"\r", "\n"}
+
+
+def _assert_swap_safe_path(path: str, label: str) -> None:
+    bad = sorted(_BAT_UNSAFE_CHARS & set(path))
+    if bad:
+        raise UpdateError(
+            "%s contains characters that would break the update script (%s): %r"
+            % (label, " ".join(repr(c) for c in bad), path)
+        )
+
+
+def windows_swap_script(new_exe: str, target_exe: str, relaunch: bool, *, wait_s: int = 5) -> str:
+    """The .cmd that waits for us to exit, swaps the exe in place, relaunches, and
+    cleans up. All paths here are app-controlled (never the GitHub asset name).
+
+    This runs in a *console-less* cmd (CREATE_NO_WINDOW), and that drives every
+    choice here — three things silently fail without a console and a naive script
+    hits all of them:
+
+    * ``ping``/``timeout`` don't delay, and a ``tasklist | find`` PID-poll needs a
+      pipe that won't connect — so the wait is a fixed ``waitfor /t`` (a signal
+      that never arrives = a reliable sleep). The app exits in ~1s, so a few
+      seconds of headroom is ample.
+    * a *running* .exe can't be overwritten (``copy`` fails, "being used by another
+      process") but it CAN be renamed — so we ``move`` the old exe aside (which
+      also frees the path), then copy the new one into place. Works even while the
+      PyInstaller onefile bootstrap still holds the old image.
+
+    Crucially it ROLLS BACK: if the copy doesn't land (a download AV-quarantined
+    out of %TEMP%, disk-full, transient I/O), it moves the old exe back so the
+    install path is never left empty — un-updated-but-working beats bricked. The
+    leftover ``<exe>.old`` can't be deleted while old processes linger, so ``del``
+    is best-effort and ``cleanup_stale_update`` finishes the job on the next launch.
+    """
+    old = target_exe + ".old"
     lines = [
         "@echo off",
-        ":wait",
-        'tasklist /FI "PID eq %d" 2>NUL | find "%d" >NUL && (ping -n 2 127.0.0.1 >NUL & goto wait)' % (pid, pid),
+        # waitfor blocks until a signal that never comes -> a ~wait_s sleep that
+        # (unlike ping/timeout) actually delays in a window-less console.
+        "waitfor /t %d ClaudeContinueUpdate 2>NUL" % wait_s,
+        # a running exe can't be overwritten, but it can be moved aside.
+        'move /Y "%s" "%s" >NUL 2>&1' % (target_exe, old),
         'copy /Y "%s" "%s" >NUL' % (new_exe, target_exe),
+        # rollback: copy failed -> restore the old exe so the path is never empty.
+        'if not exist "%s" move /Y "%s" "%s" >NUL 2>&1' % (target_exe, old, target_exe),
     ]
     if relaunch:
-        lines.append('start "" "%s"' % target_exe)
-    lines.append('del "%s" >NUL 2>&1' % new_exe)
-    lines.append('del "%~f0"')
+        # only relaunch if an exe actually exists at the path (new or rolled-back).
+        lines.append('if exist "%s" start "" "%s"' % (target_exe, target_exe))
+    lines += [
+        'del "%s" >NUL 2>&1' % new_exe,
+        'del "%s" >NUL 2>&1' % old,   # best-effort; cleanup_stale_update gets a locked one
+        'del "%~f0"',
+    ]
     return "\r\n".join(lines) + "\r\n"
+
+
+def _allow_foreground_handoff() -> None:
+    """Best-effort: let the next process (the relaunched app) take the foreground
+    after we exit, so its window isn't stuck behind whatever the user clicked."""
+    try:
+        import ctypes
+        ctypes.windll.user32.AllowSetForegroundWindow(-1)  # type: ignore[attr-defined]  # ASFW_ANY; windll is Windows-only
+    except (OSError, AttributeError):
+        pass
 
 
 def _apply_windows(new_exe: str, relaunch: bool) -> str:
     target = os.path.realpath(sys.executable)
+    # Refuse to build a malformed .cmd (which could fail mid-swap) — fail the
+    # update cleanly instead, leaving the running app intact.
+    _assert_swap_safe_path(target, "the app path")
+    _assert_swap_safe_path(new_exe, "the download path")
     script_path = os.path.join(tempfile.gettempdir(), "claude-continue-update.cmd")
     try:
-        with open(script_path, "w") as f:
-            f.write(windows_swap_script(new_exe, target, os.getpid(), relaunch))
-        subprocess.Popen(["cmd", "/c", script_path], **osenv.detached_popen_kwargs())
+        # newline="" so the \r\n line endings aren't re-translated to \r\r\n.
+        with open(script_path, "w", newline="") as f:
+            f.write(windows_swap_script(new_exe, target, relaunch))
+        # CREATE_NO_WINDOW (not DETACHED): a detached cmd's pipes/ping fail, and the
+        # script is written to tolerate the no-console environment (see above).
+        subprocess.Popen(["cmd", "/c", script_path], **osenv.no_window_kwargs())
     except (OSError, subprocess.SubprocessError) as e:
         raise UpdateError("couldn't launch the Windows update helper: %s" % e) from e
+    if relaunch:
+        _allow_foreground_handoff()
     return target
+
+
+def cleanup_stale_update() -> None:
+    """Remove the ``<exe>.old`` left behind by a previous Windows self-update.
+
+    The swap renames the running exe to ``<exe>.old`` and the old processes keep it
+    locked until they exit, so the helper can't delete it — we clear it on the next
+    launch instead. Best-effort and silent; never raises."""
+    if not (is_frozen() and osenv.detect() in (osenv.WINDOWS, osenv.WSL)):
+        return
+    try:
+        exe = os.path.realpath(sys.executable)
+        old = exe + ".old"
+        # Only reap the leftover when the live exe is present. If the exe is
+        # missing (a swap rolled back to .old but hasn't been renamed home, or a
+        # half-finished move), the .old may be the ONLY surviving copy — never
+        # delete it then.
+        if os.path.exists(exe) and os.path.exists(old):
+            os.remove(old)
+    except OSError:
+        pass  # still locked, or vanished — next launch tries again
