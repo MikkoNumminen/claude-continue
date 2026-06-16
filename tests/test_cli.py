@@ -5,7 +5,26 @@ from unittest import mock
 
 import _support  # noqa: F401
 
-from claude_continue import cli
+from claude_continue import cli, doctor
+
+
+class _Cp1252Stream:
+    """A stdout-like stream on a legacy code page: writing a glyph it can't encode
+    raises UnicodeEncodeError, exactly like a real Windows cp1252 console (the
+    crash the doctor hit on ✓)."""
+
+    encoding = "cp1252"
+
+    def __init__(self):
+        self.text = ""
+
+    def write(self, s):
+        s.encode("cp1252")  # raises on ✓ / ✳ — mirrors the console
+        self.text += s
+        return len(s)
+
+    def flush(self):
+        pass
 
 # Commands under test print() and argparse writes usage to stderr; capture both so
 # a passing run is silent (and can't be mistaken for failure output). The test
@@ -53,6 +72,68 @@ class TestForceUtf8Stdio(unittest.TestCase):
             cli._force_utf8_stdio()
         self.assertTrue(all(c.get("encoding") == "utf-8" for c in calls))
         self.assertEqual(len(calls), 2)  # stdout + stderr
+
+    def test_windows_rebuilds_stream_without_reconfigure(self):
+        # the frozen windowed exe's stream has no reconfigure() but does expose a
+        # raw .buffer — rebuild a UTF-8 TextIOWrapper over it (the in-place
+        # reconfigure alone wasn't enough, which is why the shipped doctor still
+        # crashed). After this, the glyphs encode instead of raising.
+        class NoReconfigure:
+            encoding = "cp1252"
+
+            def __init__(self, buffer):
+                self.buffer = buffer
+
+        stream = NoReconfigure(io.BytesIO())
+        with mock.patch.object(cli.os, "name", "nt"), \
+             mock.patch.object(cli.sys, "stdout", stream), \
+             mock.patch.object(cli.sys, "stderr", stream):
+            cli._force_utf8_stdio()
+            self.assertEqual(cli.sys.stdout.encoding, "utf-8")
+            self.assertEqual(cli.sys.stderr.encoding, "utf-8")
+
+
+class TestDoctorOutputOnLegacyConsole(unittest.TestCase):
+    """The reported crash: `doctor` printed ✓ to a cp1252 console and tracebacked."""
+
+    def test_emit_survives_unencodable_glyph(self):
+        stream = _Cp1252Stream()
+        with mock.patch.object(cli.sys, "stdout", stream):
+            cli._emit("✓ all good")  # must not raise
+        self.assertIn("all good", stream.text)
+
+    def test_symbols_fall_back_to_ascii_on_legacy_codepage(self):
+        with mock.patch.object(cli.sys, "stdout", _Cp1252Stream()):
+            syms = cli._doctor_symbols()
+        self.assertEqual(syms[doctor.OK], "[ok]")
+        self.assertEqual(syms[doctor.WARN], "[!]")
+        self.assertEqual(syms[doctor.FAIL], "[X]")
+
+    def test_symbols_use_glyphs_when_encodable(self):
+        class Utf8Stream:
+            encoding = "utf-8"
+
+        with mock.patch.object(cli.sys, "stdout", Utf8Stream()):
+            syms = cli._doctor_symbols()
+        self.assertEqual(syms[doctor.OK], "✓")
+        self.assertEqual(syms[doctor.WARN], "!")
+        self.assertEqual(syms[doctor.FAIL], "✗")
+
+    def test_cmd_doctor_does_not_crash_on_cp1252(self):
+        # detail carries the ✳ from the default filter — the other glyph that
+        # crashed alongside the ✓ status symbol.
+        checks = [doctor.Check("config", doctor.OK, "filter ['claude', '✳']")]
+        stream = _Cp1252Stream()
+        args = cli.build_parser().parse_args(["doctor"])
+        with mock.patch("claude_continue.cli.doctor.run_checks", return_value=checks), \
+             mock.patch.object(cli.sys, "stdout", stream):
+            rc = cli.cmd_doctor(args)
+        self.assertEqual(rc, 0)
+        self.assertIn("config", stream.text)  # it printed, instead of raising
+        # and the ASCII status symbol was actually selected (not just _emit's
+        # replace-backstop masking the ✓) — proves the fallback is wired into the
+        # command, not only the _doctor_symbols() unit.
+        self.assertIn("[ok]", stream.text)
 
 
 class TestGuiCommand(unittest.TestCase):
@@ -197,6 +278,17 @@ class TestOverridesRoundTrip(unittest.TestCase):
         watch_args = p.parse_args(["watch"] + argv)
         self.assertTrue(watch_args.keystroke)
         self.assertEqual(watch_args.window_title, "My Term")
+
+    def test_keystroke_all_flag_roundtrips(self):
+        p = cli.build_parser()
+        install_args = p.parse_args(["install", "--keystroke-all"])
+        argv = cli.overrides_to_argv(cli.build_overrides(install_args))
+        self.assertIn("--keystroke-all", argv)
+        watch_args = p.parse_args(["watch"] + argv)
+        self.assertTrue(watch_args.keystroke_all)
+
+    def test_keystroke_all_true_emits_bare_flag(self):
+        self.assertEqual(cli.overrides_to_argv({"keystroke_all": True}), ["--keystroke-all"])
 
     def test_launchd_only_fields_not_emitted(self):
         self.assertEqual(cli.overrides_to_argv({"node_path": "/x", "log_path": "/y"}), [])

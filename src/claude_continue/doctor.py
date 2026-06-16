@@ -17,6 +17,7 @@ from . import action as action_mod
 from . import launchd as launchd_mod
 from . import osenv, schedule
 from . import scheduler as scheduler_mod
+from . import winterm as winterm_mod
 from .ccusage import CcusageUnavailable, get_active_block
 from .config import MIN_TIMING_SECONDS, Config, timing_issues
 
@@ -105,6 +106,8 @@ def _check_config(cfg: Config) -> Check:
         action = "open window (quota)"
     elif cfg.tmux:
         action = "tmux" + (" -> %r" % cfg.session if cfg.session else "")
+    elif cfg.keystroke_all:
+        action = "continue all Claude sessions (keystroke)"
     elif cfg.keystroke:
         action = "keystroke -> %r" % cfg.window_title
     elif cfg.session:
@@ -122,7 +125,7 @@ def _check_config(cfg: Config) -> Check:
     return Check("config", OK, "action=%s, trigger=%s, buffer=%ds" % (action, trigger, cfg.buffer))
 
 
-def _check_action(cfg: Config, *, which, exists, preview) -> Check:
+def _check_action(cfg: Config, *, which, exists, preview, window_titles=None) -> Check:
     # Headless exec (explicit --exec, or quota mode's window-opener): must parse
     # and the binary must be resolvable.
     headless = cfg.exec_cmd or (cfg.window_cmd if cfg.start_window else None)
@@ -149,9 +152,37 @@ def _check_action(cfg: Config, *, which, exists, preview) -> Check:
         if plat == osenv.MACOS:
             if not exists(ITERM_APP):
                 return Check("action", FAIL, "iTerm2 not found at %s — install it, or use --exec/--tmux/--keystroke" % ITERM_APP)
+        elif cfg.keystroke_all and plat == osenv.WINDOWS:
+            # "continue all": no single target window — the preview below lists the
+            # actual running sessions (or warns if none are running right now).
+            if not (which("powershell.exe") or which("powershell") or which("pwsh")):
+                return Check("action", FAIL, "continue-all (keystroke) needs PowerShell, not found on PATH")
         elif cfg.keystroke:
             if not (which("powershell.exe") or which("powershell") or which("pwsh")):
                 return Check("action", FAIL, "--keystroke needs PowerShell, not found on PATH")
+            # Honest probe: AppActivate(window_title) only finds a window whose
+            # title equals/begins with it, and the dry-run preview below never
+            # calls AppActivate — so without this the doctor green-lights a target
+            # window that doesn't exist (the #1 keystroke failure: Windows
+            # Terminal's title is the active tab's name, not "Windows Terminal").
+            titles = None
+            if window_titles is not None:
+                try:
+                    titles = window_titles()
+                except Exception:  # noqa: BLE001 - doctor must never raise
+                    titles = None
+            if titles is not None and not winterm_mod.window_match(cfg.window_title, titles):
+                sample = ", ".join("%r" % t for t in titles[:6]) if titles else "(none open)"
+                # This enumerates each app's MAIN window title — a subset of what
+                # AppActivate actually searches — so phrase it as "couldn't find"
+                # (not a definitive "none matches") to avoid a false alarm for an
+                # unusual setup. For a real terminal the window IS its main window,
+                # so this reliably catches the common Windows-Terminal-tab miss.
+                return Check("action", FAIL,
+                             "couldn't find an open window whose title starts with --window-title "
+                             "%r, so SendKeys would have nothing to type into (checks each app's "
+                             "main window). Set --window-title to text at the START of your "
+                             "terminal's title. Open windows: %s" % (cfg.window_title, sample))
         else:
             return Check("action", WARN, "no resume action on %s — set --exec '<command>', --tmux or --keystroke" % plat)
 
@@ -175,6 +206,7 @@ def run_checks(
     ccusage_probe=get_active_block,
     scheduler_describe=None,
     action_preview=None,
+    window_titles=None,
     now=None,
 ) -> list:
     """Run every preflight check and return the ordered list of results."""
@@ -183,6 +215,9 @@ def run_checks(
     # Delegate the preview to the real action layer so it stays identical to what
     # would actually fire (dry-run never sends keystrokes).
     action_preview = action_preview or (lambda: action_mod.perform(cfg, dry_run=True))
+    # Enumerate open window titles so the keystroke check can verify the target
+    # window actually exists (only invoked on the Windows/WSL keystroke path).
+    window_titles = window_titles or winterm_mod.list_window_titles
 
     return [
         _check_python(),
@@ -191,7 +226,8 @@ def run_checks(
         _check_node(cfg, which),
         _check_agent(scheduler_describe),
         _check_config(cfg),
-        _check_action(cfg, which=which, exists=iterm_exists, preview=action_preview),
+        _check_action(cfg, which=which, exists=iterm_exists, preview=action_preview,
+                      window_titles=window_titles),
     ]
 
 

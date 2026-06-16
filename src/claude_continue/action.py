@@ -47,7 +47,15 @@ def _resume(cfg: Config, dry_run: bool) -> list:
     # macOS resumes by broadcasting into iTerm2 (its keystroke equivalent).
     if plat == osenv.MACOS:
         return _broadcast_iterm(cfg, dry_run)
-    # Windows/WSL: keystroke into a terminal window via PowerShell SendKeys.
+    # Windows: continue EVERY running Claude session by writing `continue` straight
+    # into each one's console input (AttachConsole + WriteConsoleInput). This is the
+    # iTerm2-broadcast analogue — it resumes all sessions regardless of how they're
+    # arranged (separate windows, tabs, or split panes in one Windows Terminal
+    # window) without stealing focus. (Native Windows only; WSL's Claude is a Linux
+    # process Win32_Process can't see, so it uses the single window_title path.)
+    if cfg.keystroke_all and plat == osenv.WINDOWS:
+        return _continue_all(cfg, dry_run)
+    # Windows/WSL: keystroke into a single terminal window via PowerShell SendKeys.
     if cfg.keystroke and plat in (osenv.WINDOWS, osenv.WSL):
         try:
             return winterm.send_keystroke(
@@ -60,6 +68,17 @@ def _resume(cfg: Config, dry_run: bool) -> list:
         "headless run, or --tmux to resume Claude panes running inside tmux%s"
         % (plat, ", or --keystroke" if plat in (osenv.WINDOWS, osenv.WSL) else "")
     )
+
+
+def _continue_all(cfg: Config, dry_run: bool) -> list:
+    """Continue every running Claude session on Windows via console-input
+    injection. No Claude running (empty list) is not an error — return [] so the
+    loop re-arms, matching how an empty session list behaves on the other
+    platforms."""
+    try:
+        return winterm.continue_instances(cfg.text, dry_run=dry_run, timeout=float(cfg.timeout))
+    except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+        raise ActionError("continue-all failed: %s" % e) from e
 
 
 def _broadcast_tmux(cfg: Config, dry_run: bool) -> list:

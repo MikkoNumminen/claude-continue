@@ -141,6 +141,91 @@ class TestWatchController(unittest.TestCase):
         self.assertIsNotNone(c.last_fired)
         c.stop(timeout=2)
 
+    def test_warning_is_surfaced(self):
+        # a failed fire logs at WARNING; the controller must capture it so the UI
+        # can show it (previously these went nowhere and the failure was silent).
+        logged = threading.Event()
+
+        def runner(cfg, *, logger, stop, sleep, use_lock, **kw):
+            logger.warning("fire failed: window not found: Windows Terminal")
+            logged.set()
+            while not stop():
+                sleep(0.05)
+
+        c = WatchController(runner=runner)
+        c.start(object())
+        self.assertTrue(logged.wait(3))
+        self.assertTrue(_wait(lambda: c.last_warning is not None))
+        self.assertIn("window not found", c.last_warning[1])
+        c.stop(timeout=2)
+
+    def test_real_fire_clears_a_prior_warning(self):
+        done = threading.Event()
+
+        def runner(cfg, *, logger, stop, sleep, use_lock, **kw):
+            logger.warning("fire failed: boom")     # sets last_warning
+            logger.info("fired -> %s", ["sessA"])    # a real fire clears it
+            done.set()
+            while not stop():
+                sleep(0.05)
+
+        c = WatchController(runner=runner)
+        c.start(object())
+        self.assertTrue(done.wait(3))
+        self.assertIsNone(c.last_warning)
+        self.assertEqual(c.fires, 1)
+        c.stop(timeout=2)
+
+    def test_info_records_do_not_set_warning(self):
+        logged = threading.Event()
+
+        def runner(cfg, *, logger, stop, sleep, use_lock, **kw):
+            logger.info("armed: fire at 19:00")  # INFO must not register as a warning
+            logged.set()
+            while not stop():
+                sleep(0.05)
+
+        c = WatchController(runner=runner)
+        c.start(object())
+        self.assertTrue(logged.wait(3))
+        self.assertIsNone(c.last_warning)
+        c.stop(timeout=2)
+
+    def test_log_path_persists_watch_output(self):
+        import os as _os
+        import shutil
+        import tempfile
+
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        # a non-existent parent dir must be created (best-effort)
+        path = _os.path.join(d, "sub", "gui.log")
+        done = threading.Event()
+
+        def runner(cfg, *, logger, stop, sleep, use_lock, **kw):
+            logger.info("watch started")
+            logger.warning("fire failed: boom")
+            done.set()
+            while not stop():
+                sleep(0.05)
+
+        c = WatchController(runner=runner, log_path=path)
+        # close the file handler on teardown so the rotating log isn't left open
+        self.addCleanup(lambda: [h.close() for h in list(c._logger.handlers)])
+        c.start(object())
+        self.assertTrue(done.wait(3))
+        c.stop(timeout=2)
+        with open(path, encoding="utf-8") as f:
+            contents = f.read()
+        self.assertIn("watch started", contents)
+        self.assertIn("fire failed: boom", contents)
+
+    def test_default_gui_log_path_lives_beside_the_config(self):
+        from claude_continue.config import CONFIG_PATH
+        from claude_continue.gui import _default_gui_log_path
+        self.assertEqual(_default_gui_log_path().parent, CONFIG_PATH.parent)
+        self.assertEqual(_default_gui_log_path().name, "gui.log")
+
 
 class TestFormatSessions(unittest.TestCase):
     def test_none_shows_checking(self):
@@ -225,6 +310,12 @@ class TestWatchExplanation(unittest.TestCase):
         self.assertNotIn("iTerm2", out)
         self.assertNotIn("Busy sessions", out)   # keystroke has no skip-busy concept
 
+    def test_keystroke_all_on_windows_describes_every_session(self):
+        with _ForcePlatform("windows"):
+            out = watch_explanation(Config(keystroke_all=True))
+        self.assertIn("every running Claude session", out)
+        self.assertNotIn("iTerm2", out)
+
     def test_keystroke_on_macos_falls_through_to_iterm(self):
         # keystroke is a no-op on macOS (action routes to the iTerm broadcast)
         with _ForcePlatform("macos"):
@@ -241,6 +332,19 @@ class TestEffectiveCfg(unittest.TestCase):
     def test_windows_defaults_to_keystroke(self):
         with _ForcePlatform("windows"):
             self.assertTrue(effective_cfg(Config()).keystroke)
+
+    def test_windows_defaults_to_continue_all(self):
+        # native Windows continues EVERY running Claude session (the panel lists
+        # them), not just one window
+        with _ForcePlatform("windows"):
+            self.assertTrue(effective_cfg(Config()).keystroke_all)
+
+    def test_wsl_defaults_to_single_keystroke_not_all(self):
+        # WSL can't enumerate the Linux Claude proc, so it stays single-window
+        with _ForcePlatform("wsl"):
+            cfg = effective_cfg(Config())
+            self.assertTrue(cfg.keystroke)
+            self.assertFalse(cfg.keystroke_all)
 
     def test_wsl_defaults_to_keystroke(self):
         with _ForcePlatform("wsl"):
@@ -267,11 +371,11 @@ class TestEffectiveCfg(unittest.TestCase):
 
     def test_explanation_on_windows_default_is_not_iterm(self):
         # The GUI applies effective_cfg before explaining, so a zero-config Windows
-        # user sees the keystroke wording, never "iTerm2".
+        # user sees the continue-all wording, never "iTerm2".
         with _ForcePlatform("windows"):
             out = watch_explanation(effective_cfg(Config()))
         self.assertNotIn("iTerm2", out)
-        self.assertIn("Windows Terminal", out)  # the default keystroke target
+        self.assertIn("every running Claude session", out)  # continues all, not one window
 
 
 class TestWinInstancesMode(unittest.TestCase):
@@ -319,6 +423,14 @@ class TestFormatInstances(unittest.TestCase):
         many = [("claude", str(i)) for i in range(12)]
         out = format_instances(many, "")
         self.assertIn("...and 4 more", out)
+
+    def test_not_watching_has_no_affect_annotation(self):
+        out = format_instances([("claude", "22108")], "", watching=False)
+        self.assertNotIn("will continue", out)
+
+    def test_watching_marks_each_instance_will_continue(self):
+        out = format_instances([("claude", "22108"), ("claude", "35552")], "", watching=True)
+        self.assertEqual(out.count("-> will continue"), 2)  # both get a continue
 
 
 class TestShouldAutoRecheck(unittest.TestCase):

@@ -20,7 +20,7 @@ from typing import Any
 
 from . import __version__, ccusage, iterm, osenv, tmux, update, watch, winterm
 from .action import ActionError
-from .config import resolve
+from .config import CONFIG_PATH, resolve
 from .lock import AlreadyRunning
 
 _MAX_SESSIONS_SHOWN = 8
@@ -35,8 +35,16 @@ _UPDATE_RECHECK_MS = 6 * 60 * 60 * 1000  # every 6 hours
 _UPDATE_MIN_AUTO_S = 120.0               # min seconds between auto re-checks
 
 
+def _default_gui_log_path():
+    """Where the GUI persists watch output — next to the JSON config, so a failed
+    overnight run leaves a trail the user (or the doctor) can read afterward."""
+    return CONFIG_PATH.parent / "gui.log"
+
+
 class _FireTap(logging.Handler):
-    """Forwards each watch log line to a callback (to count fires)."""
+    """Forwards each watch log record to a callback (to count fires AND surface
+    warnings — passes the record, not just the message, so the callback can see
+    the level)."""
 
     def __init__(self, callback):
         super().__init__()
@@ -44,7 +52,7 @@ class _FireTap(logging.Handler):
 
     def emit(self, record):
         try:
-            self._callback(record.getMessage())
+            self._callback(record)
         except Exception:  # noqa: BLE001 - a logging tap must never raise
             pass
 
@@ -52,7 +60,7 @@ class _FireTap(logging.Handler):
 class WatchController:
     """Start/stop the watch loop in a background thread. Tk-free, testable."""
 
-    def __init__(self, runner=watch.run):
+    def __init__(self, runner=watch.run, log_path=None):
         self._runner = runner
         self._stop = threading.Event()
         self._stop_requested = False
@@ -61,12 +69,33 @@ class WatchController:
         self._error = None
         self._fires = 0
         self._last_fired = None
+        self._last_warning = None  # (datetime, message) of the latest watch warning
         # A per-instance Logger (not via getLogger) so multiple controllers don't
         # share handlers. propagate=False keeps watch logs out of the root logger.
         self._logger = logging.Logger("claude_continue.gui")
         self._logger.setLevel(logging.INFO)
         self._logger.propagate = False
         self._logger.addHandler(_FireTap(self._on_log))
+        # Persist watch output to a file so a failed overnight run leaves a trail.
+        # The GUI watch otherwise logs nowhere (unlike the launchd/Task-Scheduler
+        # agent, whose stdout is captured). Off by default so tests stay
+        # side-effect-free; the real GUI passes _default_gui_log_path().
+        if log_path is not None:
+            self._add_file_handler(log_path)
+
+    def _add_file_handler(self, log_path) -> None:
+        try:
+            from logging.handlers import RotatingFileHandler
+            from pathlib import Path
+            path = Path(log_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            handler = RotatingFileHandler(
+                str(path), maxBytes=512 * 1024, backupCount=2, encoding="utf-8")
+            handler.setFormatter(logging.Formatter(
+                "%(asctime)s %(levelname)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+            self._logger.addHandler(handler)
+        except OSError:
+            pass  # logging to a file is best-effort; never block watching
 
     # --- state queries ---
     def is_watching(self) -> bool:
@@ -89,6 +118,13 @@ class WatchController:
     @property
     def last_fired(self):
         return self._last_fired
+
+    @property
+    def last_warning(self):
+        """(datetime, message) of the most recent watch WARNING, or None. Cleared
+        when a real fire lands. The UI shows it so a silently-failing watch (e.g.
+        keystroke can't find its target window) doesn't just sit on 'WATCHING'."""
+        return self._last_warning
 
     # --- control ---
     def start(self, cfg) -> None:
@@ -135,11 +171,21 @@ class WatchController:
         except Exception as e:  # noqa: BLE001 - surface in the UI, never crash the app
             self._error = "watch stopped: %s" % e
 
-    def _on_log(self, message: str) -> None:
+    def _on_log(self, record) -> None:
+        message = record.getMessage()
         if message.startswith("fired ->"):
             with self._lock:
                 self._fires += 1
                 self._last_fired = datetime.now()
+                self._last_warning = None  # a real fire clears a prior failure note
+        elif record.levelno >= logging.WARNING:
+            # "fire failed", "gave up after N retries", "ccusage unavailable",
+            # timing clamps — the signals that explain a watch that looks alive but
+            # isn't resuming anything. watch._fire catches the keystroke
+            # ActionError and logs it here; without this it went nowhere and the
+            # failure was invisible.
+            with self._lock:
+                self._last_warning = (datetime.now(), message)
 
 
 def format_sessions(sessions, note, *, watching, cfg) -> str:
@@ -184,9 +230,16 @@ def effective_cfg(cfg):
     keeps keystroke opt-in: a focus-stealing SendKeys is fine when a user clicks a
     button, but not as a silent default for an unattended `fire`/`watch`.)
     """
-    if cfg.exec_cmd or cfg.tmux or cfg.keystroke:
+    if cfg.exec_cmd or cfg.tmux or cfg.keystroke or cfg.keystroke_all:
         return cfg  # an action is already configured — don't override it
-    if osenv.detect() in (osenv.WINDOWS, osenv.WSL):
+    # Native Windows: continue EVERY running Claude session (the panel lists them),
+    # cycling a terminal's tabs — the honest match for the macOS broadcast, which
+    # resumes all sessions, not one window.
+    if osenv.is_windows():
+        return replace(cfg, keystroke=True, keystroke_all=True)
+    # WSL: Claude runs as a Linux process Win32_Process can't enumerate, so the
+    # tab-cycling can't see it — fall back to the single titled-window keystroke.
+    if osenv.detect() == osenv.WSL:
         return replace(cfg, keystroke=True)
     return cfg
 
@@ -198,11 +251,16 @@ def win_instances_mode(cfg) -> bool:
     return osenv.is_windows() and not cfg.tmux
 
 
-def format_instances(instances, note) -> str:
+def format_instances(instances, note, *, watching=False) -> str:
     """Render the Windows 'Claude instances' panel — the running Claude Code
     processes (``claude.exe`` / node CLI). Windows has no iTerm2-style
     "is processing" signal, so there's no working/idle marker; each is shown as
-    running. ``instances`` is a list of (name, pid), or None when unavailable."""
+    running. ``instances`` is a list of (name, pid), or None when unavailable.
+
+    While watching (continue-all mode), each row is annotated "-> will continue"
+    so the panel and the action agree — the panel showing N instances now means
+    all N get a `continue` at reset, closing the gap that made it look like the
+    watcher ignored them."""
     if instances is None:
         return "Claude instances: " + (note or "checking…")
     if not instances:
@@ -212,7 +270,10 @@ def format_instances(instances, note) -> str:
         # native install lists as "claude"; an npm node CLI lists as "claude (node)"
         # so it still reads as a Claude instance, not a stray node process.
         label = name if name == "claude" else "claude (%s)" % name
-        lines.append("  ● %-13s (pid %s)" % (label, pid))
+        if watching:
+            lines.append("  ● %-13s %-15s (pid %s)" % (label, "-> will continue", pid))
+        else:
+            lines.append("  ● %-13s (pid %s)" % (label, pid))
     if len(instances) > _MAX_SESSIONS_SHOWN:
         lines.append("  ...and %d more" % (len(instances) - _MAX_SESSIONS_SHOWN))
     return "\n".join(lines)
@@ -283,6 +344,12 @@ def watch_explanation(cfg) -> str:
                        "5-hour windows back-to-back. It opens one right away if you have none.")
     if cfg.exec_cmd:
         return when + ("runs `%s` headlessly — so work resumes the instant your quota refreshes." % cfg.exec_cmd)
+    # Windows "continue all": writes `continue` straight into each Claude process's
+    # console input (no focus, any tab/pane/window). tmux wins over it (action._resume).
+    if cfg.keystroke_all and not cfg.tmux and osenv.is_windows():
+        return when + ('sends “%s” to every running Claude session — it writes it straight into '
+                       'each one’s input, so it works whether they’re separate windows, tabs, or '
+                       'split panes, without stealing focus.' % cfg.text)
     # --keystroke is the Windows/WSL path: it types into a single titled window
     # (no session/skip-busy concept). tmux wins over it (matches action._resume),
     # and on macOS keystroke is a no-op that falls through to the iTerm2 broadcast.
@@ -312,7 +379,7 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
     from tkinter import font as tkfont
     from tkinter import messagebox
 
-    controller = WatchController()
+    controller = WatchController(log_path=_default_gui_log_path())
     # Config is snapshotted once at startup; edits to the config file / env take
     # effect on the next launch, not mid-session. effective_cfg defaults Windows/WSL
     # to keystroke (so "Continue terminals" works zero-config) and is applied once
@@ -469,8 +536,15 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
             status.config(text="WATCHING · quota" if watch_mode["quota"] else "WATCHING")
             detail.config(text=countdown_text())
             set_buttons(mode)
-            if controller.last_fired:
-                note.config(text="last fired %s ✓  (%d total)" % (controller.last_fired.strftime("%H:%M"), controller.fires), fg="#2a2")
+            warn = controller.last_warning
+            fired = controller.last_fired
+            if warn is not None and (fired is None or warn[0] >= fired):
+                # a failed/abandoned fire isn't fatal (the loop keeps retrying),
+                # but the user must SEE it — otherwise "WATCHING" looks fine while
+                # nothing is actually resuming.
+                note.config(text="⚠ %s" % warn[1], fg="#a00")
+            elif fired is not None:
+                note.config(text="last fired %s ✓  (%d total)" % (fired.strftime("%H:%M"), controller.fires), fg="#2a2")
             else:
                 note.config(text="")
         else:
@@ -480,7 +554,10 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
             note.config(text="")
             set_buttons(None)
         if win_instances_mode(app_cfg):
-            sessions_label.config(text=format_instances(poll["sessions"], poll["sessions_note"]))
+            # continue-all resumes every listed instance; quota mode just opens a
+            # window, so only annotate when actually continuing.
+            live = watching and not watch_mode["quota"] and app_cfg.keystroke_all
+            sessions_label.config(text=format_instances(poll["sessions"], poll["sessions_note"], watching=live))
         else:
             live = watching and not watch_mode["quota"]
             sessions_label.config(text=format_sessions(

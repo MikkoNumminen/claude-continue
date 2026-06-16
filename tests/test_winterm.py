@@ -93,6 +93,96 @@ class TestListClaudeInstances(unittest.TestCase):
         self.assertEqual(captured.get("creationflags"), 0x08000000)
 
 
+class TestWindowTitles(unittest.TestCase):
+    def test_parse_strips_blanks_and_dedups(self):
+        out = winterm.parse_window_titles("  Term A \nChrome\nTerm A\n\n")
+        self.assertEqual(out, ["Term A", "Chrome"])
+
+    def test_build_script_reads_mainwindowtitle(self):
+        s = winterm.build_window_titles_script()
+        self.assertIn("Get-Process", s)
+        self.assertIn("MainWindowTitle", s)
+
+    def test_list_with_injected_runner(self):
+        out = winterm.list_window_titles(run=lambda t: "Term A\nChrome\n")
+        self.assertEqual(out, ["Term A", "Chrome"])
+
+    def test_match_is_prefix_and_case_insensitive(self):
+        self.assertTrue(winterm.window_match("windows terminal", ["Windows Terminal - claude"]))
+        self.assertTrue(winterm.window_match("WT", ["wt: a job"]))
+
+    def test_match_is_prefix_not_substring(self):
+        # AppActivate matches the START of a title, not a mid-string occurrence.
+        self.assertFalse(winterm.window_match("Terminal", ["Windows Terminal"]))
+
+    def test_match_empty_target_is_false(self):
+        self.assertFalse(winterm.window_match("", ["anything"]))
+        self.assertFalse(winterm.window_match("  ", ["anything"]))
+
+    def test_match_real_wt_tab_title_fails(self):
+        # the exact bug: Windows Terminal's window title is the active TAB's name,
+        # never the literal "Windows Terminal", so the default target finds nothing.
+        self.assertFalse(winterm.window_match("Windows Terminal", ["⠂ Debug GUI app", "Chrome"]))
+
+    def test_run_window_titles_nonzero_raises(self):
+        fail = subprocess.CompletedProcess([], 1, "", "boom")
+        with mock.patch("claude_continue.winterm._powershell_bin", return_value="powershell"), \
+             mock.patch("claude_continue.winterm.subprocess.run", return_value=fail):
+            with self.assertRaises(RuntimeError):
+                winterm._run_window_titles(30.0)
+
+
+class TestContinueInstances(unittest.TestCase):
+    # console-input injection: continue EVERY running Claude session by PID, no
+    # tabs/panes/focus. _inject_one is Windows-ctypes (not unit-tested off-Windows);
+    # the orchestration is tested with an injected `inject` + `instances`/`list_fn`.
+    def test_injects_continue_plus_enter_into_each_pid(self):
+        calls = []
+        out = winterm.continue_instances(
+            "continue",
+            instances=[("claude", "22108"), ("claude", "35552")],
+            inject=lambda pid, keys: calls.append((pid, keys)),
+        )
+        self.assertEqual(calls, [("22108", "continue\r"), ("35552", "continue\r")])
+        self.assertEqual(len(out), 2)
+        self.assertIn("22108", out[0])
+
+    def test_dry_run_lists_without_injecting(self):
+        calls = []
+        out = winterm.continue_instances(
+            "continue", instances=[("claude", "1")],
+            inject=lambda pid, keys: calls.append(pid), dry_run=True)
+        self.assertEqual(calls, [])
+        self.assertEqual(len(out), 1)
+
+    def test_uses_list_fn_when_instances_not_given(self):
+        out = winterm.continue_instances(
+            "continue", list_fn=lambda timeout: [("claude", "7")],
+            inject=lambda pid, keys: None)
+        self.assertEqual(len(out), 1)
+        self.assertIn("pid 7", out[0])
+
+    def test_one_dead_session_does_not_abort_the_rest(self):
+        # a session that exited (inject raises) is skipped; the others still resume
+        def inject(pid, keys):
+            if pid == "1":
+                raise RuntimeError("attach failed: process gone")
+        out = winterm.continue_instances(
+            "continue", instances=[("claude", "1"), ("claude", "2")], inject=inject)
+        self.assertEqual(len(out), 1)       # only the live one
+        self.assertIn("pid 2", out[0])
+
+    def test_total_failure_raises(self):
+        def inject(pid, keys):
+            raise RuntimeError("attach failed")
+        with self.assertRaises(RuntimeError):
+            winterm.continue_instances(
+                "continue", instances=[("claude", "1")], inject=inject)
+
+    def test_no_instances_returns_empty(self):
+        self.assertEqual(winterm.continue_instances("continue", instances=[]), [])
+
+
 class TestSendKeystroke(unittest.TestCase):
     def test_dry_run_sends_nothing(self):
         out = winterm.send_keystroke("continue", window_title="WT", dry_run=True)
