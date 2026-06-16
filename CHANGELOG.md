@@ -4,7 +4,7 @@ All notable changes to `claude-continue`. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.7.2] — 2026-06-16
 
 ### Fixed
 - **Windows self-update now actually updates and restarts.** Clicking **Update**
