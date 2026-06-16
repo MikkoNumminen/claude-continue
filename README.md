@@ -55,9 +55,11 @@ portable; only the "fire" action and the unattended agent differ per platform
 # Option A (recommended, all platforms): pip — gives you `claude-continue` on PATH
 pip install -e .
 
-# Option B: no install — run straight from the checkout
+# Option B: no install — run straight from the checkout (same `claude-continue`
+# command name on every platform; add `bin/` to PATH to drop the leading path)
 ./bin/claude-continue status          # macOS / Linux / WSL
-python -m claude_continue.cli status  # any platform (run from the repo root)
+.\bin\claude-continue status          # Windows (cmd or PowerShell)
+python -m claude_continue.cli status  # any platform (fallback, from the repo root)
 ```
 
 On native Windows, prefer Option A — `install` (Task Scheduler) needs a runnable

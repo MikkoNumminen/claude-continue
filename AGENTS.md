@@ -37,6 +37,7 @@ No install step is required — it's stdlib-only.
 # Run from source (no install)
 PYTHONPATH=src python3 -m claude_continue.cli --help
 ./bin/claude-continue status          # bare shim: sets PYTHONPATH for you
+.\bin\claude-continue status          # Windows equivalent (bin\claude-continue.cmd)
 
 # Run the full test suite (offline, fast — ~0.4s, ~300 tests)
 python3 -m unittest discover -s tests -q
@@ -90,7 +91,7 @@ tests/                    offline unit tests + fixtures/ (mirror src module name
 packaging/                build-macos.sh, build-windows.ps1, claude_continue_app.py (frozen entrypoint)
 templates/                launchd plist template
 .github/workflows/        ci.yml (test matrix + builds), release.yml (tag-triggered)
-bin/claude-continue       no-pip shim
+bin/claude-continue(.cmd) no-pip shim (.cmd = the Windows wrapper)
 ```
 
 ## How to add a feature (the loop we follow)

@@ -13,6 +13,7 @@ targets **Python 3.9+**.
 git clone https://github.com/MikkoNumminen/claude-continue
 cd claude-continue
 PYTHONPATH=src python3 -m claude_continue.cli --help   # or: ./bin/claude-continue --help
+# Windows: .\bin\claude-continue --help                # same command, cmd or PowerShell
 ```
 
 ## Running tests
