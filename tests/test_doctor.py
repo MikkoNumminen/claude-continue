@@ -113,6 +113,10 @@ class TestConfigCheck(unittest.TestCase):
         c = doctor._check_config(Config(keystroke=True, window_title="WT"))
         self.assertIn("keystroke", c.detail)
 
+    def test_summary_keystroke_all(self):
+        c = doctor._check_config(Config(keystroke_all=True))
+        self.assertIn("continue all", c.detail)
+
     def test_summary_quota_mode(self):
         c = doctor._check_config(Config(start_window=True))
         self.assertEqual(c.status, OK)
@@ -199,6 +203,67 @@ class TestActionCheck(unittest.TestCase):
                             preview=lambda: ["keystroke 'continue' -> window 'Windows Terminal'"])
         self.assertEqual(c.status, OK)
 
+    def test_windows_keystroke_target_window_missing_fails(self):
+        # the honest probe: no open window matches the target -> SendKeys has
+        # nothing to type into, so report FAIL (and list what IS open) rather than
+        # a misleading dry-run OK.
+        with _ForcePlatform("windows"):
+            c = self._check(Config(keystroke=True, window_title="Windows Terminal"),
+                            which=lambda n: "powershell.exe",
+                            window_titles=lambda: ["⠂ some tab title", "Chrome"])
+        self.assertEqual(c.status, FAIL)
+        self.assertIn("window-title", c.detail)
+        self.assertIn("Windows Terminal", c.detail)
+        self.assertIn("some tab title", c.detail)  # lists the open windows
+
+    def test_windows_keystroke_no_windows_open_fails(self):
+        # empty window list -> still FAIL, with the "(none open)" formatting branch
+        with _ForcePlatform("windows"):
+            c = self._check(Config(keystroke=True, window_title="WT"),
+                            which=lambda n: "powershell.exe",
+                            window_titles=lambda: [])
+        self.assertEqual(c.status, FAIL)
+        self.assertIn("(none open)", c.detail)
+
+    def test_windows_keystroke_target_window_present_ok(self):
+        with _ForcePlatform("windows"):
+            c = self._check(Config(keystroke=True, window_title="My Term"),
+                            which=lambda n: "powershell.exe",
+                            window_titles=lambda: ["My Term - claude"],
+                            preview=lambda: ["keystroke 'continue' -> window 'My Term'"])
+        self.assertEqual(c.status, OK)
+
+    def test_windows_keystroke_all_no_powershell_fails(self):
+        with _ForcePlatform("windows"):
+            c = self._check(Config(keystroke_all=True), which=lambda n: None)
+        self.assertEqual(c.status, FAIL)
+        self.assertIn("PowerShell", c.detail)
+
+    def test_windows_keystroke_all_lists_sessions_ok(self):
+        with _ForcePlatform("windows"):
+            c = self._check(Config(keystroke_all=True), which=lambda n: "powershell.exe",
+                            preview=lambda: ["continue -> claude (pid 22108)", "continue -> claude (pid 35552)"])
+        self.assertEqual(c.status, OK)
+        self.assertIn("pid 22108", c.detail)
+
+    def test_windows_keystroke_all_no_sessions_warns(self):
+        # nothing running to continue right now -> WARN, not a hard FAIL
+        with _ForcePlatform("windows"):
+            c = self._check(Config(keystroke_all=True), which=lambda n: "powershell.exe",
+                            preview=lambda: [])
+        self.assertEqual(c.status, WARN)
+
+    def test_windows_keystroke_probe_failure_does_not_block(self):
+        # if we can't enumerate windows, don't FAIL on a guess — fall through.
+        def boom():
+            raise RuntimeError("powershell down")
+        with _ForcePlatform("windows"):
+            c = self._check(Config(keystroke=True, window_title="WT"),
+                            which=lambda n: "powershell.exe",
+                            window_titles=boom,
+                            preview=lambda: ["keystroke 'continue' -> window 'WT'"])
+        self.assertEqual(c.status, OK)
+
 
 class TestRunChecks(unittest.TestCase):
     def test_all_ok_on_macos(self):
@@ -214,6 +279,20 @@ class TestRunChecks(unittest.TestCase):
             )
         self.assertEqual(doctor.worst_status(checks), OK)
         self.assertEqual({c.name for c in checks}, {"python", "platform", "ccusage", "node", "agent", "config", "action"})
+
+    def test_threads_window_titles_into_keystroke_check(self):
+        with _ForcePlatform("windows"):
+            checks = doctor.run_checks(
+                Config(keystroke=True, window_title="Nope"),
+                which=lambda n: "C:\\bin\\%s.exe" % n,  # node + powershell present
+                ccusage_probe=lambda t: _block(utc(2026, 1, 2, 13)),
+                scheduler_describe=lambda: ("running", "up"),
+                action_preview=lambda: ["x"],
+                window_titles=lambda: ["Other Window"],  # nothing starts with "Nope"
+                now=lambda: utc(2026, 1, 2, 12),
+            )
+        action = next(c for c in checks if c.name == "action")
+        self.assertEqual(action.status, FAIL)
 
     def test_worst_status_precedence(self):
         Check = doctor.Check

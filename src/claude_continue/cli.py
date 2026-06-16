@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import io
 import os
 import shutil
 import sys
@@ -60,6 +61,9 @@ def add_action_args(p: argparse.ArgumentParser, *, dry_run: bool = False) -> Non
                    help="Windows/WSL: type the text into a terminal window (opt-in, best-effort)")
     a.add_argument("--window-title", dest="window_title", default=None, metavar="TITLE",
                    help="window title to target in --keystroke mode (default: Windows Terminal)")
+    a.add_argument("--keystroke-all", dest="keystroke_all", action="store_true", default=None,
+                   help="Windows: continue EVERY running Claude session by writing into each "
+                        "one's console input (any window/tab/pane, no focus stealing) — the GUI's default")
     a.add_argument("--tmux", dest="tmux", action="store_true", default=None,
                    help="resume Claude panes running inside tmux (any terminal, macOS/Linux)")
     a.add_argument("--tmux-busy-pattern", dest="tmux_busy_pattern", default=None, metavar="TEXT",
@@ -109,6 +113,9 @@ def overrides_to_argv(overrides: dict) -> list:
         elif name == "keystroke":
             if value:
                 argv.append("--keystroke")
+        elif name == "keystroke_all":
+            if value:
+                argv.append("--keystroke-all")
         elif name == "tmux":
             if value:
                 argv.append("--tmux")
@@ -177,24 +184,24 @@ def cmd_status(args) -> int:
             targets = action.perform(cfg, dry_run=True)
             print("Action: send %r to %d session(s):" % (cfg.text, len(targets)))
             for name in targets:
-                print("  - %s" % name)
+                _emit("  - %s" % name)  # session names can carry non-cp1252 glyphs (✳)
         except Exception as e:  # noqa: BLE001 - status must never raise
-            print("Action preview failed: %s" % e)
+            _emit("Action preview failed: %s" % e)
     return 0
 
 
 def cmd_doctor(args) -> int:
     cfg = resolve(build_overrides(args))
     checks = doctor.run_checks(cfg)
-    symbol = {doctor.OK: "✓", doctor.WARN: "!", doctor.FAIL: "✗"}
+    symbol = _doctor_symbols()
     for c in checks:
-        print("%s %-9s %s" % (symbol[c.status], c.name, c.detail))
+        _emit("%s %-9s %s" % (symbol[c.status], c.name, c.detail))
     worst = doctor.worst_status(checks)
-    print("")
+    _emit("")
     if worst == doctor.FAIL:
-        print("Some checks FAILED — fix the above before relying on the agent.")
+        _emit("Some checks FAILED — fix the above before relying on the agent.")
         return 1
-    print("Ready, with warnings." if worst == doctor.WARN else "All checks passed.")
+    _emit("Ready, with warnings." if worst == doctor.WARN else "All checks passed.")
     return 0
 
 
@@ -390,14 +397,64 @@ def build_parser() -> argparse.ArgumentParser:
 def _force_utf8_stdio() -> None:
     """Make stdout/stderr UTF-8 on Windows so the doctor/status glyphs (✓ ✳ ●)
     don't raise UnicodeEncodeError on a legacy console code page (cp1252/cp850).
-    Best-effort: a frozen GUI exe may have no real streams to reconfigure."""
+
+    Layered, all best-effort: reconfigure the stream in place if we can; else
+    rebuild it over the raw buffer — a frozen windowed PyInstaller stream (our
+    .exe is built ``console=False``) often has no ``.reconfigure``, which is why
+    the in-place fix alone wasn't enough and `doctor` still tracebacked on the
+    shipped build. If neither lands, ``_emit`` below is the final backstop."""
     if os.name != "nt":
         return
-    for stream in (sys.stdout, sys.stderr):
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if stream is None:
+            continue
         try:
-            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]  # TextIOWrapper-only
+            stream.reconfigure(encoding="utf-8", errors="replace")  # TextIOWrapper-only (stream is Any via getattr)
+            continue
         except (AttributeError, OSError, ValueError):
             pass
+        buffer = getattr(stream, "buffer", None)
+        if buffer is not None:
+            try:
+                setattr(sys, name, io.TextIOWrapper(
+                    buffer, encoding="utf-8", errors="replace", line_buffering=True))
+            except (AttributeError, OSError, ValueError):
+                pass
+
+
+def _stdout_can_encode(probe: str) -> bool:
+    """True if the current stdout encoding can represent ``probe``. A text stream
+    with no declared encoding (e.g. an in-memory StringIO under test) accepts any
+    str, so treat that as yes."""
+    enc = getattr(sys.stdout, "encoding", None)
+    if not enc:
+        return True
+    try:
+        probe.encode(enc)
+        return True
+    except (UnicodeEncodeError, LookupError):
+        return False
+
+
+def _emit(text: str) -> None:
+    """``print`` that survives a console code page that can't encode every glyph.
+    The UTF-8 reconfigure above is best-effort (it can't always touch a frozen
+    windowed stream), so re-encode with 'replace' as a last resort rather than
+    crash — a doctor that prints '?' beats a doctor that tracebacks."""
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+        print(text.encode(enc, "replace").decode(enc, "replace"))
+
+
+def _doctor_symbols() -> dict:
+    """Status markers for ``doctor``: the nice glyphs when stdout can encode them,
+    ASCII otherwise so a legacy code page reports instead of crashing on the ✓."""
+    if _stdout_can_encode("✓✗"):
+        return {doctor.OK: "✓", doctor.WARN: "!", doctor.FAIL: "✗"}
+    return {doctor.OK: "[ok]", doctor.WARN: "[!]", doctor.FAIL: "[X]"}
 
 
 def main(argv=None) -> int:

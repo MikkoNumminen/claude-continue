@@ -44,6 +44,41 @@ class TestResumeDispatch(unittest.TestCase):
                 perform(Config(), dry_run=True)
 
 
+class TestKeystrokeAll(unittest.TestCase):
+    def test_windows_keystroke_all_injects_into_every_session(self):
+        with _ForcePlatform("windows"), \
+             mock.patch("claude_continue.action.winterm.continue_instances",
+                        return_value=["continue -> claude (pid 22108)", "continue -> claude (pid 35552)"]) as cont:
+            out = perform(Config(keystroke_all=True), dry_run=False)
+        self.assertEqual(len(out), 2)
+        cont.assert_called_once()
+        self.assertEqual(cont.call_args.args[0], "continue")  # cfg.text flows through
+        self.assertFalse(cont.call_args.kwargs.get("dry_run"))
+
+    def test_no_sessions_running_returns_empty_not_error(self):
+        with _ForcePlatform("windows"), \
+             mock.patch("claude_continue.action.winterm.continue_instances", return_value=[]):
+            out = perform(Config(keystroke_all=True), dry_run=True)
+        self.assertEqual(out, [])
+
+    def test_injection_failure_is_wrapped_as_actionerror(self):
+        with _ForcePlatform("windows"), \
+             mock.patch("claude_continue.action.winterm.continue_instances",
+                        side_effect=RuntimeError("nothing could be attached")):
+            with self.assertRaises(ActionError):
+                perform(Config(keystroke_all=True), dry_run=False)
+
+    def test_keystroke_all_ignored_on_wsl_falls_back_to_single(self):
+        # WSL's Claude is a Linux process; console injection can't see it — so
+        # keystroke_all must NOT route to the Windows injection path there.
+        with _ForcePlatform("wsl"), \
+             mock.patch("claude_continue.action.winterm.send_keystroke", return_value=["x"]) as single, \
+             mock.patch("claude_continue.action.winterm.continue_instances") as cont:
+            perform(Config(keystroke_all=True, keystroke=True), dry_run=True)
+        single.assert_called_once()
+        cont.assert_not_called()
+
+
 class TestExec(unittest.TestCase):
     def test_dry_run_returns_label_without_spawning(self):
         with mock.patch("claude_continue.action.subprocess.Popen") as popen:

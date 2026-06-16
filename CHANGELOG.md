@@ -4,6 +4,49 @@ All notable changes to `claude-continue`. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **Windows: "Continue terminals" now resumes EVERY running Claude session, not
+  just one window.** The macOS app broadcasts `continue` to all iTerm2 sessions;
+  Windows could only type into a single titled window, so multiple sessions — e.g.
+  several tabs *or split panes* in one Windows Terminal window — were left paused
+  (the panel listed N instances but only one, at most, got continued). The watcher
+  now writes `continue` straight into each Claude process's **console input**
+  (`AttachConsole` + `WriteConsoleInput`), targeting every session **by PID**. This
+  bypasses the window entirely, so it works no matter how sessions are arranged —
+  separate windows, tabs, or split panes — **without stealing focus** and even
+  when the terminal is in the background. It's the default for the GUI on native
+  Windows; the instances panel annotates each row "-> will continue" while
+  watching. Exposed on the CLI as `--keystroke-all`. (Verified against Windows
+  Terminal's ConPTY in both cooked and raw input modes. WSL keeps the single
+  titled-window path — its Claude is a Linux process Windows can't enumerate.)
+
+### Fixed
+- **`doctor` no longer crashes on Windows.** Running `doctor` (including the
+  frozen `.exe`, which is built `console=False`) tracebacked with
+  `UnicodeEncodeError: '✓'` — it printed the `✓`/`✗` status glyphs (and the
+  `✳` in the default filter) to a legacy cp1252 console. The in-place UTF-8
+  reconfigure couldn't touch the frozen windowed stream, so output is now layered:
+  reconfigure → rebuild a UTF-8 wrapper over the raw buffer → ASCII-fallback
+  symbols (`[ok]`/`[!]`/`[X]`) with `errors="replace"` as a last resort. A doctor
+  that prints `?` beats a doctor that crashes.
+- **The GUI no longer fails silently when a fire doesn't land.** A failed fire
+  (e.g. `--keystroke` can't find its target window) logs at WARNING, but the GUI's
+  watch logger dropped every non-`fired ->` line — so the window kept showing
+  "WATCHING" all night while nothing actually resumed. The controller now captures
+  the latest warning and the UI shows it (`⚠ …`), cleared by the next real fire.
+  The GUI watch also writes to a rotating log file (`gui.log`, beside the config)
+  so an overnight run leaves a trail.
+
+### Changed
+- **`doctor`'s `--keystroke` check now verifies the target window exists.** It
+  enumerates open window titles and FAILs (listing what's open) when
+  `--window-title` matches nothing, instead of a misleading dry-run "OK". This
+  catches the most common keystroke failure: Windows Terminal's window title is
+  the active *tab's* name, not the literal "Windows Terminal", so the default
+  target finds nothing to type into.
+
 ## [0.7.2] — 2026-06-16
 
 ### Fixed
