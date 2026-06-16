@@ -1,0 +1,7 @@
+# Batch launchers must keep CRLF — a lone bare LF can break cmd.exe parsing.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Shell scripts and the POSIX shim stay LF regardless of platform.
+*.sh text eol=lf
+bin/claude-continue text eol=lf

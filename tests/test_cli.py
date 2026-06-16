@@ -27,6 +27,34 @@ def _non_none(d):
     return {k: v for k, v in d.items() if v is not None}
 
 
+class TestForceUtf8Stdio(unittest.TestCase):
+    def test_noop_off_windows(self):
+        with mock.patch.object(cli.os, "name", "posix"):
+            cli._force_utf8_stdio()  # early return, never raises
+
+    def test_windows_swallows_streams_without_reconfigure(self):
+        # best-effort: a stream lacking reconfigure() (e.g. a captured StringIO)
+        # must be tolerated, not crash the CLI.
+        with mock.patch.object(cli.os, "name", "nt"), \
+             mock.patch.object(cli.sys, "stdout", object()), \
+             mock.patch.object(cli.sys, "stderr", object()):
+            cli._force_utf8_stdio()  # AttributeError swallowed
+
+    def test_windows_reconfigures_to_utf8(self):
+        calls = []
+
+        class FakeStream:
+            def reconfigure(self, **kw):
+                calls.append(kw)
+
+        with mock.patch.object(cli.os, "name", "nt"), \
+             mock.patch.object(cli.sys, "stdout", FakeStream()), \
+             mock.patch.object(cli.sys, "stderr", FakeStream()):
+            cli._force_utf8_stdio()
+        self.assertTrue(all(c.get("encoding") == "utf-8" for c in calls))
+        self.assertEqual(len(calls), 2)  # stdout + stderr
+
+
 class TestGuiCommand(unittest.TestCase):
     def test_clears_stale_update_before_launching_gui(self):
         # cmd_gui is the only caller of cleanup_stale_update — it must run it (to
