@@ -286,7 +286,10 @@ def _inject_one(pid, text: str) -> None:
             r.KeyEvent.uChar.UnicodeChar = cu
             records.append(r)
 
-    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    # WinDLL / get_last_error are Windows-only in typeshed, so mypy (which CI runs
+    # on Linux) needs the ignore — same pattern as osenv.pid_alive.
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    last_err = ctypes.get_last_error  # type: ignore[attr-defined]
     # CreateFileW returns a HANDLE (pointer-sized): pin the restype so it isn't
     # truncated to 32 bits on Win64 (the ctypes default c_int would corrupt a
     # high handle value).
@@ -294,16 +297,16 @@ def _inject_one(pid, text: str) -> None:
     k32.FreeConsole()  # a process can only be attached to one console at a time
     try:
         if not k32.AttachConsole(int(pid)):
-            raise RuntimeError("could not attach to pid %s (exited?), err=%s" % (pid, ctypes.get_last_error()))
+            raise RuntimeError("could not attach to pid %s (exited?), err=%s" % (pid, last_err()))
         handle = k32.CreateFileW("CONIN$", 0xC0000000, 0x3, None, 0x3, 0, None)
         if not handle or handle == (2 ** 64 - 1):  # NULL or INVALID_HANDLE_VALUE
-            raise RuntimeError("CONIN$ open failed for pid %s, err=%s" % (pid, ctypes.get_last_error()))
+            raise RuntimeError("CONIN$ open failed for pid %s, err=%s" % (pid, last_err()))
         arr = (_InputRecord * len(records))(*records)
         written = wintypes.DWORD(0)
         ok = k32.WriteConsoleInputW(wintypes.HANDLE(handle), arr, len(records), ctypes.byref(written))
         k32.CloseHandle(wintypes.HANDLE(handle))
         if not ok:
-            raise RuntimeError("WriteConsoleInput failed for pid %s, err=%s" % (pid, ctypes.get_last_error()))
+            raise RuntimeError("WriteConsoleInput failed for pid %s, err=%s" % (pid, last_err()))
     finally:
         k32.FreeConsole()
         k32.AttachConsole(_ATTACH_PARENT_PROCESS)  # best-effort: restore CLI stdout
