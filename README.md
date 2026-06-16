@@ -306,7 +306,7 @@ so retries span ~1h — enough to cover a worst-case-early estimate),
 `tmux` (false) / `tmux_busy_pattern` ("esc to interrupt"), and (Windows/WSL)
 `keystroke` (false) / `window_title` ("Windows Terminal").
 
-## Two honest caveats
+## Honest caveats
 
 1. **The reset time is a best estimate.** `ccusage` reconstructs the window from
    your local transcripts; on idle paths it can be up to the ~1-hour rounding
@@ -325,6 +325,16 @@ so retries span ~1h — enough to cover a worst-case-early estimate),
    unattended runs, keep it awake (`caffeinate` on macOS; a "do not sleep" power
    plan / `presentationsettings` on Windows).
 
+3. **"Use it or lose it" means fire-and-forget — mind the review debt.** This
+   fills the gaps between consumption-triggered windows; it isn't bending any
+   limits (on a Max plan you're paying for the capacity either way). But the whole
+   pattern is *start it, walk away, let it run* — so Claude produces work nobody is
+   watching in real time. On long autonomous runs the marginal value can fall off
+   fast: you get a lot of output, but **review debt piles up**, and an hour spent
+   going the wrong direction is worse than not running at all. The tool doesn't
+   cause that, but it makes the pattern temptingly easy — so point it at
+   well-scoped work and actually read what comes back.
+
 ## Platform support
 
 | | macOS | Windows | WSL | Linux |
@@ -338,6 +348,11 @@ so retries span ~1h — enough to cover a worst-case-early estimate),
 `claude-continue doctor` reports the detected platform and checks the right
 pieces for it. (Linux has no bundled unattended agent yet — run `watch` under your
 own service manager, e.g. a systemd user unit.)
+
+**Scope, honestly.** The zero-config experience is macOS-first — iTerm2 and
+launchd are what tie it there. The cross-platform routes (`--exec` headless,
+`--tmux`) already work; fuller Linux/tmux support is the main thing that would
+widen the audience beyond a personal tool.
 
 ## How it stays unattended
 
