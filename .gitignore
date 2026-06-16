@@ -19,3 +19,9 @@ dist/
 
 # Claude Code local session state
 .claude/
+
+# test coverage artifacts
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
