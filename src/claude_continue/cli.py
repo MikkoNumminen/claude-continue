@@ -182,7 +182,7 @@ def cmd_status(args) -> int:
     else:
         try:
             targets = action.perform(cfg, dry_run=True)
-            print("Action: send %r to %d session(s):" % (cfg.text, len(targets)))
+            _emit("Action: send %r to %d session(s):" % (cfg.text, len(targets)))  # %r of cfg.text may be non-ASCII
             for name in targets:
                 _emit("  - %s" % name)  # session names can carry non-cp1252 glyphs (✳)
         except Exception as e:  # noqa: BLE001 - status must never raise
@@ -207,7 +207,9 @@ def cmd_doctor(args) -> int:
 
 def cmd_gui(args) -> int:
     from . import gui, update  # gui module is import-safe; tkinter is imported inside run()
-    update.cleanup_stale_update()  # clear a <exe>.old left by a prior Windows self-update
+    stale = update.cleanup_stale_update()  # tidy a prior Windows self-update; warn if it silently failed
+    if stale:
+        _emit(stale)
     try:
         gui.run()
     except ImportError as e:

@@ -91,16 +91,19 @@ def send_keystroke(text: str, *, window_title: str = DEFAULT_WINDOW_TITLE,
 # "is processing" flag, so instances are listed without a working/idle marker.
 
 # "<pid>\t<name>" per Claude Code process: the native ``claude.exe``, or a
-# ``node.exe`` whose command line names the claude-code package (npm install).
-# The command-line match is SCOPED to node.exe on purpose — otherwise the very
-# PowerShell process running this query self-matches (its own command line
-# contains the literal "claude-code"), and so would any shell that merely
-# mentions the package path. CommandLine reads need no elevation for the user's
-# own processes. Built into Windows; reachable from WSL via interop.
+# ``node.exe`` whose command line references the scoped package path
+# ``@anthropic-ai/claude-code`` (its node_modules entry, e.g.
+# ...\node_modules\@anthropic-ai\claude-code\cli.js). Anchoring to the scoped
+# path — not a bare "claude-code" substring — avoids writing `continue` into an
+# unrelated node process (e.g. "claude-coder", or a shell that merely mentions
+# the name). Residual: `npm install @anthropic-ai/claude-code` itself would also
+# match while installing — acceptable since continue-all is opt-in. CommandLine
+# reads need no elevation for the user's own processes; reachable from WSL via
+# interop. The Python "[\\\\/]" below emits the PowerShell regex "[\\/]" (\ or /).
 _INSTANCES_SCRIPT = (
     "Get-CimInstance Win32_Process | "
     "Where-Object { $_.Name -eq 'claude.exe' -or "
-    "($_.Name -eq 'node.exe' -and $_.CommandLine -match 'claude-code') } | "
+    "($_.Name -eq 'node.exe' -and $_.CommandLine -match '@anthropic-ai[\\\\/]claude-code') } | "
     "ForEach-Object { \"$($_.ProcessId)`t$($_.Name)\" }"
 )
 

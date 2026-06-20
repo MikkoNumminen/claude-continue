@@ -20,19 +20,20 @@ class TestSelfDeleteScripts(unittest.TestCase):
         s = selfremove.macos_self_delete_script("/Applications/My App.app", 1)
         self.assertIn("'/Applications/My App.app'", s)         # shlex.quote
 
-    def test_windows_script_waits_then_dels(self):
-        s = selfremove.windows_self_delete_script(r"C:\a\cc.exe")
-        # waitfor (not ping/tasklist|find, which hang in a console-less cmd)
-        self.assertIn("waitfor /t", s)
+    def test_windows_script_polls_pid_then_dels(self):
+        s = selfremove.windows_self_delete_script(r"C:\a\cc.exe", pid=4321)
+        self.assertIn('tasklist /FI "PID eq 4321"', s)   # poll our PID (capped loop)
+        self.assertIn("goto ccwait", s)
+        self.assertIn("waitfor /t 1 ", s)                # per-iteration delay
+        self.assertIn("timeout /t 1 /nobreak", s)        # waitfor fallback
         self.assertNotIn("ping", s)
-        self.assertNotIn("tasklist", s)
         self.assertIn(r'del /F /Q "C:\a\cc.exe"', s)
         self.assertIn('del "%~f0"', s)
 
     def test_windows_script_retries_delete(self):
         # the exe stays locked until the bootstrap+child exit -> a 2nd attempt
-        s = selfremove.windows_self_delete_script(r"C:\a\cc.exe", wait_s=4)
-        self.assertIn("waitfor /t 4 ", s)
+        s = selfremove.windows_self_delete_script(r"C:\a\cc.exe", pid=1, wait_s=4)
+        self.assertIn("if %_i% GEQ 4 ", s)               # wait_s is the poll cap
         self.assertEqual(s.count(r'del /F /Q "C:\a\cc.exe"'), 2)
 
 

@@ -45,19 +45,33 @@ def macos_self_delete_script(target: str, pid: int) -> str:
     )
 
 
-def windows_self_delete_script(target: str, *, wait_s: int = 5) -> str:
+def windows_self_delete_script(target: str, *, pid: int, wait_s: int = 30) -> str:
     """Detached .cmd: wait for our process to exit, then delete the exe + itself.
 
-    Runs console-less (CREATE_NO_WINDOW), where ``ping``/``timeout`` don't delay
-    and a ``tasklist | find`` PID-poll pipe won't connect — so it uses a fixed
-    ``waitfor /t`` sleep (the same fix as the self-update swap). The exe stays
-    locked until the PyInstaller bootstrap + child both exit, so the delete gets a
-    second attempt after another wait."""
+    Runs console-less (CREATE_NO_WINDOW). Polls for our ``pid`` to exit (via file
+    redirection — pipes don't connect window-less), capped by a counter so it can
+    never hang; ``waitfor`` (or ``timeout`` fallback) supplies the per-iteration
+    delay. The exe may stay locked until the PyInstaller bootstrap exits, so the
+    delete gets a second attempt after another short wait.
+
+    NOTE (flagged): unit-tested for text only, not run on real Windows — mirrors
+    the self-update swap helper; verify before relying on it."""
+    wait_file = "%TEMP%\\cc-remove-wait.txt"
     return "\r\n".join([
         "@echo off",
-        "waitfor /t %d ClaudeContinueRemove 2>NUL" % wait_s,
+        "set _i=0",
+        ":ccwait",
+        'tasklist /FI "PID eq %d" /NH > "%s" 2>NUL' % (pid, wait_file),
+        'findstr /C:"%d" "%s" >NUL || goto ccgone' % (pid, wait_file),
+        "set /a _i+=1",
+        "if %%_i%% GEQ %d goto ccgone" % wait_s,
+        "waitfor /t 1 ClaudeContinueRemovePoll 2>NUL || timeout /t 1 /nobreak >NUL 2>&1",
+        "goto ccwait",
+        ":ccgone",
+        'del "%s" >NUL 2>&1' % wait_file,
         'del /F /Q "%s" >NUL 2>&1' % target,
-        'if exist "%s" (waitfor /t %d ClaudeContinueRemove2 2>NUL & del /F /Q "%s" >NUL 2>&1)' % (target, wait_s, target),
+        # one more attempt after a short delay if the bootstrap still held the exe.
+        'if exist "%s" (waitfor /t 2 ClaudeContinueRemove2 2>NUL || timeout /t 2 /nobreak >NUL 2>&1 & del /F /Q "%s" >NUL 2>&1)' % (target, target),
         'del "%~f0"',
     ]) + "\r\n"
 
@@ -71,7 +85,7 @@ def _spawn_self_delete(target: str) -> None:
         os.chmod(path, 0o755)
         subprocess.Popen(["/bin/sh", path], **osenv.detached_popen_kwargs())
     else:
-        script = windows_self_delete_script(target)
+        script = windows_self_delete_script(target, pid=os.getpid())
         path = os.path.join(tempfile.gettempdir(), "claude-continue-remove.cmd")
         # newline="" so \r\n isn't doubled; CREATE_NO_WINDOW (not DETACHED) so the
         # waitfor-based script runs correctly and no console flashes.

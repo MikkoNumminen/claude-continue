@@ -113,9 +113,16 @@ class TestConfigCheck(unittest.TestCase):
         c = doctor._check_config(Config(keystroke=True, window_title="WT"))
         self.assertIn("keystroke", c.detail)
 
-    def test_summary_keystroke_all(self):
-        c = doctor._check_config(Config(keystroke_all=True))
+    def test_summary_keystroke_all_on_windows(self):
+        with mock.patch.object(doctor.osenv, "detect", return_value=osenv.WINDOWS):
+            c = doctor._check_config(Config(keystroke_all=True))
         self.assertIn("continue all", c.detail)
+
+    def test_summary_keystroke_all_off_windows_falls_through(self):
+        # keystroke_all only fires on Windows; elsewhere it must not claim "continue all"
+        with mock.patch.object(doctor.osenv, "detect", return_value=osenv.MACOS):
+            c = doctor._check_config(Config(keystroke_all=True))
+        self.assertNotIn("continue all", c.detail)
 
     def test_summary_quota_mode(self):
         c = doctor._check_config(Config(start_window=True))
@@ -247,11 +254,15 @@ class TestActionCheck(unittest.TestCase):
         self.assertIn("pid 22108", c.detail)
 
     def test_windows_keystroke_all_no_sessions_warns(self):
-        # nothing running to continue right now -> WARN, not a hard FAIL
+        # nothing running to continue right now -> WARN, not a hard FAIL, and the
+        # message must NOT cite filter/skip_busy (continue-all ignores them, #8).
         with _ForcePlatform("windows"):
             c = self._check(Config(keystroke_all=True), which=lambda n: "powershell.exe",
                             preview=lambda: [])
         self.assertEqual(c.status, WARN)
+        self.assertIn("no running Claude sessions", c.detail)
+        self.assertNotIn("filter", c.detail)
+        self.assertNotIn("skip_busy", c.detail)
 
     def test_windows_keystroke_probe_failure_does_not_block(self):
         # if we can't enumerate windows, don't FAIL on a guess — fall through.
