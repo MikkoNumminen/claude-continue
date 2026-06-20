@@ -4,6 +4,48 @@ All notable changes to `claude-continue`. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.8.1] — 2026-06-20
+
+Follow-up hardening for the v0.7.0–v0.8.0 Windows work, from an adversarial audit
+and code review (each finding independently verified before fixing).
+
+### Fixed
+- **A silently-failed Windows self-update is now actually reported.** When a prior
+  update didn't land, the next launch warns "the last update to X didn't complete"
+  — but that warning could only arise on the frozen *windowed* `.exe` (no console),
+  where it was printed to a `None` stdout and vanished. It's now shown in the GUI
+  via a dialog, the one place the user will see it. The launcher also reaps stale
+  `cc-update-*` temp dirs left by an interrupted update.
+- **Windows update/uninstall helpers wait for the app to actually exit before
+  acting.** The detached `.cmd` now polls for this process's PID to disappear
+  (capped so it can never hang) before swapping/deleting the binary, instead of a
+  blind fixed sleep — closing the exit race that could leave a duplicate instance.
+  A failed `tasklist` keeps waiting rather than acting prematurely; `move`-aside +
+  rollback keep the binary path never-empty (un-updated beats bricked).
+- **The Windows self-delete (`uninstall --app`) now refuses an unsafe install
+  path** (e.g. one containing `%`) instead of emitting a corrupt `del` script —
+  mirroring the guard the self-update already had.
+- **Claude-process detection on Windows is scoped to the real install path**
+  (`@anthropic-ai/claude-code`) rather than a bare `claude-code` substring, so an
+  unrelated `node` process or an `npm install` line can no longer be mistaken for a
+  Claude session.
+- **`doctor`'s "continue all" action label and checks are correctly scoped to
+  Windows** (they could otherwise surface on macOS/Linux where the path never
+  fires), and the "nothing running" message no longer cites the irrelevant
+  `filter`/`skip_busy` settings on that path.
+- `status` no longer risks a `cp1252` crash when printing a non-ASCII `--text`.
+
+### Docs
+- README scopes `--keystroke-all` to **native Windows** (it can't enumerate WSL's
+  Linux Claude processes; WSL uses the single-window `--keystroke` path), documents
+  that it has no skip-busy filter and re-injects on retry, and adds `keystroke_all`
+  to the configuration key reference.
+
+### Notes
+- The detached Windows `.cmd` swap/self-delete helpers are unit-tested for their
+  emitted text and validated on Windows CI, but an actual Update/Remove against a
+  live running `.exe` has not yet been smoke-tested on real hardware.
+
 ## [0.8.0] — 2026-06-16
 
 ### Added
@@ -203,6 +245,7 @@ quality-gate layer and stamps the version.)
   skip-busy, launchd / Windows Task Scheduler agents, and the standalone macOS
   `.app` / Windows `.exe` builds.
 
+[0.8.1]: https://github.com/MikkoNumminen/claude-continue/releases/tag/v0.8.1
 [0.6.1]: https://github.com/MikkoNumminen/claude-continue/releases/tag/v0.6.1
 [0.6.0]: https://github.com/MikkoNumminen/claude-continue/releases/tag/v0.6.0
 [0.5.5]: https://github.com/MikkoNumminen/claude-continue/releases/tag/v0.5.5
