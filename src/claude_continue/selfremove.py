@@ -50,28 +50,33 @@ def windows_self_delete_script(target: str, *, pid: int, wait_s: int = 30) -> st
 
     Runs console-less (CREATE_NO_WINDOW). Polls for our ``pid`` to exit (via file
     redirection — pipes don't connect window-less), capped by a counter so it can
-    never hang; ``waitfor`` (or ``timeout`` fallback) supplies the per-iteration
-    delay. The exe may stay locked until the PyInstaller bootstrap exits, so the
-    delete gets a second attempt after another short wait.
+    never hang. ``waitfor`` supplies each per-iteration delay (it blocks window-less,
+    unlike timeout/ping). A failed/absent ``tasklist`` (checked via errorlevel) is
+    treated as "can't confirm exit" and keeps waiting, never an immediate delete.
+    The exe may stay locked until the PyInstaller bootstrap exits, so the delete
+    gets a second attempt after another short wait.
 
     NOTE (flagged): unit-tested for text only, not run on real Windows — mirrors
-    the self-update swap helper; verify before relying on it."""
+    the self-update swap helper; verify before relying on it. The caller guards
+    ``target`` with the same path-safety check the swap uses."""
     wait_file = "%TEMP%\\cc-remove-wait.txt"
     return "\r\n".join([
         "@echo off",
         "set _i=0",
         ":ccwait",
         'tasklist /FI "PID eq %d" /NH > "%s" 2>NUL' % (pid, wait_file),
+        "if errorlevel 1 goto cctick",
         'findstr /C:"%d" "%s" >NUL || goto ccgone' % (pid, wait_file),
+        ":cctick",
         "set /a _i+=1",
         "if %%_i%% GEQ %d goto ccgone" % wait_s,
-        "waitfor /t 1 ClaudeContinueRemovePoll 2>NUL || timeout /t 1 /nobreak >NUL 2>&1",
+        "waitfor /t 1 ClaudeContinueRemovePoll >NUL 2>&1",
         "goto ccwait",
         ":ccgone",
         'del "%s" >NUL 2>&1' % wait_file,
         'del /F /Q "%s" >NUL 2>&1' % target,
         # one more attempt after a short delay if the bootstrap still held the exe.
-        'if exist "%s" (waitfor /t 2 ClaudeContinueRemove2 2>NUL || timeout /t 2 /nobreak >NUL 2>&1 & del /F /Q "%s" >NUL 2>&1)' % (target, target),
+        'if exist "%s" (waitfor /t 2 ClaudeContinueRemove2 >NUL 2>&1 & del /F /Q "%s" >NUL 2>&1)' % (target, target),
         'del "%~f0"',
     ]) + "\r\n"
 
@@ -85,6 +90,10 @@ def _spawn_self_delete(target: str) -> None:
         os.chmod(path, 0o755)
         subprocess.Popen(["/bin/sh", path], **osenv.detached_popen_kwargs())
     else:
+        # Same guard the swap helper uses: a '%' (or other cmd-unsafe char) is legal
+        # in a Windows path but would corrupt the emitted .cmd. Refuse rather than
+        # spawn a malformed helper that could `del` an unintended path.
+        update._assert_swap_safe_path(target, "the bundle path")
         script = windows_self_delete_script(target, pid=os.getpid())
         path = os.path.join(tempfile.gettempdir(), "claude-continue-remove.cmd")
         # newline="" so \r\n isn't doubled; CREATE_NO_WINDOW (not DETACHED) so the
@@ -129,6 +138,8 @@ def remove(*, purge_config: bool = True, logger=None) -> dict:
         try:
             _spawn_self_delete(target)
             summary["bundle_scheduled"] = True  # only true if the helper actually launched
-        except (OSError, subprocess.SubprocessError) as e:
+        except (OSError, subprocess.SubprocessError, update.UpdateError) as e:
+            # UpdateError = the bundle path is cmd-unsafe (e.g. has a '%'); leave the
+            # bundle in place rather than emit a corrupt delete helper.
             log("couldn't schedule bundle deletion: %s", e)
     return summary

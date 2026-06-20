@@ -359,11 +359,13 @@ def windows_swap_script(new_exe: str, target_exe: str, relaunch: bool, *, pid: i
     sleep, it POLLS for our ``pid`` to disappear, then swaps — closing the exit
     race where a slow shutdown let the swap start (or a second instance launch)
     while we were still alive. The poll uses FILE REDIRECTION (anonymous pipes
-    don't connect in a window-less cmd) and is hard-capped by a counter, so a
-    missing ``tasklist``/``waitfor`` can never hang it — worst case it falls
-    through after ~``wait_s`` seconds, i.e. the old fixed-wait behavior. Each
-    iteration delays via ``waitfor`` (or ``timeout`` as a fallback if waitfor is
-    absent/restricted).
+    don't connect in a window-less cmd), and ``waitfor`` supplies each ~1s delay —
+    ``waitfor`` actually blocks window-less (``timeout``/``ping`` do not, so they
+    are deliberately not used). The loop is hard-capped by a counter so it can
+    never hang: after ~``wait_s`` iterations it falls through and attempts the
+    swap regardless. A FAILED or absent ``tasklist`` (checked via errorlevel) is
+    treated as "can't confirm exit" and keeps waiting — never an immediate swap —
+    so a broken poll degrades to the capped fixed-wait, not a swap-while-alive.
 
     A *running* .exe can't be overwritten (``copy`` fails) but it CAN be renamed,
     so we ``move`` the old exe aside, then copy the new one in. It ROLLS BACK: if
@@ -374,7 +376,7 @@ def windows_swap_script(new_exe: str, target_exe: str, relaunch: bool, *, pid: i
 
     NOTE (flagged): the PID-poll batch below is unit-tested for its text but has
     NOT been run on a real Windows box — verify before relying on it. The counter
-    cap + move-aside/rollback keep the worst case == the prior fixed-wait.
+    cap + move-aside/rollback keep the worst case bounded and never-bricked.
     """
     old = target_exe + ".old"
     wait_file = "%TEMP%\\cc-update-wait.txt"
@@ -385,12 +387,16 @@ def windows_swap_script(new_exe: str, target_exe: str, relaunch: bool, *, pid: i
         "set _i=0",
         ":ccwait",
         'tasklist /FI "PID eq %d" /NH > "%s" 2>NUL' % (pid, wait_file),
+        # tasklist itself failed/absent -> can't tell if we exited; keep waiting
+        # (bounded by the cap) rather than swapping while possibly still alive.
+        "if errorlevel 1 goto cctick",
         'findstr /C:"%d" "%s" >NUL || goto ccswap' % (pid, wait_file),
+        ":cctick",
         "set /a _i+=1",
         "if %%_i%% GEQ %d goto ccswap" % wait_s,
-        # per-iteration ~1s delay; waitfor blocks on a signal that never arrives,
-        # timeout is the fallback if waitfor.exe is missing/restricted.
-        "waitfor /t 1 ClaudeContinuePoll 2>NUL || timeout /t 1 /nobreak >NUL 2>&1",
+        # per-iteration ~1s delay. waitfor blocks on a signal that never arrives;
+        # it works window-less, unlike timeout/ping (which need a console/stdin).
+        "waitfor /t 1 ClaudeContinuePoll >NUL 2>&1",
         "goto ccwait",
         ":ccswap",
         'del "%s" >NUL 2>&1' % wait_file,

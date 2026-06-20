@@ -186,15 +186,20 @@ class TestWindowsSwapScript(unittest.TestCase):
         self.assertIn('start ""', s)               # relaunch
         self.assertIn('del "%~f0"', s)             # self-delete
 
-    def test_polls_for_pid_capped_with_waitfor_or_timeout_no_ping(self):
+    def test_polls_for_pid_capped_with_waitfor_only(self):
         # waits for OUR pid to exit (file-redirection poll, not a pipe), capped by a
-        # counter so it can't hang; waitfor with a timeout fallback gives the delay.
+        # counter so it can't hang. waitfor (not timeout/ping, which don't delay
+        # window-less) supplies each per-iteration delay.
         s = update.windows_swap_script("new.exe", "old.exe", relaunch=True, pid=4321)
         self.assertIn('tasklist /FI "PID eq 4321"', s)
         self.assertIn('findstr /C:"4321"', s)
         self.assertIn("goto ccwait", s)                       # the poll loop
         self.assertIn("waitfor /t 1 ", s)                     # per-iteration delay
-        self.assertIn("timeout /t 1 /nobreak", s)             # waitfor fallback (#3)
+        # a failed/absent tasklist must NOT trigger an immediate swap-while-alive:
+        # it's gated on errorlevel and keeps waiting (bounded by the cap).
+        self.assertIn("if errorlevel 1 goto cctick", s)
+        # timeout/ping don't delay in a console-less cmd, so they must not be relied on
+        self.assertNotIn("timeout", s)
         self.assertNotIn("ping", s)
 
     def test_wait_s_is_the_iteration_cap(self):
@@ -241,8 +246,10 @@ class TestApplyWindows(unittest.TestCase):
     def test_writes_pending_stamp_with_target_version(self):
         # the stamp records what we're trying to install; cleanup_stale_update reads
         # it next launch to detect a swap that silently failed.
-        exe = os.path.join(tempfile.mkdtemp(), "claude-continue.exe")
-        new = os.path.join(tempfile.mkdtemp(), "claude-continue-update.exe")
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        exe = os.path.join(d, "claude-continue.exe")
+        new = os.path.join(d, "claude-continue-update.exe")
         with mock.patch("claude_continue.update.osenv.no_window_kwargs", return_value={}), \
              mock.patch("claude_continue.update.osenv.detect", return_value="windows"), \
              mock.patch("claude_continue.update.sys.executable", exe), \
@@ -308,15 +315,25 @@ class TestCleanupStaleUpdate(unittest.TestCase):
         self.assertFalse(os.path.exists(pending))  # stamp still cleared
 
     def test_reaps_stale_update_temp_dir(self):
-        # a cc-update-* dir left by an interrupted apply_update is reaped next launch
-        leftover = tempfile.mkdtemp(prefix="cc-update-")
-        exe = os.path.join(tempfile.mkdtemp(), "claude-continue.exe")
+        # a cc-update-* dir left by an interrupted apply_update is reaped next launch.
+        # Isolate gettempdir so the production glob can't touch the real shared temp
+        # (a foreign cc-update-* there, e.g. a live in-flight update, must be safe),
+        # and prove the reap is scoped to cc-update-* by keeping a control dir.
+        isolated = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, isolated, True)
+        leftover = os.path.join(isolated, "cc-update-abc123")
+        survivor = os.path.join(isolated, "unrelated-dir")
+        os.mkdir(leftover)
+        os.mkdir(survivor)
+        exe = os.path.join(isolated, "claude-continue.exe")
         open(exe, "w").close()
-        with mock.patch("claude_continue.update.is_frozen", return_value=True), \
+        with mock.patch("claude_continue.update.tempfile.gettempdir", return_value=isolated), \
+             mock.patch("claude_continue.update.is_frozen", return_value=True), \
              mock.patch("claude_continue.update.sys.executable", exe), \
              mock.patch("claude_continue.update.osenv.detect", return_value="windows"):
             update.cleanup_stale_update()
-        self.assertFalse(os.path.exists(leftover))
+        self.assertFalse(os.path.exists(leftover))   # cc-update-* reaped
+        self.assertTrue(os.path.exists(survivor))    # unrelated dir untouched
 
     def test_noop_when_no_old_present(self):
         exe = os.path.join(tempfile.mkdtemp(), "claude-continue.exe")

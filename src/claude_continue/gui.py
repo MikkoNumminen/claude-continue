@@ -396,9 +396,14 @@ def watch_explanation(cfg) -> str:
     return when + body
 
 
-def run() -> None:  # pragma: no cover - exercised manually; logic lives in WatchController
+def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercised manually; logic lives in WatchController
     """Open the toggle window. Imports tkinter lazily so the rest of the package
-    doesn't require a display."""
+    doesn't require a display.
+
+    ``stale_warning`` (if set) is shown in a Tk dialog once the window is up. It
+    can only originate from a frozen Windows build, which is windowed (no console),
+    so printing it to stdout would silently vanish — the GUI is the only sink the
+    user will actually see."""
     import tkinter as tk
     from tkinter import font as tkfont
     from tkinter import messagebox
@@ -426,6 +431,10 @@ def run() -> None:  # pragma: no cover - exercised manually; logic lives in Watc
     root.geometry("470x540")
     root.resizable(True, True)
     root.minsize(440, 440)
+
+    if stale_warning:
+        # defer so the main window paints first, then surface the one-line warning
+        root.after(200, lambda: messagebox.showwarning("Update incomplete", stale_warning, parent=root))
 
     dot = tk.Label(root, text="○", font=tkfont.Font(size=30))
     dot.pack(pady=(18, 0))

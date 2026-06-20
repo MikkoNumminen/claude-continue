@@ -143,9 +143,20 @@ class TestGuiCommand(unittest.TestCase):
         from claude_continue import gui, update
         order = []
         with mock.patch.object(update, "cleanup_stale_update", side_effect=lambda: order.append("cleanup")), \
-             mock.patch.object(gui, "run", side_effect=lambda: order.append("run")):
+             mock.patch.object(gui, "run", side_effect=lambda **kw: order.append("run")):
             cli.cmd_gui(cli.build_parser().parse_args(["gui"]))
         self.assertEqual(order, ["cleanup", "run"])
+
+    def test_stale_warning_is_passed_into_the_gui(self):
+        # The warning only arises on the frozen windowed Windows build (no console),
+        # so it must reach the Tk GUI, not stdout (where it would silently vanish).
+        from claude_continue import gui, update
+        seen = {}
+        with mock.patch.object(update, "cleanup_stale_update",
+                               return_value="the last update to v9.9.9 didn't complete — try Update again"), \
+             mock.patch.object(gui, "run", side_effect=lambda **kw: seen.update(kw)):
+            cli.cmd_gui(cli.build_parser().parse_args(["gui"]))
+        self.assertIn("v9.9.9", seen.get("stale_warning", ""))
 
 
 class TestUninstallApp(unittest.TestCase):

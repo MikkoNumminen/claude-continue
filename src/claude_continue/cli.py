@@ -207,11 +207,13 @@ def cmd_doctor(args) -> int:
 
 def cmd_gui(args) -> int:
     from . import gui, update  # gui module is import-safe; tkinter is imported inside run()
-    stale = update.cleanup_stale_update()  # tidy a prior Windows self-update; warn if it silently failed
-    if stale:
-        _emit(stale)
+    # Tidy a prior Windows self-update; a returned warning means it silently failed.
+    # Pass it INTO the GUI: the warning only arises on the frozen windowed Windows
+    # build (no console), where printing it would vanish — the Tk dialog is the only
+    # sink the user actually sees.
+    stale = update.cleanup_stale_update()
     try:
-        gui.run()
+        gui.run(stale_warning=stale)
     except ImportError as e:
         print("GUI unavailable — tkinter is not installed: %s" % e)
         print("  (install Python's Tk support, or use `claude-continue watch`)")
