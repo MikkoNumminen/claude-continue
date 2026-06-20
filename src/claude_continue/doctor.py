@@ -106,7 +106,7 @@ def _check_config(cfg: Config) -> Check:
         action = "open window (quota)"
     elif cfg.tmux:
         action = "tmux" + (" -> %r" % cfg.session if cfg.session else "")
-    elif cfg.keystroke_all:
+    elif cfg.keystroke_all and osenv.detect() == osenv.WINDOWS:
         action = "continue all Claude sessions (keystroke)"
     elif cfg.keystroke:
         action = "keystroke -> %r" % cfg.window_title
@@ -194,6 +194,10 @@ def _check_action(cfg: Config, *, which, exists, preview, window_titles=None) ->
     except Exception as e:  # noqa: BLE001 - doctor must never raise
         return Check("action", WARN, "preview failed: %s — is the terminal running?" % e)
     if not out:
+        # continue-all (Windows console injection) ignores filter/skip_busy, so
+        # don't cite them there — they only govern the iTerm2/tmux broadcast.
+        if cfg.keystroke_all and plat == osenv.WINDOWS:
+            return Check("action", WARN, "no running Claude sessions to continue right now")
         return Check("action", WARN, "nothing to act on right now (filter %s, skip_busy=%s)" % (cfg.filter, cfg.skip_busy))
     return Check("action", OK, "%d target(s): %s" % (len(out), ", ".join(out)))
 

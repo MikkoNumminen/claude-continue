@@ -270,12 +270,40 @@ interrupt`); skip-busy then leaves mid-turn panes alone. Tune it with
 
 On **Windows / WSL** there is no per-session "type into it" API, so the
 **headless `--exec`** path above is the reliable default. If you want to mimic
-the macOS behavior of typing into a live terminal, opt into keystroke mode:
+the macOS behavior of resuming live terminals, there are two opt-in modes:
 
 ```powershell
-# best-effort: SendKeys `continue`+Enter into a terminal window (focus-stealing)
+# NATIVE WINDOWS ONLY: continue ALL running Claude sessions (the GUI's default on
+# Windows): writes `continue`+Enter into each Claude console's input — any
+# window/tab/pane, no focus stealing
+claude-continue watch --keystroke-all
+
+# Windows AND WSL: target ONE window by title via SendKeys `continue`+Enter
+# (focus-stealing)
 claude-continue watch --keystroke --window-title "Windows Terminal"
 ```
+
+> **WSL note:** `--keystroke-all` works on **native Windows only** — it enumerates
+> Windows processes (`claude.exe` / `node.exe`), which can't see Claude running as a
+> Linux process inside WSL. On WSL, use the single-window `--keystroke
+> --window-title` path (or `--exec`). The GUI applies this automatically:
+> continue-all on native Windows, single-window keystroke on WSL.
+
+Caveats for the Windows resume modes:
+
+- **`--keystroke-all` types into _every_ detected Claude console**, found by
+  enumerating `claude.exe` / `node.exe @anthropic-ai/claude-code` processes — not a
+  single chosen window. There is **no skip-busy filter** on this path (unlike the
+  iTerm2/tmux broadcast), so a session that happens to be mid-turn at reset will
+  also receive `continue`. In practice the paused-at-limit sessions are the idle
+  ones, but if you run sessions you don't want nudged, prefer `--exec` or
+  `--keystroke` with a specific `--window-title`.
+- It re-injects on every fire (and on each bounded retry), so the same console can
+  be sent `continue` more than once across a single reset if the first attempt
+  didn't visibly take.
+- Both keystroke paths are **best-effort and unverified on a live Windows box in
+  this build** — run `claude-continue doctor` first; it lists exactly which
+  sessions/windows would be targeted before you arm the watch.
 
 ## Triggering
 
@@ -303,8 +331,9 @@ Key settings: `buffer` (90s after reset before firing), `verify_delay` (90s),
 `poll_interval` (600s while idle), `retry_interval` (120s) / `retry_cap` (30,
 so retries span ~1h — enough to cover a worst-case-early estimate),
 `skip_busy` (true), `filter`, `text`, `exec_cmd`, `session`, `timeout` (30s),
-`tmux` (false) / `tmux_busy_pattern` ("esc to interrupt"), and (Windows/WSL)
-`keystroke` (false) / `window_title` ("Windows Terminal").
+`tmux` (false) / `tmux_busy_pattern` ("esc to interrupt"), (Windows/WSL)
+`keystroke` (false) / `window_title` ("Windows Terminal"), and (native Windows)
+`keystroke_all` (false; the GUI's default on Windows — continue every session).
 
 ## Honest caveats
 

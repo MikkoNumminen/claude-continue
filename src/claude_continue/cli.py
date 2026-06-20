@@ -182,7 +182,7 @@ def cmd_status(args) -> int:
     else:
         try:
             targets = action.perform(cfg, dry_run=True)
-            print("Action: send %r to %d session(s):" % (cfg.text, len(targets)))
+            _emit("Action: send %r to %d session(s):" % (cfg.text, len(targets)))  # %r of cfg.text may be non-ASCII
             for name in targets:
                 _emit("  - %s" % name)  # session names can carry non-cp1252 glyphs (✳)
         except Exception as e:  # noqa: BLE001 - status must never raise
@@ -207,9 +207,13 @@ def cmd_doctor(args) -> int:
 
 def cmd_gui(args) -> int:
     from . import gui, update  # gui module is import-safe; tkinter is imported inside run()
-    update.cleanup_stale_update()  # clear a <exe>.old left by a prior Windows self-update
+    # Tidy a prior Windows self-update; a returned warning means it silently failed.
+    # Pass it INTO the GUI: the warning only arises on the frozen windowed Windows
+    # build (no console), where printing it would vanish — the Tk dialog is the only
+    # sink the user actually sees.
+    stale = update.cleanup_stale_update()
     try:
-        gui.run()
+        gui.run(stale_warning=stale)
     except ImportError as e:
         print("GUI unavailable — tkinter is not installed: %s" % e)
         print("  (install Python's Tk support, or use `claude-continue watch`)")

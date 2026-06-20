@@ -20,20 +20,29 @@ class TestSelfDeleteScripts(unittest.TestCase):
         s = selfremove.macos_self_delete_script("/Applications/My App.app", 1)
         self.assertIn("'/Applications/My App.app'", s)         # shlex.quote
 
-    def test_windows_script_waits_then_dels(self):
-        s = selfremove.windows_self_delete_script(r"C:\a\cc.exe")
-        # waitfor (not ping/tasklist|find, which hang in a console-less cmd)
-        self.assertIn("waitfor /t", s)
+    def test_windows_script_polls_pid_then_dels(self):
+        s = selfremove.windows_self_delete_script(r"C:\a\cc.exe", pid=4321)
+        self.assertIn('tasklist /FI "PID eq 4321"', s)   # poll our PID (capped loop)
+        self.assertIn("goto ccwait", s)
+        self.assertIn("waitfor /t 1 ", s)                # per-iteration delay
+        self.assertIn("if errorlevel 1 goto cctick", s)  # failed tasklist keeps waiting, no premature del
+        self.assertNotIn("timeout", s)                   # doesn't delay window-less
         self.assertNotIn("ping", s)
-        self.assertNotIn("tasklist", s)
         self.assertIn(r'del /F /Q "C:\a\cc.exe"', s)
         self.assertIn('del "%~f0"', s)
 
     def test_windows_script_retries_delete(self):
         # the exe stays locked until the bootstrap+child exit -> a 2nd attempt
-        s = selfremove.windows_self_delete_script(r"C:\a\cc.exe", wait_s=4)
-        self.assertIn("waitfor /t 4 ", s)
+        s = selfremove.windows_self_delete_script(r"C:\a\cc.exe", pid=1, wait_s=4)
+        self.assertIn("if %_i% GEQ 4 ", s)               # wait_s is the poll cap
         self.assertEqual(s.count(r'del /F /Q "C:\a\cc.exe"'), 2)
+
+    def test_spawn_self_delete_refuses_cmd_unsafe_path(self):
+        # a '%' (or other cmd-unsafe char) in the bundle path would corrupt the
+        # emitted .cmd -> refuse, mirroring the swap helper's _assert_swap_safe_path.
+        with mock.patch.object(selfremove.osenv, "is_macos", return_value=False):
+            with self.assertRaises(selfremove.update.UpdateError):
+                selfremove._spawn_self_delete(r"C:\50%done\cc.exe")
 
 
 class TestRemovalTarget(unittest.TestCase):
@@ -91,6 +100,18 @@ class TestRemove(unittest.TestCase):
              mock.patch.object(selfremove, "_spawn_self_delete", side_effect=OSError("read-only")):
             summary = selfremove.remove()              # must not raise
         self.assertEqual(summary["bundle"], "/Applications/claude-continue.app")
+        self.assertFalse(summary["bundle_scheduled"])
+
+    def test_unsafe_bundle_path_leaves_bundle_not_scheduled(self):
+        # a cmd-unsafe install path (e.g. C:\50%done\cc.exe) must NOT spawn a corrupt
+        # delete helper -> the guard raises UpdateError, remove() catches it, leaves
+        # the bundle, and reports bundle_scheduled=False rather than crashing.
+        with mock.patch.object(selfremove.scheduler, "uninstall", return_value=True), \
+             mock.patch.object(selfremove, "leftover_paths", return_value=[]), \
+             mock.patch.object(selfremove, "removal_target", return_value=r"C:\50%done\cc.exe"), \
+             mock.patch.object(selfremove.osenv, "is_macos", return_value=False):
+            summary = selfremove.remove()              # must not raise
+        self.assertEqual(summary["bundle"], r"C:\50%done\cc.exe")
         self.assertFalse(summary["bundle_scheduled"])
 
     def test_purge_false_keeps_config(self):

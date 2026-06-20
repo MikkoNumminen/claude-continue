@@ -59,7 +59,11 @@ class TestListClaudeInstances(unittest.TestCase):
         # own PowerShell process (whose command line contains "claude-code") and
         # other shells don't self-match.
         self.assertIn("node.exe", s)
-        self.assertIn("claude-code", s)
+        # anchored to the scoped install path (@anthropic-ai/claude-code), not a
+        # bare "claude-code" substring that an `npm install claude-code` line would
+        # also hit. [\/] matches either path separator.
+        self.assertIn(r"@anthropic-ai[\\/]claude-code", s)
+        self.assertNotIn("-match 'claude-code'", s)
 
     def test_list_with_injected_runner(self):
         out = winterm.list_claude_instances(
