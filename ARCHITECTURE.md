@@ -60,7 +60,8 @@ back-to-back with no idle gap.
   for a "working" marker. We never type into a mid-turn session unless `--force`.
 - **Self-update / self-remove** can't overwrite/delete a running bundle directly,
   so both spawn a **detached helper** that waits for this process to exit, then
-  swaps/deletes the `.app`/`.exe` (`update.py`, `selfremove.py`).
+  swaps/deletes the macOS `.app` bundle or the Windows one-dir install folder
+  (`update.py`, `selfremove.py`).
 
 ## Ports & contracts
 

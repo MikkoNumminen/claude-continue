@@ -35,15 +35,21 @@ runs new bytes, so it's the most security-relevant. It:
 download leg (corruption / on-path tampering) but shares GitHub's trust root —
 it does **not** defend a fully compromised release/repo, which would require a
 detached signature checked against a pinned key. For a personal tool the trust
-anchor is "you trust this GitHub repo." The binaries are ad-hoc signed, not
-notarized; macOS Gatekeeper will warn on a browser download (right-click → Open).
+anchor is "you trust this GitHub repo." The macOS `.app` is only ad-hoc signed
+(not Developer-ID signed or notarized) and the Windows build is **unsigned**; on a
+browser download macOS Gatekeeper will warn (right-click → Open) and Windows
+SmartScreen / a strict antivirus may warn or need an allow-list entry for the
+install folder. Only Authenticode signing (Windows) + Developer-ID notarization
+(macOS) can guarantee no heuristic block.
 
 ### Self-removal
 
 **Remove app… / `uninstall --app`** deletes your config, logs, and the app
-bundle itself (via a detached helper that waits for the process to exit). The
-deletion target is derived from `sys.executable`'s `.app`/`.exe` path; it is
-never a shallow/`/`-style path. A failed self-delete is surfaced, not hidden.
+itself (via a detached helper that waits for the process to exit). The deletion
+target is derived from `sys.executable` — the macOS `.app` bundle, or the Windows
+one-dir install **folder** (the exe's parent); it is never a shallow/`/`-style
+path, and a `%`-bearing (cmd-unsafe) path is refused rather than scripted. A
+failed self-delete is surfaced, not hidden.
 
 ## Supported versions
 

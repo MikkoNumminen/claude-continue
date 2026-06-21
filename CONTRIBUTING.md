@@ -81,5 +81,6 @@ mypy src/claude_continue
    ```bash
    git tag -a vX.Y.Z -m "claude-continue vX.Y.Z" && git push origin vX.Y.Z
    ```
-   `release.yml` builds the macOS `.app` zip and Windows `.exe` and attaches them
-   to the GitHub release. The in-app **Update** button picks it up from there.
+   `release.yml` builds the macOS `.app` zip and the Windows one-dir zip and
+   attaches them to the GitHub release. The in-app **Update** button picks it up
+   from there.

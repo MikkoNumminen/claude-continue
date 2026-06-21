@@ -31,12 +31,28 @@ echo "==> building ${APP_NAME}.app"
 # --collect-submodules guarantees every claude_continue submodule is bundled,
 # so lazily-imported modules (e.g. action, imported inside a click handler)
 # can't go missing from the frozen app.
+# --noupx: never UPX-compress. UPX isn't applied today (not on the runner), but UPX is known to
+# CORRUPT macOS binaries (and breaks code signing), so we lock it off defensively - a future build
+# box with upx on PATH must never silently pack the .app. No effect on the current output.
 "$VENV/bin/pyinstaller" \
-  --noconfirm --clean --windowed \
+  --noconfirm --clean --noupx --windowed \
   --name "$APP_NAME" \
   --osx-bundle-identifier "$BUNDLE_ID" \
   --collect-submodules claude_continue \
   packaging/claude_continue_app.py
+
+# Stamp the bundle's version. A versioned Info.plist looks legitimate to Gatekeeper
+# and 3rd-party scanners (it won't substitute for notarization, but it's free) and
+# keeps "Get Info" honest. Generated from the package so it never drifts.
+VERSION="$("$VENV/bin/python" -c 'import claude_continue, sys; sys.stdout.write(claude_continue.__version__)')"
+PLIST="dist/${APP_NAME}.app/Contents/Info.plist"
+if [ -n "$VERSION" ] && [ -f "$PLIST" ]; then
+  for key in CFBundleShortVersionString CFBundleVersion; do
+    /usr/libexec/PlistBuddy -c "Set :$key $VERSION" "$PLIST" 2>/dev/null \
+      || /usr/libexec/PlistBuddy -c "Add :$key string $VERSION" "$PLIST"
+  done
+  echo "==> stamped Info.plist version: $VERSION"
+fi
 
 echo
 echo "==> built: ${REPO}/dist/${APP_NAME}.app"

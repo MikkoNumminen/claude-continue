@@ -20,22 +20,24 @@ class TestSelfDeleteScripts(unittest.TestCase):
         s = selfremove.macos_self_delete_script("/Applications/My App.app", 1)
         self.assertIn("'/Applications/My App.app'", s)         # shlex.quote
 
-    def test_windows_script_polls_pid_then_dels(self):
-        s = selfremove.windows_self_delete_script(r"C:\a\cc.exe", pid=4321)
+    def test_windows_script_polls_pid_then_rmdirs(self):
+        # target is the one-dir install FOLDER, removed with rmdir /S /Q
+        s = selfremove.windows_self_delete_script(r"C:\app", pid=4321)
         self.assertIn('tasklist /FI "PID eq 4321"', s)   # poll our PID (capped loop)
         self.assertIn("goto ccwait", s)
         self.assertIn("waitfor /t 1 ", s)                # per-iteration delay
         self.assertIn("if errorlevel 1 goto cctick", s)  # failed tasklist keeps waiting, no premature del
         self.assertNotIn("timeout", s)                   # doesn't delay window-less
         self.assertNotIn("ping", s)
-        self.assertIn(r'del /F /Q "C:\a\cc.exe"', s)
+        self.assertIn(r'rmdir /S /Q "C:\app"', s)
+        self.assertIn('cd /d "%TEMP%"', s)               # never CWD the dir we're deleting
         self.assertIn('del "%~f0"', s)
 
     def test_windows_script_retries_delete(self):
-        # the exe stays locked until the bootstrap+child exit -> a 2nd attempt
-        s = selfremove.windows_self_delete_script(r"C:\a\cc.exe", pid=1, wait_s=4)
+        # the tree stays locked until the bootstrap+child exit -> a 2nd attempt
+        s = selfremove.windows_self_delete_script(r"C:\app", pid=1, wait_s=4)
         self.assertIn("if %_i% GEQ 4 ", s)               # wait_s is the poll cap
-        self.assertEqual(s.count(r'del /F /Q "C:\a\cc.exe"'), 2)
+        self.assertEqual(s.count(r'rmdir /S /Q "C:\app"'), 2)
 
     def test_spawn_self_delete_refuses_cmd_unsafe_path(self):
         # a '%' (or other cmd-unsafe char) in the bundle path would corrupt the
@@ -43,6 +45,17 @@ class TestSelfDeleteScripts(unittest.TestCase):
         with mock.patch.object(selfremove.osenv, "is_macos", return_value=False):
             with self.assertRaises(selfremove.update.UpdateError):
                 selfremove._spawn_self_delete(r"C:\50%done\cc.exe")
+
+    def test_windows_spawn_runs_from_temp_not_target_dir(self):
+        # the helper must NOT inherit the install dir as its CWD, or Windows blocks
+        # the rmdir of that very directory -> spawn it with cwd=%TEMP%.
+        with mock.patch.object(selfremove.osenv, "is_macos", return_value=False), \
+             mock.patch.object(selfremove.osenv, "no_window_kwargs", return_value={}), \
+             mock.patch("claude_continue.selfremove.subprocess.Popen") as popen:
+            selfremove._spawn_self_delete(r"C:\app")
+        argv, kwargs = popen.call_args
+        self.assertEqual(argv[0][:2], ["cmd", "/c"])
+        self.assertEqual(kwargs.get("cwd"), tempfile.gettempdir())
 
 
 class TestRemovalTarget(unittest.TestCase):
@@ -56,6 +69,13 @@ class TestRemovalTarget(unittest.TestCase):
              mock.patch.object(selfremove.update, "macos_bundle_path",
                                return_value="/Applications/claude-continue.app"):
             self.assertEqual(selfremove.removal_target(), "/Applications/claude-continue.app")
+
+    def test_frozen_windows_returns_install_dir(self):
+        # one-dir Windows: the removal unit is the whole install FOLDER, not the exe
+        with mock.patch.object(selfremove.update, "is_frozen", return_value=True), \
+             mock.patch.object(selfremove.osenv, "is_macos", return_value=False), \
+             mock.patch.object(selfremove.update, "_install_dir", return_value=r"C:\app"):
+            self.assertEqual(selfremove.removal_target(), r"C:\app")
 
 
 class TestRemove(unittest.TestCase):

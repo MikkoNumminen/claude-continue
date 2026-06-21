@@ -8,8 +8,8 @@ Guidance for AI coding agents (and humans) working in this repo. Read this first
 back-to-back: the instant a window resets, it resumes your paused Claude
 sessions (or just opens a fresh window) so quota is never left idle. It's a
 **stdlib-only Python CLI** plus a tiny Tkinter GUI, packaged as a macOS `.app`
-and a Windows `.exe`. See `README.md` for the product story and `ARCHITECTURE.md`
-for the module map.
+and a Windows one-dir folder (zipped). See `README.md` for the product story and
+`ARCHITECTURE.md` for the module map.
 
 ## Golden rules
 
@@ -105,7 +105,7 @@ bin/claude-continue(.cmd) no-pip shim (.cmd = the Windows wrapper)
 6. Review (we run an adversarial review), fix findings, squash-merge.
 7. Releases: bump `__version__` in `src/claude_continue/__init__.py` **and**
    `version` in `pyproject.toml`, merge, then `git tag vX.Y.Z && git push --tags`
-   — `release.yml` builds and attaches the `.app` zip and `.exe`.
+   — `release.yml` builds and attaches the `.app` zip and the Windows one-dir zip.
 
 ## Conventions
 

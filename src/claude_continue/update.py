@@ -26,6 +26,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from dataclasses import dataclass
 
 from . import __version__, osenv
@@ -138,7 +139,10 @@ def _matches_platform(name: str) -> bool:
     if plat == osenv.MACOS:
         return n.endswith(".zip") and "macos" in n
     if plat in (osenv.WINDOWS, osenv.WSL):
-        return n.endswith(".exe")
+        # Windows ships a one-dir build zipped (like macOS), NOT a single .exe: the
+        # one-file exe re-unpacked python311.dll into %TEMP% on every launch, which
+        # antivirus (e.g. IPVanish Threat Protection) heuristically blocked.
+        return n.endswith(".zip") and "windows" in n
     return False
 
 
@@ -249,11 +253,12 @@ def apply_update(info: UpdateInfo, *, timeout: float = 180.0, relaunch: bool = T
 
     Raises UpdateError on any problem; the old app keeps running. NOTE the
     platform asymmetry: on macOS the swap happens synchronously here, so a clean
-    return means the new bundle is installed. On Windows a running onefile .exe is
-    locked and CANNOT be swapped in-process, so the swap runs in a detached helper
-    AFTER this process exits — a clean return there only means the helper was
-    *spawned*, not that the swap succeeded. A pending stamp (see _apply_windows)
-    lets cleanup_stale_update detect a silently-failed swap on the next launch.
+    return means the new bundle is installed. On Windows the running build's files
+    (the exe + the loaded ``_internal\\python311.dll`` etc.) are locked and CANNOT
+    be swapped in-process, so the swap runs in a detached helper AFTER this process
+    exits — a clean return there only means the helper was *spawned*, not that the
+    swap succeeded. A pending stamp (see _apply_windows_dir) lets
+    cleanup_stale_update detect a silently-failed swap on the next launch.
     """
     if not info.asset_url or not info.asset_name:
         raise UpdateError("no downloadable build for this platform")
@@ -263,8 +268,9 @@ def apply_update(info: UpdateInfo, *, timeout: float = 180.0, relaunch: bool = T
     plat = osenv.detect()
     tmp = tempfile.mkdtemp(prefix="cc-update-")
     # Use a self-chosen filename, never the (attacker-influenceable) asset name,
-    # so it can't traverse paths or inject into the Windows helper script.
-    dest = os.path.join(tmp, "claude-continue-update" + (".zip" if plat == osenv.MACOS else ".exe"))
+    # so it can't traverse paths or inject into the Windows helper script. Both
+    # platforms now ship a .zip (macOS .app / Windows one-dir folder).
+    dest = os.path.join(tmp, "claude-continue-update.zip")
     try:
         _download(info.asset_url, dest, timeout)
         _verify_digest(dest, info.asset_digest)
@@ -281,7 +287,13 @@ def apply_update(info: UpdateInfo, *, timeout: float = 180.0, relaunch: bool = T
         finally:
             shutil.rmtree(tmp, ignore_errors=True)  # bundle is installed; tmp no longer needed
     if plat in (osenv.WINDOWS, osenv.WSL):
-        return _apply_windows(dest, relaunch, target_version=info.latest)  # helper consumes tmp after we exit
+        try:
+            # On success the detached helper consumes tmp after we exit, so DON'T
+            # clean it here; only clean if we raise before spawning anything.
+            return _apply_windows_dir(dest, tmp, relaunch, target_version=info.latest)
+        except UpdateError:
+            shutil.rmtree(tmp, ignore_errors=True)
+            raise
     shutil.rmtree(tmp, ignore_errors=True)
     raise UpdateError("auto-update isn't supported on %s" % plat)
 
@@ -351,69 +363,121 @@ def _assert_swap_safe_path(path: str, label: str) -> None:
         )
 
 
-def windows_swap_script(new_exe: str, target_exe: str, relaunch: bool, *, pid: int, wait_s: int = 30) -> str:
-    """The .cmd that waits for us to exit, swaps the exe in place, relaunches, and
-    cleans up. All paths here are app-controlled (never the GitHub asset name).
+_WIN_EXE_NAME = "claude-continue.exe"
 
-    This runs in a *console-less* cmd (CREATE_NO_WINDOW). Instead of a blind fixed
-    sleep, it POLLS for our ``pid`` to disappear, then swaps — closing the exit
-    race where a slow shutdown let the swap start (or a second instance launch)
-    while we were still alive. The poll uses FILE REDIRECTION (anonymous pipes
-    don't connect in a window-less cmd), and ``waitfor`` supplies each ~1s delay —
-    ``waitfor`` actually blocks window-less (``timeout``/``ping`` do not, so they
-    are deliberately not used). The loop is hard-capped by a counter so it can
-    never hang: after ~``wait_s`` iterations it falls through and attempts the
-    swap regardless. A FAILED or absent ``tasklist`` (checked via errorlevel) is
-    treated as "can't confirm exit" and keeps waiting — never an immediate swap —
-    so a broken poll degrades to the capped fixed-wait, not a swap-while-alive.
 
-    A *running* .exe can't be overwritten (``copy`` fails) but it CAN be renamed,
-    so we ``move`` the old exe aside, then copy the new one in. It ROLLS BACK: if
-    the copy doesn't land, it moves the old exe back so the path is never empty —
-    un-updated-but-working beats bricked. The leftover ``<exe>.old`` may stay
-    locked until old processes exit, so ``del`` is best-effort and
-    ``cleanup_stale_update`` finishes on the next launch.
+def _install_dir() -> str:
+    """The directory the one-dir Windows build lives in (the exe's parent).
 
-    NOTE (flagged): the PID-poll batch below is unit-tested for its text but has
-    NOT been run on a real Windows box — verify before relying on it. The counter
-    cap + move-aside/rollback keep the worst case bounded and never-bricked.
-    """
-    old = target_exe + ".old"
+    The Windows release is a PyInstaller *one-dir* build: ``claude-continue.exe``
+    sits next to an ``_internal\\`` folder holding ``python311.dll`` and the rest.
+    The unit of install/update/removal is therefore this whole directory, not the
+    single exe — the one-file build's per-launch %TEMP% unpack of python311.dll is
+    what antivirus heuristics (e.g. IPVanish Threat Protection) blocked."""
+    return os.path.dirname(os.path.realpath(sys.executable))
+
+
+def _safe_extract(zf: zipfile.ZipFile, dest: str) -> None:
+    """Extract ``zf`` into ``dest``, refusing any entry that would escape ``dest``
+    (zip-slip). The asset is SHA-256-verified already, but a traversal guard is
+    cheap insurance against a crafted archive."""
+    dest_abs = os.path.realpath(dest)
+    for member in zf.namelist():
+        target = os.path.realpath(os.path.join(dest, member))
+        if target != dest_abs and not target.startswith(dest_abs + os.sep):
+            raise UpdateError("refusing zip entry that escapes the target: %r" % member)
+    zf.extractall(dest)
+
+
+def windows_dir_swap_script(install_dir: str, new_tree: str, relaunch: bool, *,
+                            pid: int, wait_s: int = 30) -> str:
+    """The .cmd that waits for us to exit, swaps the whole install DIRECTORY, then
+    relaunches and cleans up. All paths here are app-controlled (never the asset
+    name). The new build is a *directory* (one-dir), so this swaps a folder — the
+    Windows analogue of the macOS bundle swap, with the v0.8.x PID-wait.
+
+    Console-less (CREATE_NO_WINDOW). It first ``cd``s to ``%TEMP%`` so it never
+    holds the install dir as its own CWD — Windows refuses to rename/delete a
+    directory that is any live process's current directory, and a double-clicked
+    one-dir app passes its install-dir CWD down to this helper (Popen also sets
+    cwd; the ``cd`` is belt-and-suspenders). Then the wait POLLS for our ``pid`` to
+    disappear via FILE REDIRECTION (anonymous pipes don't connect window-less) with
+    ``waitfor`` for each ~1s delay (``timeout``/``ping`` don't block window-less),
+    hard-capped by a counter so it can never hang. A failed/absent ``tasklist``
+    (checked via errorlevel) is treated as "can't confirm exit" and keeps waiting —
+    never a swap-while-alive.
+
+    Only once our process is gone (so the loaded DLLs are unlocked) does it swap:
+      * clear any stale ``<dir>.old`` backup,
+      * ``move`` the live install dir aside to ``<dir>.old`` (same-volume rename),
+      * if that move did NOT free the path, abort without merging — the old install
+        stays intact (un-updated beats a half-merged tree),
+      * ``robocopy /MOVE`` the new tree into place (cross-volume safe; robocopy
+        exit code >= 8 is a real failure),
+      * ROLL BACK if robocopy failed or the new exe is missing: drop the partial
+        tree, then restore ``<dir>.old`` — but ONLY if the partial was actually
+        cleared. ``move`` into a still-present dir would NEST the backup inside it
+        (stranding the only good copy), so when the drop fails we leave ``<dir>.old``
+        at the top level (where ``cleanup_stale_update`` looks) and never nest,
+      * the backup is dropped only on a clean success or a completed restore — never
+        when it is the only surviving copy,
+      * relaunch only if an exe actually exists at the install path.
+
+    NOTE (flagged): unit-tested for its text but NOT yet run against a live install
+    on real Windows. The move-aside + abort + rollback keep the worst case bounded
+    and never-bricked; verify on hardware before relying on it."""
+    old = install_dir + ".old"
+    exe = install_dir + "\\" + _WIN_EXE_NAME
     wait_file = "%TEMP%\\cc-update-wait.txt"
     lines = [
         "@echo off",
-        # Wait for our PID to exit. Poll via file redirection (pipes don't connect
-        # in a console-less cmd); %%_i%% caps the loop so it can never hang.
+        # NEVER hold the install dir as our CWD: Windows refuses to rename/delete a
+        # directory that is any live process's current directory, and this helper
+        # inherits the (double-clicked) app's CWD = the install dir. Move to %TEMP%
+        # first (Popen also sets cwd, but this is cheap belt-and-suspenders).
+        'cd /d "%TEMP%"',
+        # Wait for our PID to exit (file-redirection poll; %%_i%% caps the loop).
         "set _i=0",
         ":ccwait",
         'tasklist /FI "PID eq %d" /NH > "%s" 2>NUL' % (pid, wait_file),
-        # tasklist itself failed/absent -> can't tell if we exited; keep waiting
-        # (bounded by the cap) rather than swapping while possibly still alive.
+        # tasklist failed/absent -> can't confirm exit; keep waiting, never swap.
         "if errorlevel 1 goto cctick",
         'findstr /C:"%d" "%s" >NUL || goto ccswap' % (pid, wait_file),
         ":cctick",
         "set /a _i+=1",
         "if %%_i%% GEQ %d goto ccswap" % wait_s,
-        # per-iteration ~1s delay. waitfor blocks on a signal that never arrives;
-        # it works window-less, unlike timeout/ping (which need a console/stdin).
         "waitfor /t 1 ClaudeContinuePoll >NUL 2>&1",
         "goto ccwait",
         ":ccswap",
         'del "%s" >NUL 2>&1' % wait_file,
-        # a running exe can't be overwritten, but it can be moved aside.
-        'move /Y "%s" "%s" >NUL 2>&1' % (target_exe, old),
-        'copy /Y "%s" "%s" >NUL' % (new_exe, target_exe),
-        # rollback: copy failed -> restore the old exe so the path is never empty.
-        'if not exist "%s" move /Y "%s" "%s" >NUL 2>&1' % (target_exe, old, target_exe),
+        # clear any stale backup, then move the live install dir aside.
+        'rmdir /S /Q "%s" >NUL 2>&1' % old,
+        'move /Y "%s" "%s" >NUL 2>&1' % (install_dir, old),
+        # move-aside didn't free the path -> bail without merging onto the old tree.
+        'if exist "%s" goto ccrelaunch' % exe,
+        # copy the new tree in (robocopy is cross-volume safe; /MOVE clears source).
+        'robocopy "%s" "%s" /E /MOVE /NFL /NDL /NJH /NJS /NP /R:1 /W:1 >NUL' % (new_tree, install_dir),
+        "if errorlevel 8 goto ccrollback",
+        'if exist "%s" goto ccok' % exe,   # success: the new tree landed
+        ":ccrollback",
+        # new tree didn't land -> drop any partial tree, then restore the old install.
+        'rmdir /S /Q "%s" >NUL 2>&1' % install_dir,
+        # if the partial couldn't be cleared, do NOT move: `move` would NEST the
+        # backup INSIDE the leftover dir (Windows move-into-existing-dir semantics),
+        # stranding the only good copy. Leave <dir>.old at the top level instead, so
+        # cleanup_stale_update still sees it.
+        'if exist "%s" goto ccrelaunch' % install_dir,
+        'move /Y "%s" "%s" >NUL 2>&1' % (old, install_dir),
+        ":ccok",
+        # drop the backup — reached only on a clean success or a completed restore,
+        # NEVER when <dir>.old is the only surviving copy.
+        'rmdir /S /Q "%s" >NUL 2>&1' % old,
+        ":ccrelaunch",
     ]
     if relaunch:
         # only relaunch if an exe actually exists at the path (new or rolled-back).
-        lines.append('if exist "%s" start "" "%s"' % (target_exe, target_exe))
-    lines += [
-        'del "%s" >NUL 2>&1' % new_exe,
-        'del "%s" >NUL 2>&1' % old,   # best-effort; cleanup_stale_update gets a locked one
-        'del "%~f0"',
-    ]
+        lines.append('if exist "%s" start "" "%s"' % (exe, exe))
+    lines.append('del "%~f0"')
     return "\r\n".join(lines) + "\r\n"
 
 
@@ -430,18 +494,37 @@ def _allow_foreground_handoff() -> None:
 _PENDING_SUFFIX = ".cc-update-pending"
 
 
-def _apply_windows(new_exe: str, relaunch: bool, target_version: str | None = None) -> str:
-    target = os.path.realpath(sys.executable)
+def _apply_windows_dir(zip_path: str, tmp: str, relaunch: bool, target_version: str | None = None) -> str:
+    """Extract the one-dir zip and spawn the detached directory-swap helper.
+
+    Returns the exe path on success (helper spawned). Raises UpdateError on any
+    problem BEFORE spawning, leaving the running install untouched."""
+    exe = os.path.realpath(sys.executable)
+    install = os.path.dirname(exe)
     # Refuse to build a malformed .cmd (which could fail mid-swap) — fail the
     # update cleanly instead, leaving the running app intact.
-    _assert_swap_safe_path(target, "the app path")
-    _assert_swap_safe_path(new_exe, "the download path")
-    # Pending stamp (Python-managed, no batch): records the version we're trying
-    # to install. The actual swap runs in the detached .cmd AFTER we exit, so this
-    # return only means "helper spawned", not "swap succeeded" — cleanup_stale_update
-    # checks the stamp on the next launch and warns if the version didn't advance.
+    _assert_swap_safe_path(install, "the app folder")
+    # Extract in-process (stdlib zipfile, no shell-out) so we can validate the tree
+    # before touching the install. The release zip wraps a top-level claude-continue/.
+    extract_to = os.path.join(tmp, "extracted")
     try:
-        with open(target + _PENDING_SUFFIX, "w") as f:
+        os.makedirs(extract_to, exist_ok=True)
+        with zipfile.ZipFile(zip_path) as zf:
+            _safe_extract(zf, extract_to)
+    except UpdateError:
+        raise
+    except (OSError, zipfile.BadZipFile) as e:
+        raise UpdateError("failed to extract the update: %s" % e) from e
+    new_tree = os.path.join(extract_to, "claude-continue")
+    if not os.path.isfile(os.path.join(new_tree, _WIN_EXE_NAME)):
+        raise UpdateError("update archive didn't contain claude-continue\\%s" % _WIN_EXE_NAME)
+    _assert_swap_safe_path(new_tree, "the download path")
+    # Pending stamp (Python-managed, no batch), written INSIDE the install dir next
+    # to the exe. The swap moves the dir aside, so a successful swap leaves the new
+    # dir stamp-less (no warning); a rollback brings it back and cleanup_stale_update
+    # warns. The return only means "helper spawned", not "swap succeeded".
+    try:
+        with open(exe + _PENDING_SUFFIX, "w") as f:
             f.write((target_version or "").strip())
     except OSError:
         pass  # best-effort; the swap still proceeds
@@ -449,37 +532,42 @@ def _apply_windows(new_exe: str, relaunch: bool, target_version: str | None = No
     try:
         # newline="" so the \r\n line endings aren't re-translated to \r\r\n.
         with open(script_path, "w", newline="") as f:
-            f.write(windows_swap_script(new_exe, target, relaunch, pid=os.getpid()))
+            f.write(windows_dir_swap_script(install, new_tree, relaunch, pid=os.getpid()))
         # CREATE_NO_WINDOW (not DETACHED): a detached cmd's pipes/ping fail, and the
         # script is written to tolerate the no-console environment (see above).
-        subprocess.Popen(["cmd", "/c", script_path], **osenv.no_window_kwargs())
+        # cwd=%TEMP%: the helper must NOT inherit our install-dir CWD, or Windows
+        # would block the move/rmdir of that very directory (it's a live CWD).
+        subprocess.Popen(["cmd", "/c", script_path], cwd=tempfile.gettempdir(),
+                         **osenv.no_window_kwargs())
     except (OSError, subprocess.SubprocessError) as e:
         raise UpdateError("couldn't launch the Windows update helper: %s" % e) from e
     if relaunch:
         _allow_foreground_handoff()
-    return target
+    return exe
 
 
 def cleanup_stale_update() -> str | None:
     """Tidy up after a previous Windows self-update; return a one-line warning if
     the last update silently failed, else None. Best-effort; never raises.
 
-    Three jobs: (1) remove the ``<exe>.old`` the swap left behind (locked until old
-    processes exit, so we finish it here on the next launch); (2) reap leaked empty
-    ``cc-update-*`` temp dirs from apply_update; (3) check the pending stamp — if it
-    survived and we're still on the old version, the swap didn't land."""
+    Three jobs: (1) remove the ``<install>.old`` DIRECTORY the swap left behind
+    (locked until old processes exit, so we finish it here on the next launch);
+    (2) reap leaked ``cc-update-*`` temp dirs from apply_update; (3) check the
+    pending stamp — if it survived and we're still on the old version, the swap
+    didn't land."""
     if not (is_frozen() and osenv.detect() in (osenv.WINDOWS, osenv.WSL)):
         return None
     warning = None
     exe = os.path.realpath(sys.executable)
+    install = os.path.dirname(exe)
     try:
-        old = exe + ".old"
+        old = install + ".old"
         # Only reap the leftover when the live exe is present. If the exe is
-        # missing (a swap rolled back to .old but hasn't been renamed home, or a
-        # half-finished move), the .old may be the ONLY surviving copy — never
+        # missing (a swap rolled back but hasn't been renamed home, or a
+        # half-finished move), the .old dir may be the ONLY surviving copy — never
         # delete it then.
-        if os.path.exists(exe) and os.path.exists(old):
-            os.remove(old)
+        if os.path.isfile(exe) and os.path.isdir(old):
+            shutil.rmtree(old, ignore_errors=True)
     except OSError:
         pass  # still locked, or vanished — next launch tries again
     # pending stamp: a surviving stamp whose target version is newer than the one
@@ -494,7 +582,7 @@ def cleanup_stale_update() -> str | None:
                 warning = "the last update to %s didn't complete — try Update again" % want
     except OSError:
         pass
-    # reap leaked empty temp dirs from apply_update's mkdtemp(prefix="cc-update-")
+    # reap leaked temp dirs from apply_update's mkdtemp(prefix="cc-update-")
     try:
         import glob
         for d in glob.glob(os.path.join(tempfile.gettempdir(), "cc-update-*")):
