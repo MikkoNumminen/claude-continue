@@ -30,6 +30,7 @@ class TestSelfDeleteScripts(unittest.TestCase):
         self.assertNotIn("timeout", s)                   # doesn't delay window-less
         self.assertNotIn("ping", s)
         self.assertIn(r'rmdir /S /Q "C:\app"', s)
+        self.assertIn('cd /d "%TEMP%"', s)               # never CWD the dir we're deleting
         self.assertIn('del "%~f0"', s)
 
     def test_windows_script_retries_delete(self):
@@ -44,6 +45,17 @@ class TestSelfDeleteScripts(unittest.TestCase):
         with mock.patch.object(selfremove.osenv, "is_macos", return_value=False):
             with self.assertRaises(selfremove.update.UpdateError):
                 selfremove._spawn_self_delete(r"C:\50%done\cc.exe")
+
+    def test_windows_spawn_runs_from_temp_not_target_dir(self):
+        # the helper must NOT inherit the install dir as its CWD, or Windows blocks
+        # the rmdir of that very directory -> spawn it with cwd=%TEMP%.
+        with mock.patch.object(selfremove.osenv, "is_macos", return_value=False), \
+             mock.patch.object(selfremove.osenv, "no_window_kwargs", return_value={}), \
+             mock.patch("claude_continue.selfremove.subprocess.Popen") as popen:
+            selfremove._spawn_self_delete(r"C:\app")
+        argv, kwargs = popen.call_args
+        self.assertEqual(argv[0][:2], ["cmd", "/c"])
+        self.assertEqual(kwargs.get("cwd"), tempfile.gettempdir())
 
 
 class TestRemovalTarget(unittest.TestCase):

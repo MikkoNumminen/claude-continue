@@ -195,6 +195,12 @@ class TestWindowsDirSwapScript(unittest.TestCase):
         self.assertIn(r'start "" "C:\app\claude-continue.exe"', s)   # relaunch the exe inside the dir
         self.assertIn('del "%~f0"', s)                               # self-delete
 
+    def test_runs_from_temp_not_install_cwd(self):
+        # the helper must NOT hold the install dir as its CWD or Windows blocks the
+        # move/rmdir of that very directory; it cd's to %TEMP% first.
+        s = update.windows_dir_swap_script(r"C:\app", r"C:\new", relaunch=True, pid=1)
+        self.assertIn('cd /d "%TEMP%"', s)
+
     def test_polls_for_pid_capped_with_waitfor_only(self):
         # waits for OUR pid to exit (file-redirection poll, not a pipe), capped by a
         # counter so it can't hang. waitfor (not timeout/ping, which don't delay
@@ -222,12 +228,35 @@ class TestWindowsDirSwapScript(unittest.TestCase):
         self.assertIn("if errorlevel 8 goto ccrollback", s)
         self.assertIn(r'move /Y "C:\app.old" "C:\app"', s)                       # restore old dir
         self.assertIn(r'if exist "C:\app\claude-continue.exe" start "" "C:\app\claude-continue.exe"', s)
+        # success skips the rollback block by jumping to :ccok (NOT falling into it)
+        self.assertIn(r'if exist "C:\app\claude-continue.exe" goto ccok', s)
+        self.assertIn(":ccok", s)
 
     def test_aborts_without_merge_if_move_aside_fails(self):
         # if the move-aside didn't free the path (exe still present), skip robocopy so
         # we never merge the new tree onto the old one — un-updated beats half-merged.
-        s = update.windows_dir_swap_script(r"C:\app", r"C:\new", relaunch=False, pid=1)
-        self.assertIn(r'if exist "C:\app\claude-continue.exe" goto ccrelaunch', s)
+        # Pin ORDER (the substring alone is no longer ambiguous — success uses
+        # `goto ccok` — but assert the abort guard sits between move-aside and robocopy).
+        lines = update.windows_dir_swap_script(r"C:\app", r"C:\new", relaunch=False, pid=1).splitlines()
+        move_aside = lines.index(r'move /Y "C:\app" "C:\app.old" >NUL 2>&1')
+        abort = lines.index(r'if exist "C:\app\claude-continue.exe" goto ccrelaunch')
+        robocopy = next(i for i, ln in enumerate(lines) if ln.startswith("robocopy "))
+        self.assertLess(move_aside, abort)   # guard follows the move-aside
+        self.assertLess(abort, robocopy)     # and precedes the merge
+        # the exe-path goto-ccrelaunch is the abort guard ONLY (success uses goto ccok)
+        self.assertEqual(lines.count(r'if exist "C:\app\claude-continue.exe" goto ccrelaunch'), 1)
+
+    def test_rollback_never_nests_backup(self):
+        # the restore `move` must be gated on the partial dir being cleared first —
+        # otherwise Windows nests <dir>.old INSIDE the leftover dir, stranding the only
+        # good copy. Pin: `if exist <dir> goto ccrelaunch` sits between the rollback
+        # rmdir and the restore move.
+        lines = update.windows_dir_swap_script(r"C:\app", r"C:\new", relaunch=False, pid=1).splitlines()
+        rb_rmdir = lines.index(r'rmdir /S /Q "C:\app" >NUL 2>&1')
+        guard = lines.index(r'if exist "C:\app" goto ccrelaunch')
+        restore = lines.index(r'move /Y "C:\app.old" "C:\app" >NUL 2>&1')
+        self.assertLess(rb_rmdir, guard)
+        self.assertLess(guard, restore)
 
     def test_no_relaunch(self):
         s = update.windows_dir_swap_script(r"C:\a", r"C:\n", relaunch=False, pid=1)
@@ -235,9 +264,10 @@ class TestWindowsDirSwapScript(unittest.TestCase):
 
     def test_clears_and_cleans_old_backup(self):
         s = update.windows_dir_swap_script(r"C:\app", r"C:\new", relaunch=True, pid=1)
-        # the moved-aside dir is rmdir'd (best-effort) — cleanup_stale_update finishes
-        # a locked one on the next launch.
-        self.assertIn(r'rmdir /S /Q "C:\app.old"', s)
+        # rmdir of <dir>.old appears EXACTLY twice: clear-stale before move-aside, and
+        # the final backup drop on success/restore. Pin the count so removing either
+        # occurrence fails (a locked one is finished by cleanup_stale_update).
+        self.assertEqual(s.count(r'rmdir /S /Q "C:\app.old"'), 2)
 
 
 def _make_onedir_zip(d, *, with_exe=True):
@@ -284,9 +314,13 @@ class TestApplyWindowsDir(unittest.TestCase):
         argv, kwargs = popen.call_args
         self.assertEqual(argv[0][:2], ["cmd", "/c"])        # cmd /c <script>
         self.assertEqual(kwargs.get("creationflags"), 0x08000000)
+        # the helper must run from %TEMP%, NOT the install dir, or Windows blocks the
+        # move/rmdir of that very directory (it would be a live process's CWD).
+        self.assertEqual(kwargs.get("cwd"), tempfile.gettempdir())
         with open(argv[0][2], "rb") as f:                   # binary: see the real bytes
             raw = f.read()
         self.assertIn(b"robocopy", raw)                     # the real dir-swap script was written
+        self.assertIn(b'cd /d "%TEMP%"', raw)               # belt-and-suspenders CWD escape
         self.assertIn(b"\r\n", raw)                         # CRLF preserved (newline="")
         self.assertNotIn(b"\r\r\n", raw)                    # not doubled
         # the zip was extracted and validated before anything was spawned
@@ -309,17 +343,22 @@ class TestApplyWindowsDir(unittest.TestCase):
             self.assertEqual(f.read().strip(), "v0.7.0")
 
     def test_refuses_path_with_percent(self):
-        # a '%' in the install folder triggers cmd var-expansion and would corrupt
-        # the script -> fail cleanly (before extraction) rather than emit a broken .cmd.
+        # a '%' in the install folder triggers cmd var-expansion and would corrupt the
+        # script -> fail cleanly via the path guard. Use a VALID zip so the ONLY thing
+        # that can raise is the guard (a missing/bad zip would also raise UpdateError,
+        # masking a regression that dropped the guard).
         d = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, d, True)
         install = os.path.join(d, "50%done")
         os.makedirs(install)
         exe = os.path.join(install, "claude-continue.exe")
         open(exe, "w").close()
+        zip_path = _make_onedir_zip(d)
+        tmp = os.path.join(d, "work")
+        os.makedirs(tmp)
         with mock.patch("claude_continue.update.sys.executable", exe):
-            with self.assertRaises(update.UpdateError):
-                update._apply_windows_dir(os.path.join(d, "nope.zip"), os.path.join(d, "work"), relaunch=False)
+            with self.assertRaisesRegex(update.UpdateError, r"app folder|characters that would break"):
+                update._apply_windows_dir(zip_path, tmp, relaunch=False)
 
     def test_rejects_zip_without_exe(self):
         # an archive that has claude-continue/ but no exe inside must be refused
@@ -334,6 +373,46 @@ class TestApplyWindowsDir(unittest.TestCase):
              mock.patch("claude_continue.update.sys.executable", exe):
             with self.assertRaises(update.UpdateError):
                 update._apply_windows_dir(zip_path, tmp, relaunch=False)
+
+
+class TestSafeExtract(unittest.TestCase):
+    def _zip_with(self, d, arcname):
+        zp = os.path.join(d, "evil.zip")
+        with zipfile.ZipFile(zp, "w") as zf:
+            zf.writestr(arcname, "x")
+        return zp
+
+    def test_rejects_parent_traversal(self):
+        # a member that escapes the target via ../ must be refused before extraction
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        dest = os.path.join(d, "dest")
+        os.makedirs(dest)
+        zp = self._zip_with(d, "../escape.txt")
+        with zipfile.ZipFile(zp) as zf:
+            with self.assertRaises(update.UpdateError):
+                update._safe_extract(zf, dest)
+        self.assertFalse(os.path.exists(os.path.join(d, "escape.txt")))  # nothing written outside dest
+
+    def test_rejects_deeper_traversal(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        dest = os.path.join(d, "dest")
+        os.makedirs(dest)
+        zp = self._zip_with(d, "../../escape.txt")
+        with zipfile.ZipFile(zp) as zf:
+            with self.assertRaises(update.UpdateError):
+                update._safe_extract(zf, dest)
+
+    def test_allows_normal_nested_member(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        dest = os.path.join(d, "dest")
+        os.makedirs(dest)
+        zp = self._zip_with(d, "claude-continue/_internal/python311.dll")
+        with zipfile.ZipFile(zp) as zf:
+            update._safe_extract(zf, dest)  # no raise
+        self.assertTrue(os.path.isfile(os.path.join(dest, "claude-continue", "_internal", "python311.dll")))
 
 
 class TestCleanupStaleUpdate(unittest.TestCase):

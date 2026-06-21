@@ -65,6 +65,9 @@ def windows_self_delete_script(target: str, *, pid: int, wait_s: int = 30) -> st
     wait_file = "%TEMP%\\cc-remove-wait.txt"
     return "\r\n".join([
         "@echo off",
+        # don't hold the install dir as our CWD — Windows blocks rmdir of a live
+        # process's current directory (Popen also sets cwd; this is belt-and-suspenders).
+        'cd /d "%TEMP%"',
         "set _i=0",
         ":ccwait",
         'tasklist /FI "PID eq %d" /NH > "%s" 2>NUL' % (pid, wait_file),
@@ -103,7 +106,10 @@ def _spawn_self_delete(target: str) -> None:
         # waitfor-based script runs correctly and no console flashes.
         with open(path, "w", newline="") as f:
             f.write(script)
-        subprocess.Popen(["cmd", "/c", path], **osenv.no_window_kwargs())
+        # cwd=%TEMP%: the helper must NOT inherit our install-dir CWD, or Windows
+        # would block the rmdir of that very directory (it's a live CWD).
+        subprocess.Popen(["cmd", "/c", path], cwd=tempfile.gettempdir(),
+                         **osenv.no_window_kwargs())
 
 
 def remove(*, purge_config: bool = True, logger=None) -> dict:

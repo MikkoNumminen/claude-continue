@@ -95,8 +95,11 @@ if ($LASTEXITCODE -ne 0) { throw "dependency install failed (exit $LASTEXITCODE)
 Write-Host "==> generating Windows version metadata"
 $Version = (& $VenvPython -c "import claude_continue, sys; sys.stdout.write(claude_continue.__version__)")
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($Version)) { throw "couldn't read claude_continue.__version__" }
-# filevers/prodvers want a 4-int tuple; pad the dotted version (strip any tail like -rc1).
-$nums = @($Version -split '\.' | ForEach-Object { [int]($_ -replace '\D', '') })
+# filevers/prodvers want a 4-int tuple. Strip any pre-release/build tail FIRST
+# (e.g. 0.9.0-rc1 / 1.2.3+build) so a suffix can't corrupt the numeric fields,
+# then split on dots and pad to 4 ints.
+$core = ($Version -split '[-+]', 2)[0]
+$nums = @($core -split '\.' | ForEach-Object { [int]($_ -replace '\D', '') })
 while ($nums.Count -lt 4) { $nums += 0 }
 $nums = $nums[0..3]
 $vtuple = ($nums -join ', ')

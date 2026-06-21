@@ -396,8 +396,12 @@ def windows_dir_swap_script(install_dir: str, new_tree: str, relaunch: bool, *,
     name). The new build is a *directory* (one-dir), so this swaps a folder — the
     Windows analogue of the macOS bundle swap, with the v0.8.x PID-wait.
 
-    Console-less (CREATE_NO_WINDOW), so the wait POLLS for our ``pid`` to disappear
-    via FILE REDIRECTION (anonymous pipes don't connect window-less) with
+    Console-less (CREATE_NO_WINDOW). It first ``cd``s to ``%TEMP%`` so it never
+    holds the install dir as its own CWD — Windows refuses to rename/delete a
+    directory that is any live process's current directory, and a double-clicked
+    one-dir app passes its install-dir CWD down to this helper (Popen also sets
+    cwd; the ``cd`` is belt-and-suspenders). Then the wait POLLS for our ``pid`` to
+    disappear via FILE REDIRECTION (anonymous pipes don't connect window-less) with
     ``waitfor`` for each ~1s delay (``timeout``/``ping`` don't block window-less),
     hard-capped by a counter so it can never hang. A failed/absent ``tasklist``
     (checked via errorlevel) is treated as "can't confirm exit" and keeps waiting —
@@ -411,9 +415,13 @@ def windows_dir_swap_script(install_dir: str, new_tree: str, relaunch: bool, *,
       * ``robocopy /MOVE`` the new tree into place (cross-volume safe; robocopy
         exit code >= 8 is a real failure),
       * ROLL BACK if robocopy failed or the new exe is missing: drop the partial
-        dir and move ``<dir>.old`` home, so the path is never left broken,
-      * relaunch only if an exe actually exists, then best-effort ``rmdir`` the
-        backup (``cleanup_stale_update`` finishes a locked one on the next launch).
+        tree, then restore ``<dir>.old`` — but ONLY if the partial was actually
+        cleared. ``move`` into a still-present dir would NEST the backup inside it
+        (stranding the only good copy), so when the drop fails we leave ``<dir>.old``
+        at the top level (where ``cleanup_stale_update`` looks) and never nest,
+      * the backup is dropped only on a clean success or a completed restore — never
+        when it is the only surviving copy,
+      * relaunch only if an exe actually exists at the install path.
 
     NOTE (flagged): unit-tested for its text but NOT yet run against a live install
     on real Windows. The move-aside + abort + rollback keep the worst case bounded
@@ -423,6 +431,11 @@ def windows_dir_swap_script(install_dir: str, new_tree: str, relaunch: bool, *,
     wait_file = "%TEMP%\\cc-update-wait.txt"
     lines = [
         "@echo off",
+        # NEVER hold the install dir as our CWD: Windows refuses to rename/delete a
+        # directory that is any live process's current directory, and this helper
+        # inherits the (double-clicked) app's CWD = the install dir. Move to %TEMP%
+        # first (Popen also sets cwd, but this is cheap belt-and-suspenders).
+        'cd /d "%TEMP%"',
         # Wait for our PID to exit (file-redirection poll; %%_i%% caps the loop).
         "set _i=0",
         ":ccwait",
@@ -445,20 +458,26 @@ def windows_dir_swap_script(install_dir: str, new_tree: str, relaunch: bool, *,
         # copy the new tree in (robocopy is cross-volume safe; /MOVE clears source).
         'robocopy "%s" "%s" /E /MOVE /NFL /NDL /NJH /NJS /NP /R:1 /W:1 >NUL' % (new_tree, install_dir),
         "if errorlevel 8 goto ccrollback",
-        'if exist "%s" goto ccrelaunch' % exe,
+        'if exist "%s" goto ccok' % exe,   # success: the new tree landed
         ":ccrollback",
-        # new tree didn't land -> drop any partial and restore the old install.
+        # new tree didn't land -> drop any partial tree, then restore the old install.
         'rmdir /S /Q "%s" >NUL 2>&1' % install_dir,
+        # if the partial couldn't be cleared, do NOT move: `move` would NEST the
+        # backup INSIDE the leftover dir (Windows move-into-existing-dir semantics),
+        # stranding the only good copy. Leave <dir>.old at the top level instead, so
+        # cleanup_stale_update still sees it.
+        'if exist "%s" goto ccrelaunch' % install_dir,
         'move /Y "%s" "%s" >NUL 2>&1' % (old, install_dir),
+        ":ccok",
+        # drop the backup — reached only on a clean success or a completed restore,
+        # NEVER when <dir>.old is the only surviving copy.
+        'rmdir /S /Q "%s" >NUL 2>&1' % old,
         ":ccrelaunch",
     ]
     if relaunch:
         # only relaunch if an exe actually exists at the path (new or rolled-back).
         lines.append('if exist "%s" start "" "%s"' % (exe, exe))
-    lines += [
-        'rmdir /S /Q "%s" >NUL 2>&1' % old,   # best-effort; cleanup_stale_update gets a locked one
-        'del "%~f0"',
-    ]
+    lines.append('del "%~f0"')
     return "\r\n".join(lines) + "\r\n"
 
 
@@ -516,7 +535,10 @@ def _apply_windows_dir(zip_path: str, tmp: str, relaunch: bool, target_version: 
             f.write(windows_dir_swap_script(install, new_tree, relaunch, pid=os.getpid()))
         # CREATE_NO_WINDOW (not DETACHED): a detached cmd's pipes/ping fail, and the
         # script is written to tolerate the no-console environment (see above).
-        subprocess.Popen(["cmd", "/c", script_path], **osenv.no_window_kwargs())
+        # cwd=%TEMP%: the helper must NOT inherit our install-dir CWD, or Windows
+        # would block the move/rmdir of that very directory (it's a live CWD).
+        subprocess.Popen(["cmd", "/c", script_path], cwd=tempfile.gettempdir(),
+                         **osenv.no_window_kwargs())
     except (OSError, subprocess.SubprocessError) as e:
         raise UpdateError("couldn't launch the Windows update helper: %s" % e) from e
     if relaunch:
