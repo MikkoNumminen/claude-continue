@@ -13,7 +13,6 @@ import os
 import shlex
 import shutil
 import subprocess
-import sys
 import tempfile
 
 from . import osenv, scheduler, update
@@ -27,12 +26,12 @@ def leftover_paths() -> list:
 
 
 def removal_target() -> str | None:
-    """The frozen bundle/exe to self-delete, or None when running from source."""
+    """The frozen bundle/dir to self-delete, or None when running from source."""
     if not update.is_frozen():
         return None
     if osenv.is_macos():
         return update.macos_bundle_path()  # the .app bundle
-    return os.path.realpath(sys.executable)  # the .exe
+    return update._install_dir()  # the one-dir install folder (exe + _internal\)
 
 
 def macos_self_delete_script(target: str, pid: int) -> str:
@@ -46,14 +45,18 @@ def macos_self_delete_script(target: str, pid: int) -> str:
 
 
 def windows_self_delete_script(target: str, *, pid: int, wait_s: int = 30) -> str:
-    """Detached .cmd: wait for our process to exit, then delete the exe + itself.
+    """Detached .cmd: wait for our process to exit, then delete the install DIR + itself.
+
+    ``target`` is the one-dir install folder (the exe + its ``_internal\\``), so the
+    whole tree is removed with ``rmdir /S /Q``. The helper itself lives in %TEMP%
+    (outside the install dir), so deleting the dir can't kill the running helper.
 
     Runs console-less (CREATE_NO_WINDOW). Polls for our ``pid`` to exit (via file
     redirection — pipes don't connect window-less), capped by a counter so it can
     never hang. ``waitfor`` supplies each per-iteration delay (it blocks window-less,
     unlike timeout/ping). A failed/absent ``tasklist`` (checked via errorlevel) is
     treated as "can't confirm exit" and keeps waiting, never an immediate delete.
-    The exe may stay locked until the PyInstaller bootstrap exits, so the delete
+    The tree may stay locked until the PyInstaller bootstrap exits, so the delete
     gets a second attempt after another short wait.
 
     NOTE (flagged): unit-tested for text only, not run on real Windows — mirrors
@@ -74,9 +77,9 @@ def windows_self_delete_script(target: str, *, pid: int, wait_s: int = 30) -> st
         "goto ccwait",
         ":ccgone",
         'del "%s" >NUL 2>&1' % wait_file,
-        'del /F /Q "%s" >NUL 2>&1' % target,
-        # one more attempt after a short delay if the bootstrap still held the exe.
-        'if exist "%s" (waitfor /t 2 ClaudeContinueRemove2 >NUL 2>&1 & del /F /Q "%s" >NUL 2>&1)' % (target, target),
+        'rmdir /S /Q "%s" >NUL 2>&1' % target,
+        # one more attempt after a short delay if the bootstrap still held the tree.
+        'if exist "%s" (waitfor /t 2 ClaudeContinueRemove2 >NUL 2>&1 & rmdir /S /Q "%s" >NUL 2>&1)' % (target, target),
         'del "%~f0"',
     ]) + "\r\n"
 

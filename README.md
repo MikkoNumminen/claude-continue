@@ -169,15 +169,22 @@ runs as a Linux process the Windows process query can't see, the panel notes it
 has no live view.)
 
 The **⟳ Update** button checks the latest GitHub release and, if a newer one
-exists, downloads it and restarts the app in place (the standalone `.app`/`.exe`
-builds). It's checked once on launch and tinted green when an update is waiting,
-gray when you're up to date. Run from source instead? It tells you to `git pull`.
+exists, downloads it and restarts the app in place (the standalone macOS `.app`
+bundle / Windows install folder). It's checked once on launch and tinted green
+when an update is waiting, gray when you're up to date. Run from source instead?
+It tells you to `git pull`.
 
-> **Windows, upgrading from 0.7.1 or earlier:** those builds shipped a broken
-> in-app updater (it closed the app without updating), and that old updater is
-> what runs for the upgrade itself — so download the new `.exe` from the
-> [latest release](https://github.com/MikkoNumminen/claude-continue/releases/latest)
-> **once**, by hand. The Update button works normally from that version on.
+> **Windows, upgrading to 0.9.0 from any earlier build:** 0.9.0 switches the
+> Windows release from a single `.exe` to a **one-dir folder shipped as a `.zip`**.
+> (The old one-file exe re-unpacked its Python runtime into `%TEMP%` on every
+> launch, which antivirus — e.g. IPVanish Threat Protection — kept blocking with
+> "Failed to load Python DLL `python311.dll`". The one-dir build keeps the DLL on
+> disk, so it's scanned once instead of fighting the scanner each launch.) The old
+> `.exe`'s updater looks for a `.exe` asset that no longer exists, so make this one
+> hop **by hand**: download `claude-continue-windows-x64.zip` from the
+> [latest release](https://github.com/MikkoNumminen/claude-continue/releases/latest),
+> unzip it, and replace your install folder. The Update button works normally from
+> 0.9.0 on — it now swaps the whole folder for you.
 
 The **Remove app…** button removes claude-continue **completely** — after a
 confirmation it stops watching, removes the background agent, deletes your
@@ -209,26 +216,36 @@ copy to another Mac* gets quarantined and Gatekeeper will block first launch
 right-click → Open the first time, or `xattr -dr com.apple.quarantine
 claude-continue.app`.
 
-### Standalone Windows .exe (no Python required)
+### Standalone Windows build (no Python required)
 
 Build it **on a Windows machine** (PyInstaller can't cross-compile from macOS),
 in PowerShell from the repo root. Building needs Python ≥ 3.9 on PATH; the
-resulting exe needs no Python to run:
+resulting build needs no Python to run:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File packaging\build-windows.ps1
-.\dist\claude-continue.exe          # run it (or double-click in Explorer)
+powershell -ExecutionPolicy Bypass -File packaging\build-windows.ps1            # one .exe
+powershell -ExecutionPolicy Bypass -File packaging\build-windows.ps1 -OneDir    # a folder
+.\dist\claude-continue.exe                  # run the one-file build
+.\dist\claude-continue\claude-continue.exe  # run the one-dir build
 ```
 
-It builds in a throwaway venv (never touching your system Python) and produces a
-single `dist\claude-continue.exe` that opens the GUI, built `--windowed` so no
-console window flashes up behind it. The exe is actually the full
-`claude-continue` (double-click opens the GUI; `claude-continue.exe doctor` /
-`status` / `watch` work too), but because it's `--windowed` it doesn't attach to
-a console, so for CLI text output prefer the `pip install`. Same runtime deps as
-the CLI: Node (`npx ccusage`) for reset detection, and PowerShell for the
-optional `--keystroke` action. Windows SmartScreen may warn on an unsigned exe
-the first time — choose "More info → Run anyway".
+It builds in a throwaway venv (never touching your system Python). The default is
+a single `dist\claude-continue.exe` — handy to hand to someone. **Releases use
+`-OneDir`** (a `dist\claude-continue\` folder, shipped zipped): a one-file exe
+re-unpacks `python311.dll` into `%TEMP%` on every launch, which antivirus
+heuristics (e.g. IPVanish Threat Protection) flag and block — the one-dir build
+keeps the DLL on disk so it's scanned once. Both embed a version resource and skip
+UPX, which also lowers false positives.
+
+Either way the exe is the full `claude-continue` (double-click opens the GUI;
+`claude-continue.exe doctor` / `status` / `watch` work too), built `--windowed`
+so no console flashes up — which also means it doesn't attach to a console, so
+for CLI text output prefer the `pip install`. Same runtime deps as the CLI: Node
+(`npx ccusage`) for reset detection, and PowerShell for the optional `--keystroke`
+action. The build is **unsigned**, so Windows SmartScreen may still warn the first
+time ("More info → Run anyway"); a strict third-party antivirus may need an
+allow-list entry for the install folder. Code signing is the only thing that fully
+removes those prompts.
 
 ## Choosing what fires
 

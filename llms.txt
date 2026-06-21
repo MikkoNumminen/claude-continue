@@ -3,8 +3,8 @@
 > A stdlib-only Python CLI + tiny Tkinter GUI that keeps Claude Code's rolling
 > 5-hour usage windows running back-to-back: the instant a window resets, it
 > resumes paused Claude sessions (or opens a fresh window) so quota is never
-> left idle. Packaged as a macOS .app and Windows .exe. Runs on macOS, Windows,
-> WSL, and Linux.
+> left idle. Packaged as a macOS .app and a Windows one-dir folder (zipped). Runs
+> on macOS, Windows, WSL, and Linux.
 
 Key facts for an LLM working with this repo:
 

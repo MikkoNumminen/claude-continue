@@ -4,6 +4,49 @@ All notable changes to `claude-continue`. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.0] — 2026-06-22
+
+Make the Windows build survive antivirus. The one-file `.exe` re-unpacked
+`python311.dll` into `%TEMP%` on every launch, which heuristic scanners (confirmed
+with **IPVanish Threat Protection**) blocked — the app died with "Failed to load
+Python DLL `python311.dll`. LoadLibrary: the specified module could not be found",
+including right after a self-update.
+
+### Changed
+- **Windows ships a one-dir build, zipped, instead of a single `.exe`.** The Python
+  runtime now lives on disk in `_internal\` and is scanned once, rather than being
+  re-extracted to `%TEMP%` each launch for the scanner to flag. The release asset is
+  `claude-continue-windows-x64.zip` (a top-level `claude-continue\` folder), matching
+  the macOS `.zip`.
+- **The Windows self-update now swaps the whole install directory**, the analogue of
+  the macOS bundle swap: it extracts the zip in-process (stdlib `zipfile`, with a
+  zip-slip guard), then a detached console-less helper waits for this process to exit
+  (the v0.8.1 PID-poll), moves the install folder aside, `robocopy`s the new tree in,
+  and **rolls back** to the old folder if the copy fails or the new exe is missing —
+  un-updated beats bricked. `uninstall --app` likewise removes the whole folder.
+
+### Added
+- **Windows exes embed a version resource** (CompanyName/ProductName/version), and the
+  **macOS `Info.plist` is stamped with the version**. Legitimate metadata measurably
+  lowers heuristic false positives on unsigned binaries (it is not a substitute for
+  signing). UPX is now explicitly disabled on both platforms (it inflates AV false
+  positives on Windows and corrupts macOS binaries).
+
+### Upgrade (Windows, from any earlier build)
+- One manual hop: the old `.exe`'s updater looks for a `.exe` asset that no longer
+  exists. Download `claude-continue-windows-x64.zip` from the latest release, unzip
+  it, and replace your install folder. The Update button works normally from 0.9.0 on.
+
+### Notes
+- The builds remain **unsigned**: this change removes the specific behavior AV flagged
+  and makes the binaries look far more legitimate, but only Authenticode signing
+  (Windows) + Developer-ID notarization (macOS) can *guarantee* a heuristic scanner
+  never blocks them. A strict AV may still need an allow-list entry.
+- As with the v0.8.1 swap helper, the new Windows directory-swap `.cmd` is unit-tested
+  for its emitted text and validated on CI, but an actual Update/Remove against a live
+  install has not yet been smoke-tested on real hardware. The move-aside + abort +
+  rollback keep the worst case bounded and never-bricked.
+
 ## [0.8.1] — 2026-06-20
 
 Follow-up hardening for the v0.7.0–v0.8.0 Windows work, from an adversarial audit

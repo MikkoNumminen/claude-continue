@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+import zipfile
 from unittest import mock
 
 import _support  # noqa: F401
@@ -56,7 +57,7 @@ def _raising_opener(exc):
 
 _ASSETS = [
     ("claude-continue-macos-arm64.zip", "https://x/macos.zip"),
-    ("claude-continue-windows-x64.exe", "https://x/win.exe"),
+    ("claude-continue-windows-x64.zip", "https://x/win.zip"),
 ]
 
 
@@ -89,7 +90,7 @@ class TestAssetSelection(unittest.TestCase):
 
     def test_windows(self):
         with _ForcePlatform("windows"):
-            self.assertEqual(update.asset_for_platform(_ASSETS), ("claude-continue-windows-x64.exe", "https://x/win.exe"))
+            self.assertEqual(update.asset_for_platform(_ASSETS), ("claude-continue-windows-x64.zip", "https://x/win.zip"))
 
     def test_linux_has_no_asset(self):
         with _ForcePlatform("linux"):
@@ -107,11 +108,18 @@ class TestAssetSelection(unittest.TestCase):
 
     def test_windows_skips_sha_sidecar(self):
         assets = [
-            ("claude-continue-windows-x64.exe.sha256", "u1"),
-            ("claude-continue-windows-x64.exe", "u2"),
+            ("claude-continue-windows-x64.zip.sha256", "u1"),
+            ("claude-continue-windows-x64.zip", "u2"),
         ]
         with _ForcePlatform("windows"):
-            self.assertEqual(update.asset_for_platform(assets), ("claude-continue-windows-x64.exe", "u2"))
+            self.assertEqual(update.asset_for_platform(assets), ("claude-continue-windows-x64.zip", "u2"))
+
+    def test_windows_skips_macos_zip(self):
+        # both assets are .zip now; the windows build must match on the "windows" tag,
+        # never grab the macOS zip.
+        with _ForcePlatform("windows"):
+            self.assertEqual(update.asset_for_platform(_ASSETS),
+                             ("claude-continue-windows-x64.zip", "https://x/win.zip"))
 
 
 class TestCheck(unittest.TestCase):
@@ -177,20 +185,21 @@ class TestCheckRetry(unittest.TestCase):
         self.assertIsNotNone(info.error)
 
 
-class TestWindowsSwapScript(unittest.TestCase):
-    def test_move_then_copy_relaunch_selfdelete(self):
-        s = update.windows_swap_script(r"C:\tmp\new.exe", r"C:\app\claude-continue.exe", relaunch=True, pid=4321)
-        # move the running exe aside (can't overwrite it), then copy the new one in
-        self.assertIn(r'move /Y "C:\app\claude-continue.exe" "C:\app\claude-continue.exe.old"', s)
-        self.assertIn(r'copy /Y "C:\tmp\new.exe" "C:\app\claude-continue.exe"', s)
-        self.assertIn('start ""', s)               # relaunch
-        self.assertIn('del "%~f0"', s)             # self-delete
+class TestWindowsDirSwapScript(unittest.TestCase):
+    def test_moves_dir_then_robocopies_relaunch_selfdelete(self):
+        s = update.windows_dir_swap_script(r"C:\app", r"C:\tmp\extracted\claude-continue", relaunch=True, pid=4321)
+        # the running build's DLLs are locked, so move the whole dir aside, then
+        # robocopy the new tree in (cross-volume safe).
+        self.assertIn(r'move /Y "C:\app" "C:\app.old"', s)
+        self.assertIn(r'robocopy "C:\tmp\extracted\claude-continue" "C:\app"', s)
+        self.assertIn(r'start "" "C:\app\claude-continue.exe"', s)   # relaunch the exe inside the dir
+        self.assertIn('del "%~f0"', s)                               # self-delete
 
     def test_polls_for_pid_capped_with_waitfor_only(self):
         # waits for OUR pid to exit (file-redirection poll, not a pipe), capped by a
         # counter so it can't hang. waitfor (not timeout/ping, which don't delay
         # window-less) supplies each per-iteration delay.
-        s = update.windows_swap_script("new.exe", "old.exe", relaunch=True, pid=4321)
+        s = update.windows_dir_swap_script(r"C:\app", r"C:\new", relaunch=True, pid=4321)
         self.assertIn('tasklist /FI "PID eq 4321"', s)
         self.assertIn('findstr /C:"4321"', s)
         self.assertIn("goto ccwait", s)                       # the poll loop
@@ -203,82 +212,146 @@ class TestWindowsSwapScript(unittest.TestCase):
         self.assertNotIn("ping", s)
 
     def test_wait_s_is_the_iteration_cap(self):
-        self.assertIn("if %_i% GEQ 7 ", update.windows_swap_script("n", "o", relaunch=False, pid=1, wait_s=7))
-        self.assertIn("if %_i% GEQ 30 ", update.windows_swap_script("n", "o", relaunch=False, pid=1))  # default
+        self.assertIn("if %_i% GEQ 7 ", update.windows_dir_swap_script(r"C:\a", r"C:\n", relaunch=False, pid=1, wait_s=7))
+        self.assertIn("if %_i% GEQ 30 ", update.windows_dir_swap_script(r"C:\a", r"C:\n", relaunch=False, pid=1))  # default
 
     def test_rolls_back_if_copy_fails(self):
-        # if the copy didn't land, restore the moved-aside exe so the path is never
-        # left empty, and only relaunch when an exe actually exists.
-        s = update.windows_swap_script(r"C:\tmp\new.exe", r"C:\app\cc.exe", relaunch=True, pid=1)
-        self.assertIn(r'if not exist "C:\app\cc.exe" move /Y "C:\app\cc.exe.old" "C:\app\cc.exe"', s)
-        self.assertIn(r'if exist "C:\app\cc.exe" start "" "C:\app\cc.exe"', s)
+        # robocopy failure (errorlevel >= 8) or a missing exe restores the moved-aside
+        # dir so the path is never left broken; relaunch only if an exe exists.
+        s = update.windows_dir_swap_script(r"C:\app", r"C:\new", relaunch=True, pid=1)
+        self.assertIn("if errorlevel 8 goto ccrollback", s)
+        self.assertIn(r'move /Y "C:\app.old" "C:\app"', s)                       # restore old dir
+        self.assertIn(r'if exist "C:\app\claude-continue.exe" start "" "C:\app\claude-continue.exe"', s)
+
+    def test_aborts_without_merge_if_move_aside_fails(self):
+        # if the move-aside didn't free the path (exe still present), skip robocopy so
+        # we never merge the new tree onto the old one — un-updated beats half-merged.
+        s = update.windows_dir_swap_script(r"C:\app", r"C:\new", relaunch=False, pid=1)
+        self.assertIn(r'if exist "C:\app\claude-continue.exe" goto ccrelaunch', s)
 
     def test_no_relaunch(self):
-        s = update.windows_swap_script("new.exe", "old.exe", relaunch=False, pid=1)
+        s = update.windows_dir_swap_script(r"C:\a", r"C:\n", relaunch=False, pid=1)
         self.assertNotIn('start ""', s)
 
-    def test_deletes_downloaded_exe_and_old(self):
-        s = update.windows_swap_script(r"C:\tmp\new.exe", r"C:\app\cc.exe", relaunch=True, pid=1)
-        self.assertIn(r'del "C:\tmp\new.exe"', s)       # don't leak the download
-        self.assertIn(r'del "C:\app\cc.exe.old"', s)    # best-effort .old cleanup
+    def test_clears_and_cleans_old_backup(self):
+        s = update.windows_dir_swap_script(r"C:\app", r"C:\new", relaunch=True, pid=1)
+        # the moved-aside dir is rmdir'd (best-effort) — cleanup_stale_update finishes
+        # a locked one on the next launch.
+        self.assertIn(r'rmdir /S /Q "C:\app.old"', s)
 
 
-class TestApplyWindows(unittest.TestCase):
+def _make_onedir_zip(d, *, with_exe=True):
+    """A minimal one-dir release zip: top-level claude-continue/ (+ exe + _internal)."""
+    src = os.path.join(d, "tree", "claude-continue")
+    os.makedirs(os.path.join(src, "_internal"))
+    if with_exe:
+        with open(os.path.join(src, "claude-continue.exe"), "w") as f:
+            f.write("newexe")
+    with open(os.path.join(src, "_internal", "python311.dll"), "w") as f:
+        f.write("dll")
+    zip_path = os.path.join(d, "update.zip")
+    root = os.path.join(d, "tree")
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        for base, _, files in os.walk(root):
+            for fn in files:
+                full = os.path.join(base, fn)
+                zf.write(full, os.path.relpath(full, root))
+    return zip_path
+
+
+class TestApplyWindowsDir(unittest.TestCase):
+    def _install(self, d):
+        install = os.path.join(d, "install")
+        os.makedirs(install)
+        exe = os.path.join(install, "claude-continue.exe")
+        open(exe, "w").close()
+        return install, exe
+
     def test_launches_helper_with_no_window_kwargs(self):
-        exe = os.path.join(tempfile.mkdtemp(), "claude-continue.exe")
-        new = os.path.join(tempfile.mkdtemp(), "claude-continue-update.exe")
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        _, exe = self._install(d)
+        zip_path = _make_onedir_zip(d)
+        tmp = os.path.join(d, "work")
+        os.makedirs(tmp)
         with mock.patch("claude_continue.update.osenv.no_window_kwargs", return_value={"creationflags": 0x08000000}) as nwk, \
              mock.patch("claude_continue.update.osenv.detect", return_value="windows"), \
              mock.patch("claude_continue.update.sys.executable", exe), \
              mock.patch("claude_continue.update._allow_foreground_handoff"), \
              mock.patch("claude_continue.update.subprocess.Popen") as popen:
-            update._apply_windows(new, relaunch=True)
+            update._apply_windows_dir(zip_path, tmp, relaunch=True)
         nwk.assert_called()                                 # CREATE_NO_WINDOW, not DETACHED
         argv, kwargs = popen.call_args
         self.assertEqual(argv[0][:2], ["cmd", "/c"])        # cmd /c <script>
         self.assertEqual(kwargs.get("creationflags"), 0x08000000)
         with open(argv[0][2], "rb") as f:                   # binary: see the real bytes
             raw = f.read()
-        self.assertIn(b"waitfor /t", raw)                   # the real swap script was written
+        self.assertIn(b"robocopy", raw)                     # the real dir-swap script was written
         self.assertIn(b"\r\n", raw)                         # CRLF preserved (newline="")
         self.assertNotIn(b"\r\r\n", raw)                    # not doubled
+        # the zip was extracted and validated before anything was spawned
+        self.assertTrue(os.path.isfile(os.path.join(tmp, "extracted", "claude-continue", "claude-continue.exe")))
 
     def test_writes_pending_stamp_with_target_version(self):
-        # the stamp records what we're trying to install; cleanup_stale_update reads
-        # it next launch to detect a swap that silently failed.
         d = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, d, True)
-        exe = os.path.join(d, "claude-continue.exe")
-        new = os.path.join(d, "claude-continue-update.exe")
+        _, exe = self._install(d)
+        zip_path = _make_onedir_zip(d)
+        tmp = os.path.join(d, "work")
+        os.makedirs(tmp)
         with mock.patch("claude_continue.update.osenv.no_window_kwargs", return_value={}), \
              mock.patch("claude_continue.update.osenv.detect", return_value="windows"), \
              mock.patch("claude_continue.update.sys.executable", exe), \
              mock.patch("claude_continue.update._allow_foreground_handoff"), \
              mock.patch("claude_continue.update.subprocess.Popen"):
-            update._apply_windows(new, relaunch=True, target_version="v0.7.0")
+            update._apply_windows_dir(zip_path, tmp, relaunch=True, target_version="v0.7.0")
         with open(exe + update._PENDING_SUFFIX) as f:
             self.assertEqual(f.read().strip(), "v0.7.0")
 
     def test_refuses_path_with_percent(self):
-        # a '%' in the install path triggers cmd var-expansion and would corrupt
-        # the script -> fail the update cleanly rather than emit a broken .cmd.
-        with mock.patch("claude_continue.update.sys.executable", r"C:\50%done\cc.exe"):
+        # a '%' in the install folder triggers cmd var-expansion and would corrupt
+        # the script -> fail cleanly (before extraction) rather than emit a broken .cmd.
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        install = os.path.join(d, "50%done")
+        os.makedirs(install)
+        exe = os.path.join(install, "claude-continue.exe")
+        open(exe, "w").close()
+        with mock.patch("claude_continue.update.sys.executable", exe):
             with self.assertRaises(update.UpdateError):
-                update._apply_windows(r"C:\tmp\new.exe", relaunch=False)
+                update._apply_windows_dir(os.path.join(d, "nope.zip"), os.path.join(d, "work"), relaunch=False)
+
+    def test_rejects_zip_without_exe(self):
+        # an archive that has claude-continue/ but no exe inside must be refused
+        # before any swap is attempted.
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        _, exe = self._install(d)
+        zip_path = _make_onedir_zip(d, with_exe=False)
+        tmp = os.path.join(d, "work")
+        os.makedirs(tmp)
+        with mock.patch("claude_continue.update.osenv.detect", return_value="windows"), \
+             mock.patch("claude_continue.update.sys.executable", exe):
+            with self.assertRaises(update.UpdateError):
+                update._apply_windows_dir(zip_path, tmp, relaunch=False)
 
 
 class TestCleanupStaleUpdate(unittest.TestCase):
-    def test_removes_old_sibling_when_frozen_on_windows(self):
+    def test_removes_old_dir_when_frozen_on_windows(self):
         d = tempfile.mkdtemp()
-        exe = os.path.join(d, "claude-continue.exe")
-        old = exe + ".old"
+        self.addCleanup(shutil.rmtree, d, True)
+        install = os.path.join(d, "install")
+        os.makedirs(install)
+        exe = os.path.join(install, "claude-continue.exe")
         open(exe, "w").close()
-        open(old, "w").close()
+        old = install + ".old"            # the swap leaves a <install>.old DIRECTORY
+        os.makedirs(old)
+        open(os.path.join(old, "marker"), "w").close()
         with mock.patch("claude_continue.update.is_frozen", return_value=True), \
              mock.patch("claude_continue.update.sys.executable", exe), \
              mock.patch("claude_continue.update.osenv.detect", return_value="windows"):
             update.cleanup_stale_update()
-        self.assertFalse(os.path.exists(old))  # leftover removed
+        self.assertFalse(os.path.exists(old))  # leftover dir removed
         self.assertTrue(os.path.exists(exe))   # the live exe untouched
 
     def test_pending_stamp_warns_when_version_did_not_advance(self):
@@ -345,11 +418,13 @@ class TestCleanupStaleUpdate(unittest.TestCase):
         self.assertTrue(os.path.exists(exe))
 
     def test_does_not_delete_old_when_exe_missing(self):
-        # a stranded rollback target: exe absent, .old is the only surviving copy
+        # a stranded rollback target: exe absent, the .old DIR is the only surviving copy
         d = tempfile.mkdtemp()
-        exe = os.path.join(d, "claude-continue.exe")  # not created
-        old = exe + ".old"
-        open(old, "w").close()
+        self.addCleanup(shutil.rmtree, d, True)
+        install = os.path.join(d, "install")  # not created (exe missing)
+        exe = os.path.join(install, "claude-continue.exe")
+        old = install + ".old"
+        os.makedirs(old)
         with mock.patch("claude_continue.update.is_frozen", return_value=True), \
              mock.patch("claude_continue.update.sys.executable", exe), \
              mock.patch("claude_continue.update.osenv.detect", return_value="windows"):
@@ -358,14 +433,16 @@ class TestCleanupStaleUpdate(unittest.TestCase):
 
     def test_locked_old_is_swallowed(self):
         d = tempfile.mkdtemp()
-        exe = os.path.join(d, "claude-continue.exe")
-        old = exe + ".old"
+        self.addCleanup(shutil.rmtree, d, True)
+        install = os.path.join(d, "install")
+        os.makedirs(install)
+        exe = os.path.join(install, "claude-continue.exe")
         open(exe, "w").close()
-        open(old, "w").close()
+        os.makedirs(install + ".old")
         with mock.patch("claude_continue.update.is_frozen", return_value=True), \
              mock.patch("claude_continue.update.sys.executable", exe), \
              mock.patch("claude_continue.update.osenv.detect", return_value="windows"), \
-             mock.patch("claude_continue.update.os.remove", side_effect=OSError("locked")):
+             mock.patch("claude_continue.update.shutil.rmtree", side_effect=OSError("locked")):
             update.cleanup_stale_update()  # OSError swallowed, never raises
 
     def test_noop_from_source(self):

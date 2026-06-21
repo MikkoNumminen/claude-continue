@@ -67,13 +67,15 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
-      - name: Build claude-continue.exe
+      - name: Build claude-continue (one-dir — no per-launch %TEMP% unpack, AV-friendlier)
         shell: pwsh
-        run: .\packaging\build-windows.ps1
-      - name: Name the asset and attach to the release
+        run: .\packaging\build-windows.ps1 -OneDir
+      - name: Zip the one-dir folder and attach to the release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          Copy-Item dist/claude-continue.exe claude-continue-windows-x64.exe
-          gh release upload "$env:TAG" claude-continue-windows-x64.exe --clobber
+          # -Path the FOLDER so the archive keeps a top-level claude-continue\ that
+          # the self-update extractor (update._apply_windows_dir) expects.
+          Compress-Archive -Path dist/claude-continue -DestinationPath claude-continue-windows-x64.zip -Force
+          gh release upload "$env:TAG" claude-continue-windows-x64.zip --clobber

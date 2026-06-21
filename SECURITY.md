@@ -41,9 +41,11 @@ notarized; macOS Gatekeeper will warn on a browser download (right-click → Ope
 ### Self-removal
 
 **Remove app… / `uninstall --app`** deletes your config, logs, and the app
-bundle itself (via a detached helper that waits for the process to exit). The
-deletion target is derived from `sys.executable`'s `.app`/`.exe` path; it is
-never a shallow/`/`-style path. A failed self-delete is surfaced, not hidden.
+itself (via a detached helper that waits for the process to exit). The deletion
+target is derived from `sys.executable` — the macOS `.app` bundle, or the Windows
+one-dir install **folder** (the exe's parent); it is never a shallow/`/`-style
+path, and a `%`-bearing (cmd-unsafe) path is refused rather than scripted. A
+failed self-delete is surfaced, not hidden.
 
 ## Supported versions
 
