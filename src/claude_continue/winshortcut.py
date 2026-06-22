@@ -72,9 +72,12 @@ def _registered_target() -> str | None:
     Doubles as the 'already registered here' marker so ensure_registered is a no-op
     when nothing moved."""
     try:
-        import winreg  # Windows-only stdlib; only reached when _enabled()
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _APP_PATHS_KEY) as k:
-            val, _ = winreg.QueryValueEx(k, "")  # "" = the key's default value
+        # winreg is a Windows-only stdlib module; the type: ignores keep mypy happy on
+        # the Linux CI runner (where it has no attributes), like the ctypes.windll
+        # ignores elsewhere. Only reached when _enabled() (i.e. actually on Windows).
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _APP_PATHS_KEY) as k:  # type: ignore[attr-defined]
+            val, _ = winreg.QueryValueEx(k, "")  # type: ignore[attr-defined]  # "" = default value
             return val
     except Exception:  # noqa: BLE001 - absent key OR winreg unavailable -> "not registered"
         return None
@@ -82,9 +85,9 @@ def _registered_target() -> str | None:
 
 def _set_app_paths(target: str, workdir: str) -> None:
     import winreg  # Windows-only stdlib; only reached when _enabled()
-    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, _APP_PATHS_KEY) as k:
-        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, target)  # "" = default value
-        winreg.SetValueEx(k, "Path", 0, winreg.REG_SZ, workdir)
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, _APP_PATHS_KEY) as k:  # type: ignore[attr-defined]
+        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, target)  # type: ignore[attr-defined]  # "" = default value
+        winreg.SetValueEx(k, "Path", 0, winreg.REG_SZ, workdir)  # type: ignore[attr-defined]
 
 
 def ensure_registered(target: str | None = None) -> None:
@@ -135,6 +138,6 @@ def unregister() -> None:
         pass
     try:
         import winreg
-        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, _APP_PATHS_KEY)
+        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, _APP_PATHS_KEY)  # type: ignore[attr-defined]
     except Exception:  # noqa: BLE001 - key absent (already clean) or winreg unavailable
         pass
