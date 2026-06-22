@@ -247,6 +247,12 @@ time ("More info → Run anyway"); a strict third-party antivirus may need an
 allow-list entry for the install folder. Code signing is the only thing that fully
 removes those prompts.
 
+On first launch the Windows build **registers itself in the Start Menu** (and adds an
+`App Paths` entry), so typing "claude-continue" in the search bar — or Win+R — opens
+it. Self-updates keep the install path stable, so the shortcut always points at the
+latest build; `uninstall --app` removes it. Run it from one canonical folder (don't
+keep multiple copies) so the shortcut and search resolve to the build you actually use.
+
 ## Choosing what fires
 
 On **macOS** it broadcasts `continue` to iTerm2 sessions whose name contains

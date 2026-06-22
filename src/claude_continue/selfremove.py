@@ -141,6 +141,14 @@ def remove(*, purge_config: bool = True, logger=None) -> dict:
             except OSError as e:
                 log("couldn't delete %s: %s", path, e)
 
+    # Drop the Start Menu shortcut + App Paths key the GUI registered (Windows only;
+    # best-effort) so a complete removal doesn't leave an orphaned shortcut behind.
+    try:
+        from . import winshortcut
+        winshortcut.unregister()
+    except Exception as e:  # noqa: BLE001 - never stall teardown over a shortcut
+        log("couldn't remove the Start Menu shortcut: %s", e)
+
     target = removal_target()
     summary["bundle"] = target
     if target:
