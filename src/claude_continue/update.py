@@ -619,12 +619,21 @@ def cleanup_stale_update() -> str | None:
                 warning = "the last update to %s didn't complete — try Update again" % want
     except OSError:
         pass
-    # reap leaked temp dirs from apply_update's mkdtemp(prefix="cc-update-")
+    # reap leaked temp dirs from apply_update's mkdtemp(prefix="cc-update-"), but ONLY
+    # ones older than an hour: a concurrently-running update's helper still needs its
+    # fresh cc-update-* dir as the swap source, so reaping unconditionally could race a
+    # second instance's in-flight update (an update lands in seconds/minutes — anything
+    # older is a crashed/interrupted leftover).
     try:
         import glob
+        import time
+        cutoff = time.time() - 3600
         for d in glob.glob(os.path.join(tempfile.gettempdir(), "cc-update-*")):
-            if os.path.isdir(d):
-                shutil.rmtree(d, ignore_errors=True)
+            try:
+                if os.path.isdir(d) and os.path.getmtime(d) < cutoff:
+                    shutil.rmtree(d, ignore_errors=True)
+            except OSError:
+                continue  # vanished / locked — next launch tries again
     except OSError:
         pass
     return warning

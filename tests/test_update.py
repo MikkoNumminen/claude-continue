@@ -519,17 +519,17 @@ class TestCleanupStaleUpdate(unittest.TestCase):
         self.assertIsNone(warn)
         self.assertFalse(os.path.exists(pending))  # stamp still cleared
 
-    def test_reaps_stale_update_temp_dir(self):
-        # a cc-update-* dir left by an interrupted apply_update is reaped next launch.
-        # Isolate gettempdir so the production glob can't touch the real shared temp
-        # (a foreign cc-update-* there, e.g. a live in-flight update, must be safe),
-        # and prove the reap is scoped to cc-update-* by keeping a control dir.
+    def test_reaps_OLD_stale_update_temp_dir(self):
+        # an OLD cc-update-* dir left by an interrupted apply_update is reaped next
+        # launch. Isolate gettempdir so the production glob can't touch the real shared
+        # temp, and keep a control dir to prove the reap is scoped to cc-update-*.
         isolated = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, isolated, True)
         leftover = os.path.join(isolated, "cc-update-abc123")
         survivor = os.path.join(isolated, "unrelated-dir")
         os.mkdir(leftover)
         os.mkdir(survivor)
+        os.utime(leftover, (0, 0))  # make it ancient so the age-guard reaps it
         exe = os.path.join(isolated, "claude-continue.exe")
         open(exe, "w").close()
         with mock.patch("claude_continue.update.tempfile.gettempdir", return_value=isolated), \
@@ -537,8 +537,24 @@ class TestCleanupStaleUpdate(unittest.TestCase):
              mock.patch("claude_continue.update.sys.executable", exe), \
              mock.patch("claude_continue.update.osenv.detect", return_value="windows"):
             update.cleanup_stale_update()
-        self.assertFalse(os.path.exists(leftover))   # cc-update-* reaped
+        self.assertFalse(os.path.exists(leftover))   # old cc-update-* reaped
         self.assertTrue(os.path.exists(survivor))    # unrelated dir untouched
+
+    def test_does_NOT_reap_a_fresh_cc_update_dir(self):
+        # a FRESH cc-update-* may be a concurrent instance's in-flight swap source —
+        # the age-guard must leave it alone (reaping it would race that update).
+        isolated = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, isolated, True)
+        inflight = os.path.join(isolated, "cc-update-live99")
+        os.mkdir(inflight)  # mtime = now
+        exe = os.path.join(isolated, "claude-continue.exe")
+        open(exe, "w").close()
+        with mock.patch("claude_continue.update.tempfile.gettempdir", return_value=isolated), \
+             mock.patch("claude_continue.update.is_frozen", return_value=True), \
+             mock.patch("claude_continue.update.sys.executable", exe), \
+             mock.patch("claude_continue.update.osenv.detect", return_value="windows"):
+            update.cleanup_stale_update()
+        self.assertTrue(os.path.exists(inflight))    # fresh in-flight dir preserved
 
     def test_noop_when_no_old_present(self):
         exe = os.path.join(tempfile.mkdtemp(), "claude-continue.exe")
