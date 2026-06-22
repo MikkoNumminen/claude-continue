@@ -198,6 +198,13 @@ class TestActionCheck(unittest.TestCase):
         self.assertEqual(c.status, WARN)
         self.assertIn("no resume action", c.detail)
 
+    def test_tmux_keystroke_all_empty_preview_no_nameerror(self):
+        # regression: tmux + keystroke_all reaching the empty-preview branch referenced
+        # `plat`, which was only assigned on the non-tmux path -> NameError crashed doctor.
+        with _ForcePlatform("windows"):
+            c = self._check(Config(tmux=True, keystroke_all=True), preview=lambda: [])
+        self.assertEqual(c.status, WARN)  # must return cleanly, not raise NameError
+
     def test_windows_keystroke_no_powershell_fails(self):
         with _ForcePlatform("windows"):
             c = self._check(Config(keystroke=True), which=lambda n: None)

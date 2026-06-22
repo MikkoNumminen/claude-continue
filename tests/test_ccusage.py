@@ -100,6 +100,41 @@ class TestGetActiveBlock(unittest.TestCase):
         with self.assertRaises(CcusageUnavailable):
             get_active_block()
 
+    def test_non_dict_payload_raises_unavailable(self):
+        # ccusage emits a top-level array -> payload.get hits a list (AttributeError);
+        # it must surface as CcusageUnavailable, not crash the daemon.
+        fd, path = tempfile.mkstemp(suffix=".json")
+        with os.fdopen(fd, "w") as f:
+            f.write("[]")
+        self.addCleanup(os.unlink, path)
+        self._set(_dump_file(path))
+        with self.assertRaises(CcusageUnavailable):
+            get_active_block()
+
+    def test_numeric_timestamp_raises_unavailable(self):
+        # a non-string timestamp -> parse_iso's .endswith hits an int (AttributeError);
+        # also must surface as CcusageUnavailable.
+        fd, path = tempfile.mkstemp(suffix=".json")
+        with os.fdopen(fd, "w") as f:
+            f.write('{"blocks": [{"id": "x", "startTime": 123, "endTime": 456, "isActive": true}]}')
+        self.addCleanup(os.unlink, path)
+        self._set(_dump_file(path))
+        with self.assertRaises(CcusageUnavailable):
+            get_active_block()
+
+    def test_overflowing_timestamp_raises_unavailable(self):
+        # a syntactically-valid ISO timestamp whose UTC conversion overflows datetime
+        # (year 9999 with a negative offset) -> OverflowError, not ValueError; must
+        # still surface as CcusageUnavailable, never crash the daemon.
+        fd, path = tempfile.mkstemp(suffix=".json")
+        with os.fdopen(fd, "w") as f:
+            f.write('{"blocks": [{"id": "x", "startTime": "2024-01-01T00:00:00Z", '
+                    '"endTime": "9999-12-31T23:59:59-14:00", "isActive": true}]}')
+        self.addCleanup(os.unlink, path)
+        self._set(_dump_file(path))
+        with self.assertRaises(CcusageUnavailable):
+            get_active_block()
+
 
 if __name__ == "__main__":
     unittest.main()

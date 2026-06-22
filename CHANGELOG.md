@@ -16,6 +16,18 @@ Fixes from the 2026-06-22 robustness audit (each finding adversarially verified)
   could corrupt or inject into the scheduled command. Tokens are now quoted for the
   batch context and every `%` doubled. The `schtasks /tr` action path is also quoted,
   so installing under a spaced path (e.g. `C:\Users\First Last\…`) registers correctly.
+- **The watch daemon no longer crashes on unexpected `ccusage` output.** If `ccusage`
+  emitted a top-level JSON array, or a numeric timestamp, parsing raised `AttributeError`
+  — which escaped `get_active_block`'s `(KeyError, ValueError, TypeError)` guard and
+  killed the unattended loop. `AttributeError` is now caught too, so any shape drift
+  surfaces as `CcusageUnavailable` (the module's "never crash the daemon" contract).
+- **`doctor` no longer crashes (`NameError`) on a `--tmux` + continue-all config.** The
+  action check referenced `plat` on a path where it hadn't been assigned; it's now
+  computed once up front.
+- **Windows "continue all" surfaces partial failures.** When some Claude sessions
+  resumed and others failed, the failures were silently dropped (a paused session left
+  with no signal). They're now logged at WARNING while the successful resumes still go
+  through.
 
 ## [0.10.0] — 2026-06-22
 
