@@ -194,15 +194,19 @@ class TestContinueInstances(unittest.TestCase):
         self.assertEqual(len(out), 1)
         self.assertIn("pid 2", out[0])
 
-    def test_one_failed_inject_does_not_abort_the_rest(self):
-        # inject raising (e.g. attach denied) is isolated; the others still resume
+    def test_partial_failure_returns_successes_and_surfaces_warning(self):
+        # inject raising (e.g. attach denied) is isolated; the others still resume AND
+        # the failure is surfaced (logged), not silently dropped — else a paused session
+        # is left with no signal to retry.
         def inject(pid, keys):
             if pid == "1":
                 raise RuntimeError("attach failed")
-        out = winterm.continue_instances(
-            "continue", instances=[("claude", "1"), ("claude", "2")], inject=inject, is_alive=self._ALIVE)
+        with self.assertLogs("claude-continue", level="WARNING") as cm:
+            out = winterm.continue_instances(
+                "continue", instances=[("claude", "1"), ("claude", "2")], inject=inject, is_alive=self._ALIVE)
         self.assertEqual(len(out), 1)
         self.assertIn("pid 2", out[0])
+        self.assertTrue(any("failed to resume" in m and "1 of 2" in m for m in cm.output))
 
     def test_total_failure_raises(self):
         def inject(pid, keys):
