@@ -52,6 +52,10 @@ From the 2026-06-22 robustness audit (each finding adversarially verified).
   self-delete helpers' PID waits are now bounded (a recycled PID can't hang them). And
   the Windows pending-update stamp is written only after the helper actually spawns, so
   a failed spawn no longer leaves a false "last update didn't complete" warning.
+- **`cleanup_stale_update` no longer races a concurrent update.** It reaped every
+  `cc-update-*` temp dir on launch, including one a second instance's in-flight update
+  was still using as its swap source. It now only reaps dirs older than an hour (an
+  update lands in seconds/minutes; anything older is a crashed leftover).
 
 ## [0.10.0] — 2026-06-22
 

@@ -71,6 +71,10 @@ jobs:
         shell: pwsh
         run: .\packaging\build-windows.ps1 -OneDir
       - name: Zip the one-dir folder and attach to the release
+        # KEEP shell: pwsh — PowerShell 7's Compress-Archive writes spec-compliant
+        # forward-slash zip entries, which Python's zipfile extracts correctly on every
+        # OS. Windows PowerShell 5.1 (`shell: powershell`) writes BACKSLASH entries that
+        # extract flat off-Windows; do NOT switch the shell here.
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
