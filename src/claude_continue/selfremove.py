@@ -35,10 +35,15 @@ def removal_target() -> str | None:
 
 
 def macos_self_delete_script(target: str, pid: int) -> str:
-    """Detached helper: wait for our PID to exit, then rm -rf the bundle + itself."""
+    """Detached helper: wait (capped) for our PID to exit, then rm -rf the bundle + itself.
+
+    The wait is bounded (~30s) like the Windows helper: ``kill -0`` only proves *a*
+    process holds the PID, so a recycled or never-dying PID would otherwise hang the
+    helper forever. After the cap it proceeds anyway."""
     return (
         "#!/bin/sh\n"
-        "while kill -0 %d 2>/dev/null; do sleep 0.3; done\n" % pid
+        "i=0\n"
+        "while kill -0 %d 2>/dev/null && [ $i -lt 100 ]; do sleep 0.3; i=$((i+1)); done\n" % pid
         + "rm -rf %s\n" % shlex.quote(target)
         + 'rm -f "$0"\n'
     )

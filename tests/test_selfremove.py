@@ -13,6 +13,7 @@ class TestSelfDeleteScripts(unittest.TestCase):
     def test_macos_script_waits_then_rms_and_self_deletes(self):
         s = selfremove.macos_self_delete_script("/Applications/claude-continue.app", 1234)
         self.assertIn("kill -0 1234", s)                       # wait for our process
+        self.assertIn("[ $i -lt 100 ]", s)                     # ...but bounded (no infinite wait)
         self.assertIn("rm -rf /Applications/claude-continue.app", s)
         self.assertIn('rm -f "$0"', s)                         # delete the helper itself
 

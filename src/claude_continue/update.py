@@ -188,12 +188,24 @@ def check(*, timeout: float = 15.0, opener=_open, current: str | None = None,
                 sleep(1.0 * (attempt + 1))  # 1s, 2s backoff
                 continue
             return UpdateInfo(current, None, False, None, None, error=str(e)[:100])
-    assert data is not None  # the loop either broke with data set or returned above
-    latest = data.get("tag_name")
-    raw = data.get("assets", [])
-    name, url = asset_for_platform((a["name"], a["browser_download_url"]) for a in raw)
-    digest = next((a.get("digest") for a in raw if a["name"] == name), None) if name else None
-    newer = is_newer(latest, current) if latest else False
+    if data is None:
+        # a `null` (or otherwise None-decoding) release body — the loop broke with no
+        # exception but no data either. Honor "Never raises" rather than assert.
+        return UpdateInfo(current, None, False, None, None, error="empty/null release response")
+    # "Never raises": malformed release JSON (non-dict payload, an asset missing
+    # name/url, etc.) must be reported via .error, not escape as a raw traceback. Use
+    # .get() and skip incomplete assets, all under a backstop except.
+    try:
+        latest = data.get("tag_name")
+        raw = data.get("assets", [])
+        name, url = asset_for_platform(
+            (a.get("name"), a.get("browser_download_url"))
+            for a in raw if a.get("name") and a.get("browser_download_url")
+        )
+        digest = next((a.get("digest") for a in raw if a.get("name") == name), None) if name else None
+        newer = is_newer(latest, current) if latest else False
+    except Exception as e:  # noqa: BLE001 - honor the "never raises" contract
+        return UpdateInfo(current, None, False, None, None, error=("malformed release data: %s" % e)[:100])
     return UpdateInfo(current=current, latest=latest, newer=newer,
                       asset_name=name, asset_url=url, asset_digest=digest)
 
@@ -322,7 +334,16 @@ def _apply_macos(zip_path: str, tmp: str, relaunch: bool, bundle_override: str |
         subprocess.run(["ditto", new_app, bundle], check=True)
     except Exception as e:  # noqa: BLE001 - roll back to the old bundle
         shutil.rmtree(bundle, ignore_errors=True)
-        os.rename(backup, bundle)
+        try:
+            os.rename(backup, bundle)
+        except OSError as rollback_err:
+            # The restore itself failed — don't bury it under a raw OSError that hides
+            # the original cause and leaves nothing at the app path. Name the backup so
+            # the user can recover by hand.
+            raise UpdateError(
+                "install failed (%s) AND rollback failed (%s); your previous app is at "
+                "%s — rename it back to %s manually" % (e, rollback_err, backup, bundle)
+            ) from e
         raise UpdateError("install failed, rolled back: %s" % e) from e
     shutil.rmtree(backup, ignore_errors=True)
     if relaunch:
@@ -333,9 +354,13 @@ def _apply_macos(zip_path: str, tmp: str, relaunch: bool, bundle_override: str |
 def _spawn_macos_relauncher(bundle: str) -> None:
     """Detached helper: wait for THIS process to exit, then open the new bundle.
     Avoids LaunchServices re-activating the old dying instance."""
+    # Capped wait (~30s): kill -0 only proves *a* process holds the PID, not that it's
+    # still us — a recycled or never-dying PID would otherwise hang the helper forever.
+    # After the cap we relaunch anyway (the app exits in ~1s in practice).
     script = (
         "#!/bin/sh\n"
-        "while kill -0 %d 2>/dev/null; do sleep 0.3; done\n" % os.getpid()
+        "i=0\n"
+        "while kill -0 %d 2>/dev/null && [ $i -lt 100 ]; do sleep 0.3; i=$((i+1)); done\n" % os.getpid()
         + "open %s\n" % shlex.quote(bundle)
         + 'rm -f "$0"\n'
     )
@@ -445,7 +470,10 @@ def windows_dir_swap_script(install_dir: str, new_tree: str, relaunch: bool, *,
         'findstr /C:"%d" "%s" >NUL || goto ccswap' % (pid, wait_file),
         ":cctick",
         "set /a _i+=1",
-        "if %%_i%% GEQ %d goto ccswap" % wait_s,
+        # cap hit but our PID is STILL alive -> give up: do NOT swap (the running app
+        # locks its dir, so move-aside fails) or relaunch (which would spawn a 2nd
+        # instance). The pending stamp stays, so cleanup_stale_update warns next launch.
+        "if %%_i%% GEQ %d goto ccgiveup" % wait_s,
         "waitfor /t 1 ClaudeContinuePoll >NUL 2>&1",
         "goto ccwait",
         ":ccswap",
@@ -477,7 +505,15 @@ def windows_dir_swap_script(install_dir: str, new_tree: str, relaunch: bool, *,
     if relaunch:
         # only relaunch if an exe actually exists at the path (new or rolled-back).
         lines.append('if exist "%s" start "" "%s"' % (exe, exe))
-    lines.append('del "%~f0"')
+    lines += [
+        "goto ccend",
+        ":ccgiveup",
+        # reached only when the wait cap expired with our PID still alive: tidy the wait
+        # file and exit WITHOUT swapping or relaunching (the install is untouched).
+        'del "%s" >NUL 2>&1' % wait_file,
+        ":ccend",
+        'del "%~f0"',
+    ]
     return "\r\n".join(lines) + "\r\n"
 
 
@@ -519,15 +555,6 @@ def _apply_windows_dir(zip_path: str, tmp: str, relaunch: bool, target_version: 
     if not os.path.isfile(os.path.join(new_tree, _WIN_EXE_NAME)):
         raise UpdateError("update archive didn't contain claude-continue\\%s" % _WIN_EXE_NAME)
     _assert_swap_safe_path(new_tree, "the download path")
-    # Pending stamp (Python-managed, no batch), written INSIDE the install dir next
-    # to the exe. The swap moves the dir aside, so a successful swap leaves the new
-    # dir stamp-less (no warning); a rollback brings it back and cleanup_stale_update
-    # warns. The return only means "helper spawned", not "swap succeeded".
-    try:
-        with open(exe + _PENDING_SUFFIX, "w") as f:
-            f.write((target_version or "").strip())
-    except OSError:
-        pass  # best-effort; the swap still proceeds
     script_path = os.path.join(tempfile.gettempdir(), "claude-continue-update.cmd")
     try:
         # newline="" so the \r\n line endings aren't re-translated to \r\r\n.
@@ -541,6 +568,16 @@ def _apply_windows_dir(zip_path: str, tmp: str, relaunch: bool, target_version: 
                          **osenv.no_window_kwargs())
     except (OSError, subprocess.SubprocessError) as e:
         raise UpdateError("couldn't launch the Windows update helper: %s" % e) from e
+    # Pending stamp — written only AFTER the helper actually spawned, so a failed spawn
+    # leaves no stamp (hence no false "the last update didn't complete" warning on the
+    # next launch). Inside the install dir next to the exe: a clean swap moves the dir
+    # aside leaving the new tree stamp-less (no warning); a rollback restores it so
+    # cleanup_stale_update warns. The return only means "helper spawned", not "swapped".
+    try:
+        with open(exe + _PENDING_SUFFIX, "w") as f:
+            f.write((target_version or "").strip())
+    except OSError:
+        pass  # best-effort
     if relaunch:
         _allow_foreground_handoff()
     return exe

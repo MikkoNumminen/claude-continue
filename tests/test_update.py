@@ -143,6 +143,29 @@ class TestCheck(unittest.TestCase):
         self.assertFalse(info.newer)
         self.assertIsNone(info.latest)
 
+    def test_malformed_asset_skipped_not_raised(self):
+        # an asset missing name/url must be skipped, not KeyError out of check()
+        # (its docstring promises "Never raises").
+        with _ForcePlatform("windows"):
+            info = update.check(opener=_opener({"tag_name": "v9.9.9", "assets": [
+                {"label": "broken"},  # no name / browser_download_url
+                {"name": "claude-continue-windows-x64.zip", "browser_download_url": "u", "digest": "sha256:x"},
+            ]}), current="0.1.0")
+        self.assertIsNone(info.error)
+        self.assertEqual(info.asset_name, "claude-continue-windows-x64.zip")
+
+    def test_non_dict_release_payload_reported_not_raised(self):
+        # the GitHub API returning a non-object (e.g. a list) must surface via .error,
+        # not raise AttributeError out of check().
+        info = update.check(opener=_opener([]), current="0.1.0")
+        self.assertIsNotNone(info.error)
+
+    def test_null_release_body_reported_not_raised(self):
+        # a JSON `null` body decodes to None -> must surface via .error, not raise
+        # AssertionError (the loop breaks with no exception but no data).
+        info = update.check(opener=_opener(None), current="0.1.0")
+        self.assertIsNotNone(info.error)
+
 
 class _FlakyOpener:
     """Fails the first `fail_times` calls with `exc`, then serves `payload`."""
@@ -269,6 +292,18 @@ class TestWindowsDirSwapScript(unittest.TestCase):
         # occurrence fails (a locked one is finished by cleanup_stale_update).
         self.assertEqual(s.count(r'rmdir /S /Q "C:\app.old"'), 2)
 
+    def test_cap_gives_up_without_swap_or_relaunch(self):
+        # when the wait cap expires with our PID STILL alive, jump to :ccgiveup and exit
+        # — never swap (the running app locks its dir) or relaunch (spawn a 2nd instance).
+        lines = update.windows_dir_swap_script(r"C:\app", r"C:\new", relaunch=True, pid=1, wait_s=5).splitlines()
+        cap = next(i for i, ln in enumerate(lines) if ln.startswith("if %_i% GEQ 5 "))
+        self.assertIn("goto ccgiveup", lines[cap])           # cap -> give up (not ccswap)
+        self.assertLess(cap, lines.index(":ccswap"))         # the cap decision precedes the swap
+        tail = "\n".join(lines[lines.index(":ccgiveup"):])   # the give-up path to EOF
+        self.assertNotIn("robocopy", tail)
+        self.assertNotIn("move /Y", tail)
+        self.assertNotIn('start ""', tail)
+
 
 def _make_onedir_zip(d, *, with_exe=True):
     """A minimal one-dir release zip: top-level claude-continue/ (+ exe + _internal)."""
@@ -341,6 +376,24 @@ class TestApplyWindowsDir(unittest.TestCase):
             update._apply_windows_dir(zip_path, tmp, relaunch=True, target_version="v0.7.0")
         with open(exe + update._PENDING_SUFFIX) as f:
             self.assertEqual(f.read().strip(), "v0.7.0")
+
+    def test_no_pending_stamp_when_helper_spawn_fails(self):
+        # the stamp is written only AFTER the helper spawns; a failed spawn must leave
+        # NO stamp (else cleanup_stale_update shows a false "didn't complete" warning
+        # even though the running install was never touched).
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        _, exe = self._install(d)
+        zip_path = _make_onedir_zip(d)
+        tmp = os.path.join(d, "work")
+        os.makedirs(tmp)
+        with mock.patch("claude_continue.update.osenv.no_window_kwargs", return_value={}), \
+             mock.patch("claude_continue.update.osenv.detect", return_value="windows"), \
+             mock.patch("claude_continue.update.sys.executable", exe), \
+             mock.patch("claude_continue.update.subprocess.Popen", side_effect=OSError("nope")):
+            with self.assertRaises(update.UpdateError):
+                update._apply_windows_dir(zip_path, tmp, relaunch=True, target_version="v9.9.9")
+        self.assertFalse(os.path.exists(exe + update._PENDING_SUFFIX))
 
     def test_refuses_path_with_percent(self):
         # a '%' in the install folder triggers cmd var-expansion and would corrupt the
@@ -678,6 +731,54 @@ class TestApplyContract(unittest.TestCase):
                 update._apply_macos("/nope.zip", os.path.join(tmp, "work"), False, bundle)
         self.assertTrue(os.path.isdir(bundle))            # untouched: extract failed first
         self.assertFalse(os.path.exists(bundle + ".old"))
+
+
+class TestMacosRelauncherCap(unittest.TestCase):
+    def test_wait_loop_is_capped(self):
+        # the relaunch helper must not wait forever on a recycled/never-dying PID
+        with mock.patch("claude_continue.update.subprocess.Popen") as popen, \
+             mock.patch("claude_continue.update.osenv.detached_popen_kwargs", return_value={}):
+            update._spawn_macos_relauncher("/Applications/claude-continue.app")
+        path = popen.call_args[0][0][1]  # Popen(["/bin/sh", <path>], ...)
+        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+        with open(path) as f:
+            script = f.read()
+        self.assertIn("kill -0", script)
+        self.assertIn("[ $i -lt 100 ]", script)  # bounded loop, not an infinite kill -0 wait
+
+
+class TestMacosRollbackFailure(unittest.TestCase):
+    def test_failed_restore_surfaces_accurate_error(self):
+        # if the rollback's restore (rename backup -> bundle) ALSO fails, surface an
+        # UpdateError naming the stranded backup, not a raw OSError that hides the cause.
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        work = os.path.join(tmp, "work")
+        os.makedirs(os.path.join(work, "claude-continue.app"))  # the "extracted" new app
+        bundle = os.path.join(tmp, "install", "claude-continue.app")
+        os.makedirs(os.path.join(bundle, "Contents"))
+        n = {"run": 0}
+
+        def fake_run(args, **kw):
+            n["run"] += 1
+            if n["run"] == 1:
+                return subprocess.CompletedProcess(args, 0)   # ditto extract: ok (no-op)
+            raise subprocess.CalledProcessError(1, args)       # ditto install: fail -> rollback
+
+        real_rename = os.rename
+
+        def fake_rename(src, dst):
+            if str(src).endswith(".old"):                      # the rollback RESTORE
+                raise OSError("restore denied")
+            return real_rename(src, dst)                       # the move-aside: real
+
+        with mock.patch.object(update.subprocess, "run", fake_run), \
+             mock.patch.object(update.os, "rename", fake_rename):
+            with self.assertRaises(update.UpdateError) as cm:
+                update._apply_macos("/nope.zip", work, False, bundle)
+        msg = str(cm.exception)
+        self.assertIn(".old", msg)        # names the stranded backup
+        self.assertIn("manually", msg)
 
 
 if __name__ == "__main__":
