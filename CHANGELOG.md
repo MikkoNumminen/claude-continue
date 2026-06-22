@@ -4,6 +4,19 @@ All notable changes to `claude-continue`. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+Fixes from the 2026-06-22 robustness audit (each finding adversarially verified).
+
+### Fixed
+- **Windows scheduled-task wrapper is now cmd-injection / `%`-safe.** The
+  `claude-continue watch` wrapper `.cmd` was built with `list2cmdline`, which quotes
+  for the exe's argv parser but NOT for cmd.exe's batch layer — a config value with a
+  `%` (variable expansion, even inside quotes) or an unquoted `& | < >` (operator)
+  could corrupt or inject into the scheduled command. Tokens are now quoted for the
+  batch context and every `%` doubled. The `schtasks /tr` action path is also quoted,
+  so installing under a spaced path (e.g. `C:\Users\First Last\…`) registers correctly.
+
 ## [0.10.0] — 2026-06-22
 
 ### Added
