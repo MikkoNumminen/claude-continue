@@ -30,26 +30,75 @@ class TestWrapperBody(unittest.TestCase):
         # the spaced/quoted arg is shell-quoted (escape style is shlex's own)
         self.assertIn(shlex.quote("claude -p 'go'"), body)
 
-    def test_windows_body_doubles_percent_and_quotes_operators(self):
+    def test_windows_body_doubles_percent_and_caret_escapes_operators(self):
         # a config value with cmd metacharacters must not expand (%) or inject (&):
-        # % is doubled to a literal, and the token is quoted so & can't split commands.
+        # % is doubled, and operators are caret-escaped so cmd treats them literally.
         body = tasksched.wrapper_body(["cc.exe", "watch", "--exec", "echo %PATH% & del x"], wsl=False)
-        self.assertIn('"echo %%PATH%% & del x"', body)
-        self.assertNotIn("%PATH%", body.replace("%%PATH%%", ""))  # no surviving bare %PATH%
+        self.assertIn("%%PATH%%", body)        # % doubled (no expansion)
+        self.assertIn("^&", body)              # operator caret-escaped (no command split)
+        self.assertNotIn(" & ", body)          # no bare operator survives
 
-    def test_windows_body_quotes_operator_token_without_space(self):
-        # list2cmdline would leave 'a&b' unquoted (no space) -> cmd would run 'b'.
-        body = tasksched.wrapper_body(["cc.exe", "a&b"], wsl=False)
-        self.assertIn('"a&b"', body)
+    def test_windows_body_caret_escapes_embedded_quote_plus_operator(self):
+        # the bug a plain \" falls into: an embedded quote flips cmd's quote-state and
+        # re-exposes the operator. Caret-escaping keeps & literal regardless.
+        body = tasksched.wrapper_body(["cc.exe", 'a" & del x'], wsl=False)
+        self.assertIn("^&", body)
+        self.assertNotIn(" & ", body)
 
 
-class TestCmdBatchQuote(unittest.TestCase):
-    def test_quotes_and_escapes(self):
-        self.assertEqual(tasksched._cmd_batch_quote("watch"), '"watch"')
-        self.assertEqual(tasksched._cmd_batch_quote("a%b"), '"a%%b"')          # % doubled
-        self.assertEqual(tasksched._cmd_batch_quote("a&b"), '"a&b"')            # operator quoted literal
-        self.assertEqual(tasksched._cmd_batch_quote(r"C:\x\y"), r'"C:\x\y"')    # plain backslashes kept
-        self.assertEqual(tasksched._cmd_batch_quote('a"b'), '"a\\"b"')          # embedded quote escaped
+class TestCmdEscaping(unittest.TestCase):
+    def test_argv_quote(self):
+        self.assertEqual(tasksched._argv_quote("watch"), '"watch"')
+        self.assertEqual(tasksched._argv_quote("a b"), '"a b"')
+        self.assertEqual(tasksched._argv_quote('a"b'), '"a\\"b"')          # embedded quote -> \"
+        self.assertEqual(tasksched._argv_quote("C:\\d\\"), '"C:\\d\\\\"')  # trailing \ doubled before "
+
+    def test_cmd_arg_caret_escapes_and_doubles_percent(self):
+        a = tasksched._cmd_arg("echo %PATH% & del x")
+        self.assertIn("%%PATH%%", a)           # % doubled
+        self.assertIn("^&", a)                 # operator caret-escaped
+        self.assertNotIn(" & ", a)
+        self.assertTrue(a.startswith('^"'))    # even the quotes are caret-escaped (no cmd quote-state)
+
+    def test_cmd_command_real_quotes(self):
+        self.assertEqual(tasksched._cmd_command(r"C:\Program Files\cc.exe"), '"C:\\Program Files\\cc.exe"')
+        self.assertEqual(tasksched._cmd_command("a%b.exe"), '"a%%b.exe"')   # % doubled, real quotes
+
+
+@unittest.skipUnless(os.name == "nt", "needs real cmd.exe (Windows)")
+class TestWrapperRoundTrip(unittest.TestCase):
+    def test_args_survive_cmd_intact(self):
+        # the authoritative check: run the generated wrapper through REAL cmd.exe and
+        # confirm every (adversarial) arg reaches the target exe's argv unchanged, with
+        # no operator injection and no % expansion.
+        import json
+        import shutil
+        import sys
+        import tempfile
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        dump = os.path.join(d, "dump.py")
+        with open(dump, "w") as f:
+            f.write("import sys, json\nprint(json.dumps(sys.argv[1:]))\n")
+        tricky = [
+            'claude -p "hi" & echo PWNED',   # embedded quote + operator (the injection case)
+            "Windows Terminal",               # space
+            "a%PATH%b",                       # percent (must stay literal)
+            "a&b", "c|d", "e>f", "g<h", "i^j", "(k)",  # bare operators
+            "C:\\dir\\",                      # trailing backslash
+        ]
+        inner = [sys.executable, dump] + tricky
+        body = tasksched.wrapper_body(inner, wsl=False)
+        cmd_path = os.path.join(d, "run.cmd")
+        with open(cmd_path, "w", newline="") as f:
+            f.write(body)
+        proc = subprocess.run(["cmd", "/c", cmd_path], capture_output=True, text=True)
+        # exactly one output line (dump.py's JSON) — an injected `& echo PWNED` would
+        # add a second line. ("PWNED" itself appears inside the JSON as the arg's literal
+        # value, which is correct: the arg was passed through, not executed.)
+        lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+        self.assertEqual(len(lines), 1, "extra output => a command was injected: %r" % proc.stdout)
+        self.assertEqual(json.loads(lines[0]), tricky)    # every arg round-trips exactly, intact
 
 
 class TestTrValue(unittest.TestCase):
