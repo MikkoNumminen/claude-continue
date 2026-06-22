@@ -681,6 +681,25 @@ class TestOffsetFromClockDST(unittest.TestCase):
                 os.environ["TZ"] = old_tz
             time.tzset()
 
+    @unittest.skipUnless(hasattr(time, "tzset"), "needs time.tzset to pin the timezone")
+    def test_format_reset_field_round_trips_across_spring_forward(self):
+        # the display must mirror offset_from_clock's re-localization: a correction to
+        # 03:30 across the seam must RENDER as "03:30", not "02:30" from a naive
+        # fixed-offset add (which would then overwrite the user's typed value).
+        old_tz = os.environ.get("TZ")
+        os.environ["TZ"] = "America/New_York"
+        time.tzset()
+        try:
+            raw = datetime(2026, 3, 8, 1, 30).astimezone().astimezone(timezone.utc)
+            entry, _ = format_reset_field(raw, offset_from_clock(raw, 3, 30))
+            self.assertEqual(entry, "03:30")  # not "02:30"
+        finally:
+            if old_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old_tz
+            time.tzset()
+
 
 class TestResetControlsState(unittest.TestCase):
     def test_idle_with_estimate_and_offset_enables_both(self):

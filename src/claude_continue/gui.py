@@ -364,8 +364,11 @@ def format_reset_field(raw_reset, offset_seconds: int):
     estimate yet (idle / ccusage down). Pure and testable."""
     if raw_reset is None:
         return ("", "waiting for an active window…")
-    local = raw_reset.astimezone()
-    corrected = local + timedelta(seconds=offset_seconds)
+    local = raw_reset.astimezone()  # the raw estimate, local — for the hint text
+    # Add the offset to the UTC INSTANT, then re-localize — mirroring offset_from_clock.
+    # Adding to `local` (a fixed-offset datetime) would keep the pre-seam offset and
+    # render the wrong wall-clock across a DST transition (the inverse asymmetry).
+    corrected = (raw_reset + timedelta(seconds=offset_seconds)).astimezone()
     entry = corrected.strftime("%H:%M")
     mins = int(round(offset_seconds / 60.0))
     if mins == 0:
