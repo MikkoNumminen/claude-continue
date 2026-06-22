@@ -188,7 +188,10 @@ def check(*, timeout: float = 15.0, opener=_open, current: str | None = None,
                 sleep(1.0 * (attempt + 1))  # 1s, 2s backoff
                 continue
             return UpdateInfo(current, None, False, None, None, error=str(e)[:100])
-    assert data is not None  # the loop either broke with data set or returned above
+    if data is None:
+        # a `null` (or otherwise None-decoding) release body — the loop broke with no
+        # exception but no data either. Honor "Never raises" rather than assert.
+        return UpdateInfo(current, None, False, None, None, error="empty/null release response")
     # "Never raises": malformed release JSON (non-dict payload, an asset missing
     # name/url, etc.) must be reported via .error, not escape as a raw traceback. Use
     # .get() and skip incomplete assets, all under a backstop except.

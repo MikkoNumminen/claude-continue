@@ -160,6 +160,12 @@ class TestCheck(unittest.TestCase):
         info = update.check(opener=_opener([]), current="0.1.0")
         self.assertIsNotNone(info.error)
 
+    def test_null_release_body_reported_not_raised(self):
+        # a JSON `null` body decodes to None -> must surface via .error, not raise
+        # AssertionError (the loop breaks with no exception but no data).
+        info = update.check(opener=_opener(None), current="0.1.0")
+        self.assertIsNotNone(info.error)
+
 
 class _FlakyOpener:
     """Fails the first `fail_times` calls with `exc`, then serves `payload`."""
