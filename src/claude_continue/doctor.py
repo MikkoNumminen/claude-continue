@@ -141,13 +141,17 @@ def _check_action(cfg: Config, *, which, exists, preview, window_titles=None) ->
             return Check("action", WARN, "%s binary %r not found on PATH (must also be on the agent's PATH)" % (kind, argv[0]))
         return Check("action", OK, "headless %s: %s" % (kind, headless))
 
+    # Compute plat ONCE here: it's used both in the resume-capability checks below and
+    # in the "nothing to act on" branch (the keystroke_all case). Computing it inside
+    # the `else` left it undefined on the tmux path -> NameError crashed doctor when a
+    # `--tmux` config reached the empty-preview branch.
+    plat = osenv.detect()
     # tmux is terminal-agnostic and checked before the platform paths (matches
     # action._resume), so a non-iTerm2 / Linux user can opt in anywhere.
     if cfg.tmux:
         if not which("tmux"):
             return Check("action", FAIL, "--tmux needs tmux, not found on PATH")
     else:
-        plat = osenv.detect()
         # Capability check for the resume path.
         if plat == osenv.MACOS:
             if not exists(ITERM_APP):

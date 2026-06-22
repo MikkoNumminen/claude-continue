@@ -38,6 +38,58 @@ def _inner_argv(launch_argv, watch_flags) -> list:
     return list(launch_argv) + ["watch"] + list(watch_flags)
 
 
+def _argv_quote(arg: str) -> str:
+    """Quote one token per the ``CommandLineToArgvW`` / MSVC-runtime rules the target
+    exe parses: wrap in double quotes, escape an embedded ``"`` as ``\\"``, and double
+    any run of backslashes that immediately precedes a ``"`` (incl. the closing one)."""
+    out = ['"']
+    backslashes = 0
+    for ch in arg:
+        if ch == "\\":
+            backslashes += 1
+            continue
+        if ch == '"':
+            out.append("\\" * (backslashes * 2 + 1))  # double the run, +1 to escape the "
+            out.append('"')
+        else:
+            if backslashes:
+                out.append("\\" * backslashes)
+            out.append(ch)
+        backslashes = 0
+    out.append("\\" * (backslashes * 2))  # backslashes before the closing " must be doubled
+    out.append('"')
+    return "".join(out)
+
+
+# cmd.exe metacharacters that a leading ^ makes literal. '%' is NOT here — caret does
+# not make it literal in a batch; it's doubled to %% instead.
+_CMD_META = set('()!^"<>&|')
+
+
+def _cmd_arg(arg: str) -> str:
+    """Embed an *argument* in a console-less ``.cmd`` so BOTH parsers that run in series
+    deliver the exact original token. cmd.exe's batch layer runs first; the exe's
+    ``CommandLineToArgvW`` second. We argv-quote for the exe, then CARET-escape every
+    cmd metacharacter — INCLUDING the quotes — so cmd's quote-state never engages and no
+    operator (``& | < >``) can be live (the trap a plain ``\\"`` falls into: it flips
+    cmd's quote-state and re-exposes operators). ``%`` is doubled so the exe gets a
+    literal percent. After cmd strips the carets, the exe re-parses the argv-quoted form."""
+    out = []
+    for ch in _argv_quote(arg):
+        if ch in _CMD_META:
+            out.append("^")
+        out.append(ch)
+    return "".join(out).replace("%", "%%")
+
+
+def _cmd_command(path: str) -> str:
+    """The command (argv[0]) needs REAL quotes so cmd can resolve a spaced path — its
+    quotes MUST engage cmd's quote-state (caret-escaping them would hide the command from
+    cmd). A program path can't contain ``" < > |``; ``& ^ ( )`` are literal inside the
+    real quotes; ``%`` is doubled."""
+    return '"' + path.replace("%", "%%") + '"'
+
+
 def wrapper_body(inner, *, wsl: bool) -> str:
     """Contents of the wrapper script the task invokes.
 
@@ -47,7 +99,11 @@ def wrapper_body(inner, *, wsl: bool) -> str:
     """
     if wsl:
         return "#!/bin/sh\nexec " + " ".join(shlex.quote(a) for a in inner) + "\n"
-    return "@echo off\r\n" + subprocess.list2cmdline(inner) + "\r\n"
+    # NOT list2cmdline: it quotes for the exe's argv parser but not for cmd.exe's batch
+    # layer (% expansion, & | < > operators, quote-state flips). argv[0] is the command
+    # (real-quoted so cmd resolves a spaced path); the rest are caret-escaped args.
+    parts = [_cmd_command(inner[0])] + [_cmd_arg(a) for a in inner[1:]]
+    return "@echo off\r\n" + " ".join(parts) + "\r\n"
 
 
 def wrapper_path() -> Path:
@@ -63,7 +119,10 @@ def tr_value(wrapper: str, *, wsl: bool, distro: str) -> str:
     if wsl:
         argv = ["wsl.exe"] + (["-d", distro] if distro else []) + ["-e", "/bin/sh", wrapper]
         return subprocess.list2cmdline(argv)
-    return wrapper
+    # Quote the action so Task Scheduler parses a spaced install path correctly
+    # (e.g. %LOCALAPPDATA% under "C:\Users\First Last\..."). The wrapper path is
+    # app-controlled; quoting an unspaced path is harmless.
+    return '"%s"' % wrapper
 
 
 def _write_wrapper(launch_argv, watch_flags) -> str:

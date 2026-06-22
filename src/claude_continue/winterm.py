@@ -354,7 +354,17 @@ def continue_instances(text: str, *, instances=None, dry_run: bool = False,
             out.append(label)
         except (RuntimeError, OSError) as e:  # noqa: PERF203 - per-session isolation is the point
             failures.append("%s: %s" % (label, e))
-    if not out and failures:
-        # nothing landed at all — surface it so the caller can retry/degrade
-        raise RuntimeError("; ".join(failures))
+    if failures:
+        if not out:
+            # nothing landed at all — surface it so the caller can retry/degrade
+            raise RuntimeError("; ".join(failures))
+        # PARTIAL failure: some sessions resumed, some didn't. Don't silently drop the
+        # rest (a failed session is left paused with no signal). Log at WARNING via the
+        # project logger (the watch daemon's stdout sink; Python's last-resort stderr
+        # otherwise) without aborting the successful resumes.
+        from .log import get_logger
+        get_logger().warning(
+            "continue-all: %d of %d session(s) failed to resume: %s",
+            len(failures), len(out) + len(failures), "; ".join(failures),
+        )
     return out

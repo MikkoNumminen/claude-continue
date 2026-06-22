@@ -22,6 +22,37 @@ All notable changes to `claude-continue`. Format follows
   is caught. The GUI correction is session-scoped (it's derived from a live estimate,
   so it isn't persisted across restarts).
 
+### Fixed
+From the 2026-06-22 robustness audit (each finding adversarially verified).
+- **Windows scheduled-task wrapper is now cmd-injection / `%`-safe.** The
+  `claude-continue watch` wrapper `.cmd` was built with `list2cmdline`, which quotes
+  for the exe's argv parser but NOT for cmd.exe's batch layer — a config value with a
+  `%` (variable expansion, even inside quotes) or an unquoted `& | < >` (operator)
+  could corrupt or inject into the scheduled command. Tokens are now quoted for the
+  batch context and every `%` doubled. The `schtasks /tr` action path is also quoted,
+  so installing under a spaced path (e.g. `C:\Users\First Last\…`) registers correctly.
+- **The watch daemon no longer crashes on unexpected `ccusage` output.** If `ccusage`
+  emitted a top-level JSON array, or a numeric timestamp, parsing raised `AttributeError`
+  — which escaped `get_active_block`'s `(KeyError, ValueError, TypeError)` guard and
+  killed the unattended loop. `AttributeError` is now caught too, so any shape drift
+  surfaces as `CcusageUnavailable` (the module's "never crash the daemon" contract).
+- **`doctor` no longer crashes (`NameError`) on a `--tmux` + continue-all config.** The
+  action check referenced `plat` on a path where it hadn't been assigned; it's now
+  computed once up front.
+- **Windows "continue all" surfaces partial failures.** When some Claude sessions
+  resumed and others failed, the failures were silently dropped (a paused session left
+  with no signal). They're now logged at WARNING while the successful resumes still go
+  through.
+- **Self-update error paths hardened.** `update.check()` no longer raises (a malformed
+  release asset, or a non-object API payload, is now reported via `.error` per its
+  "never raises" contract). The Windows swap helper, if its exit-wait cap expires while
+  the app is still alive, now **gives up** instead of swapping a locked folder and
+  relaunching a second instance. The macOS rollback names the stranded `.old` backup if
+  the restore itself fails (instead of a raw `OSError`). The macOS relaunch and
+  self-delete helpers' PID waits are now bounded (a recycled PID can't hang them). And
+  the Windows pending-update stamp is written only after the helper actually spawns, so
+  a failed spawn no longer leaves a false "last update didn't complete" warning.
+
 ## [0.10.0] — 2026-06-22
 
 ### Added
