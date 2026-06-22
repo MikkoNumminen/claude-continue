@@ -28,6 +28,15 @@ Fixes from the 2026-06-22 robustness audit (each finding adversarially verified)
   resumed and others failed, the failures were silently dropped (a paused session left
   with no signal). They're now logged at WARNING while the successful resumes still go
   through.
+- **Self-update error paths hardened.** `update.check()` no longer raises (a malformed
+  release asset, or a non-object API payload, is now reported via `.error` per its
+  "never raises" contract). The Windows swap helper, if its exit-wait cap expires while
+  the app is still alive, now **gives up** instead of swapping a locked folder and
+  relaunching a second instance. The macOS rollback names the stranded `.old` backup if
+  the restore itself fails (instead of a raw `OSError`). The macOS relaunch and
+  self-delete helpers' PID waits are now bounded (a recycled PID can't hang them). And
+  the Windows pending-update stamp is written only after the helper actually spawns, so
+  a failed spawn no longer leaves a false "last update didn't complete" warning.
 
 ## [0.10.0] — 2026-06-22
 
