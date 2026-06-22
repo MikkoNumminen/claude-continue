@@ -71,12 +71,12 @@ def _registered_target() -> str | None:
     """The exe path our App Paths key currently points at, or None if unset/absent.
     Doubles as the 'already registered here' marker so ensure_registered is a no-op
     when nothing moved."""
-    import winreg  # Windows-only stdlib; only reached when _enabled()
     try:
+        import winreg  # Windows-only stdlib; only reached when _enabled()
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _APP_PATHS_KEY) as k:
             val, _ = winreg.QueryValueEx(k, "")  # "" = the key's default value
             return val
-    except OSError:
+    except Exception:  # noqa: BLE001 - absent key OR winreg unavailable -> "not registered"
         return None
 
 

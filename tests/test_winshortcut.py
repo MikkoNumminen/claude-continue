@@ -1,4 +1,5 @@
 import os
+import sys
 import unittest
 from unittest import mock
 
@@ -88,7 +89,7 @@ class TestEnsureRegistered(unittest.TestCase):
         popen.assert_called_once()
 
     def test_never_raises(self):
-        # every step blows up -> ensure_registered swallows it all
+        # every step blows up -> ensure_registered swallows it all (inner guards)
         with mock.patch.object(ws, "_enabled", return_value=True), \
              mock.patch.object(ws, "_registered_target", side_effect=RuntimeError("boom")), \
              mock.patch.object(ws, "_set_app_paths", side_effect=RuntimeError("boom")), \
@@ -98,22 +99,46 @@ class TestEnsureRegistered(unittest.TestCase):
              mock.patch.object(ws.subprocess, "Popen", side_effect=OSError("nope")):
             ws.ensure_registered(target="/app/claude-continue.exe")  # must not raise
 
+    def test_outer_guard_swallows_failure_before_inner_blocks(self):
+        # a failure on the path BEFORE the inner try-blocks (here: building the lnk
+        # path) is caught ONLY by the outer belt-and-suspenders guard. Without it the
+        # exception would propagate and wedge the GUI — so this pins that guard.
+        with mock.patch.object(ws, "_enabled", return_value=True), \
+             mock.patch.object(ws, "start_menu_lnk_path", side_effect=RuntimeError("boom")), \
+             mock.patch.object(ws, "_set_app_paths") as sap, \
+             mock.patch.object(ws.subprocess, "Popen") as popen:
+            ws.ensure_registered(target="/app/claude-continue.exe")  # must not raise
+        sap.assert_not_called()   # blew up before reaching registration
+        popen.assert_not_called()
+
 
 class TestUnregister(unittest.TestCase):
-    def test_removes_lnk_when_on_windows(self):
-        # winreg import fails on the (Linux) test host, but that's swallowed; the .lnk
-        # removal still runs and unregister never raises.
+    def test_removes_lnk_and_app_paths_key_on_windows(self):
+        # Inject a FAKE winreg so the test never touches the real registry (it runs on
+        # Windows CI too, where an unmocked DeleteKey would delete a real HKCU key),
+        # and assert both the .lnk removal and the App Paths key deletion happen.
+        fake = mock.MagicMock()
+        fake.HKEY_CURRENT_USER = "HKCU"
         with mock.patch.object(ws.osenv, "is_windows", return_value=True), \
              mock.patch.object(ws.os.path, "exists", return_value=True), \
-             mock.patch.object(ws.os, "remove") as rm:
+             mock.patch.object(ws.os, "remove") as rm, \
+             mock.patch.dict(sys.modules, {"winreg": fake}):
             ws.unregister()
         rm.assert_called_once()
+        fake.DeleteKey.assert_called_once_with("HKCU", ws._APP_PATHS_KEY)
 
     def test_noop_off_windows(self):
         with mock.patch.object(ws.osenv, "is_windows", return_value=False), \
              mock.patch.object(ws.os, "remove") as rm:
             ws.unregister()
         rm.assert_not_called()
+
+    def test_unregister_never_raises_when_lnk_remove_fails(self):
+        with mock.patch.object(ws.osenv, "is_windows", return_value=True), \
+             mock.patch.object(ws.os.path, "exists", return_value=True), \
+             mock.patch.object(ws.os, "remove", side_effect=OSError("locked")), \
+             mock.patch.dict(sys.modules, {"winreg": mock.MagicMock()}):
+            ws.unregister()  # must not raise
 
 
 if __name__ == "__main__":
