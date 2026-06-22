@@ -4,6 +4,18 @@ All notable changes to `claude-continue`. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.10.0] — 2026-06-22
+
+### Added
+- **Windows: the app registers itself in the Start Menu so the search bar finds it.**
+  On launch the frozen Windows build creates (and keeps current) a Start Menu shortcut
+  plus an `App Paths` entry for `claude-continue.exe`, so typing "claude-continue" in
+  the search bar — or Win+R — opens it. Because the one-dir self-update swaps the
+  install folder's contents in place (the exe path is stable), the shortcut always
+  points at the latest build with no per-update upkeep. It self-heals if the install
+  moves, and `uninstall --app` removes the shortcut + key. Best-effort and Windows-only
+  (no-op from source / other OSes); a failure never blocks the GUI.
+
 ## [0.9.0] — 2026-06-22
 
 Make the Windows build survive antivirus. The one-file `.exe` re-unpacked

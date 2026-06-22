@@ -206,7 +206,11 @@ def cmd_doctor(args) -> int:
 
 
 def cmd_gui(args) -> int:
-    from . import gui, update  # gui module is import-safe; tkinter is imported inside run()
+    from . import gui, update, winshortcut  # gui module is import-safe; tkinter is imported inside run()
+    # Make the Windows search bar find THIS build (frozen Windows only; best-effort,
+    # never raises). Keeps the Start Menu shortcut pointing at the stable install path
+    # across one-dir updates. No-op from source / off Windows.
+    winshortcut.ensure_registered()
     # Tidy a prior Windows self-update; a returned warning means it silently failed.
     # Pass it INTO the GUI: the warning only arises on the frozen windowed Windows
     # build (no console), where printing it would vanish — the Tk dialog is the only
