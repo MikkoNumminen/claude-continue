@@ -76,10 +76,12 @@ def get_active_block(timeout: float = 30.0) -> Block | None:
 
     try:
         return active_block_from_payload(payload)
-    except (KeyError, ValueError, TypeError, AttributeError) as e:
-        # ccusage changed its JSON shape: a renamed/removed field (KeyError), a bad
-        # timestamp string (ValueError), a non-dict top-level payload like `[]` so
-        # `.get("blocks")` hits a list (AttributeError), or a numeric timestamp so
-        # `.endswith("Z")` hits an int (AttributeError). ANY shape drift must surface
-        # as CcusageUnavailable — never crash the daemon (this module's contract).
+    except Exception as e:  # noqa: BLE001 - the never-crash-the-daemon contract (see docstring)
+        # ccusage output is untrusted external data, so ANY parse failure must surface
+        # as CcusageUnavailable rather than crash the daemon: a renamed/removed field
+        # (KeyError), a non-dict payload / numeric timestamp (AttributeError), a bad
+        # timestamp string (ValueError), or a valid-but-extreme timestamp whose UTC
+        # conversion overflows datetime, e.g. year 9999 with an offset (OverflowError).
+        # Deliberately broad — a targeted tuple kept missing cases across review rounds;
+        # the caller treats this as "no signal", never a bug to debug here.
         raise CcusageUnavailable(f"unexpected ccusage JSON shape: {e}") from e
