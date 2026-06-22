@@ -645,12 +645,17 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
     except (TypeError, ValueError):
         _seed_offset = 0
     override: dict[str, Any] = {"offset": _seed_offset, "bad": False}
+    # one-shot flag: grow the window to fit once the first instance poll lands
+    layout: dict[str, Any] = {"fitted": False}
 
     root = tk.Tk()
     root.title("claude-continue")
-    root.geometry("460x600")
+    # Opens at the idle baseline; fit_to_content() (below) grows it once the first
+    # instance poll lands so the listed processes never push the action buttons off
+    # the bottom (the update/remove group is pinned to the window's bottom edge).
+    root.geometry("470x600")
     root.resizable(True, True)
-    root.minsize(440, 560)
+    root.minsize(450, 590)
 
     palette = _PALETTE
     fonts = _build_fonts(root)
@@ -872,6 +877,18 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
     reset_entry.bind("<FocusOut>", commit_reset_time)
     reset_estimate_btn.config(command=use_estimate)
 
+    def fit_to_content():
+        # Grow the window so a populated instances card never pushes the pinned
+        # action buttons off the bottom. Only grows, never shrinks, and never past
+        # the screen — the user can still resize freely afterward. Run once, after
+        # the first instance poll lands (the baseline geometry already fits idle).
+        root.update_idletasks()
+        need_h = root.winfo_reqheight()
+        if need_h > root.winfo_height():
+            cap_h = max(root.winfo_height(), root.winfo_screenheight() - 80)
+            new_w = max(root.winfo_width(), root.winfo_reqwidth())
+            root.geometry("%dx%d" % (new_w, min(need_h, cap_h)))
+
     def refresh():
         watching, stopping = controller.is_watching(), controller.is_stopping()
         mode = "quota" if watch_mode["quota"] else "continue"
@@ -909,6 +926,9 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
             live = watching and not watch_mode["quota"]
             sessions_label.config(text=format_sessions(
                 poll["sessions"], poll["sessions_note"], watching=live, cfg=app_cfg))
+        if not layout["fitted"] and poll["sessions"] is not None:
+            layout["fitted"] = True  # first real instance list — size to fit it once
+            fit_to_content()
         render_reset_field()
         root.after(1000, refresh)
 
