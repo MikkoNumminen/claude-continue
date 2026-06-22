@@ -20,6 +20,7 @@ DEFAULT_FILTER = ["claude", "✳"]
 _BOOL_FIELDS = {"skip_busy", "all_sessions", "force", "keystroke", "keystroke_all", "tmux", "start_window"}
 _INT_FIELDS = {
     "buffer",
+    "reset_offset",
     "verify_delay",
     "poll_interval",
     "retry_interval",
@@ -66,6 +67,12 @@ class Config:
 
     # --- timing ---
     buffer: int = 90  # seconds past the reset before firing
+    # Seconds to add to ccusage's estimated reset before firing — a correction for
+    # a systematically-wrong estimate. ccusage floors the window start to the whole
+    # hour, so its reset estimate runs EARLY by the first message's minutes-past-the
+    # -hour; this offsets that. Set via the GUI "Fire at" field; 0 = trust the
+    # estimate. May be negative (estimate late). NOT clamped (0 is the valid default).
+    reset_offset: int = 0
     verify_delay: int = 90  # seconds to wait after firing before re-reading ccusage
     poll_interval: int = 600  # seconds between polls while idle (no active block)
     retry_interval: int = 120  # seconds between retries when the window hasn't rolled yet

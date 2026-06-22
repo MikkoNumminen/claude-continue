@@ -15,10 +15,10 @@ import logging
 import threading
 import time
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from . import __version__, ccusage, iterm, osenv, tmux, update, watch, winterm
+from . import __version__, ccusage, iterm, osenv, schedule, tmux, update, watch, winterm
 from .action import ActionError
 from .config import CONFIG_PATH, resolve
 from .lock import AlreadyRunning
@@ -335,6 +335,77 @@ def should_annotate_continue(watching, quota, keystroke_all):
     return bool(watching and not quota and keystroke_all)
 
 
+def offset_from_clock(raw_reset, hh: int, mm: int) -> int:
+    """Seconds to add to the ccusage estimate ``raw_reset`` (tz-aware UTC) so firing
+    lands on the local wall-clock time HH:MM the user typed in the "Fire at" field.
+
+    Picks the HH:MM occurrence NEAREST the estimate (within ±1 day), so a late-evening
+    estimate corrected to an after-midnight time resolves to "20 min later", not "23h
+    earlier" — the flooring error is under an hour, so nearest is unambiguous. Pure
+    and testable. Returns a signed second count (negative if the real reset is earlier
+    than the estimate).
+
+    DST-correct: each candidate is built as a NAIVE local wall-clock time and localized
+    with ``.astimezone()`` (which reads the OS zone, DST and all), so a target on the
+    far side of a spring-forward / fall-back seam gets the offset actually in effect at
+    that wall-clock time — not the estimate's offset. (A plain ``.replace(hour=...)`` on
+    the estimate would pin the wrong offset and schedule the fire up to an hour off.)"""
+    naive = raw_reset.astimezone().replace(hour=hh, minute=mm, second=0, microsecond=0, tzinfo=None)
+    candidates = [(naive + timedelta(days=d)).astimezone() for d in (-1, 0, 1)]
+    best = min(candidates, key=lambda c: abs((c - raw_reset).total_seconds()))
+    return int(round((best - raw_reset).total_seconds()))
+
+
+def format_reset_field(raw_reset, offset_seconds: int):
+    """Render the GUI "Fire at" control as ``(entry_text, hint_text)``.
+
+    ``entry_text`` is the corrected fire time (estimate + offset) as local HH:MM;
+    ``hint_text`` explains what's applied. ``('', 'waiting…')`` when there's no
+    estimate yet (idle / ccusage down). Pure and testable."""
+    if raw_reset is None:
+        return ("", "waiting for an active window…")
+    local = raw_reset.astimezone()
+    corrected = local + timedelta(seconds=offset_seconds)
+    entry = corrected.strftime("%H:%M")
+    mins = int(round(offset_seconds / 60.0))
+    if mins == 0:
+        # 0, or a sub-minute correction that rounds to 0 — the entry shows the same
+        # HH:MM as the estimate, so read it as "on the estimate", not "+0m applied".
+        return (entry, "auto-estimate (resets %s) — edit if it's landing wrong" % local.strftime("%H:%M"))
+    return (entry, "estimate %s, %+dm correction applied to every reset" % (local.strftime("%H:%M"), mins))
+
+
+def parse_reset_input(raw_reset, text: str):
+    """Pure core of the GUI "Fire at" commit: turn the typed text into a correction.
+
+    Returns ``(offset_seconds, error)``:
+    - ``(None, None)``  — no change to apply: no estimate yet, OR an empty field. An
+      empty field is a no-op (NOT a clear), so an accidental blur/alt-tab mid-edit
+      can't silently wipe a good correction — clearing is the explicit "use estimate".
+    - ``(secs, None)``  — a valid HH:MM, parsed to a signed offset vs the estimate.
+    - ``(None, msg)``   — invalid input; ``msg`` is the error to show.
+
+    Kept Tk-free so the parse/validate branching is unit-testable (the widget glue
+    in ``run()`` is not)."""
+    if raw_reset is None or not text.strip():
+        return (None, None)
+    try:
+        hh, mm = schedule.parse_hhmm(text)
+    except ValueError:
+        return (None, "enter a 24-hour time like 17:42")
+    return (offset_from_clock(raw_reset, hh, mm), None)
+
+
+def reset_controls_state(*, watching: bool, has_estimate: bool, offset: int):
+    """``(entry_enabled, estimate_btn_enabled)`` for the "Fire at" controls. The field
+    locks while a watch runs (settings apply at start) or before an estimate exists to
+    correct against; the "use estimate" button is dead when already on the estimate
+    (offset 0). Pure, so the lock logic is unit-testable apart from the Tk glue."""
+    entry_enabled = not watching and has_estimate
+    btn_enabled = not watching and offset != 0
+    return (entry_enabled, btn_enabled)
+
+
 def update_button_color(info, *, frozen):
     """Tint for the Update button: green when an installable update is available,
     gray when up-to-date (or not installable), None when unknown (no check yet /
@@ -423,8 +494,20 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
     upd: dict[str, Any] = {"phase": "idle", "info": None, "msg": "", "error": None, "auto": False}
     # self-removal state: idle -> removing -> done (quit; the helper deletes the app) / error
     rem: dict[str, Any] = {"phase": "idle", "error": None}
-    # which mode the running watch is in, so the right button shows "Stop"
-    watch_mode: dict[str, Any] = {"quota": False}
+    # which mode the running watch is in, so the right button shows "Stop"; "offset"
+    # is the correction the running worker was started with — the countdown reads this
+    # snapshot (not the live field), so a mid-watch edit can't make the label lie.
+    watch_mode: dict[str, Any] = {"quota": False, "offset": 0}
+    # user override of the fire time: a signed second correction to ccusage's reset
+    # estimate (the "Fire at" field). Seeded from config (rounded to whole minutes —
+    # the field is minute-granular) so a CLI/env value pre-fills it; a junk config
+    # value degrades to 0 rather than crashing the zero-config GUI at startup. "bad"
+    # holds a pending invalid-input note so refresh() doesn't wipe it.
+    try:
+        _seed_offset = int(round(float(app_cfg.reset_offset) / 60.0)) * 60
+    except (TypeError, ValueError):
+        _seed_offset = 0
+    override: dict[str, Any] = {"offset": _seed_offset, "bad": False}
 
     root = tk.Tk()
     root.title("claude-continue")
@@ -447,6 +530,19 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
     sessions_label.pack(fill="x", padx=16, pady=(0, 10))
     explain = tk.Label(root, text="", fg="#555", wraplength=430, justify="center")
     explain.pack(padx=16, pady=(0, 10))
+    # "Fire at" row: the reset time both buttons act on. Pre-filled with ccusage's
+    # estimate; edit it when the estimate is landing wrong and the gap is reused on
+    # every later window (see offset_from_clock / format_reset_field).
+    reset_frame = tk.Frame(root)
+    reset_frame.pack()
+    tk.Label(reset_frame, text="Fire at:").pack(side="left")
+    reset_entry = tk.Entry(reset_frame, width=6, justify="center")
+    reset_entry.pack(side="left", padx=(4, 6))
+    reset_estimate_btn = tk.Button(reset_frame, text="use estimate", fg="#36c", borderwidth=0,
+                                   highlightthickness=0, font=tkfont.Font(size=10))
+    reset_estimate_btn.pack(side="left")
+    reset_hint = tk.Label(root, text="", fg="#777", wraplength=420, font=tkfont.Font(size=10))
+    reset_hint.pack(pady=(0, 8))
     button = tk.Button(root, text="▶  Continue terminals", width=24, height=2)
     button.pack()
     quota_button = tk.Button(root, text="＋  Start quota", width=24)
@@ -530,9 +626,14 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
         reset_at = poll["reset_at"]
         if reset_at is None:
             return "watching…"
-        secs = max(0, int((reset_at - datetime.now(timezone.utc)).total_seconds()))
+        # show the CORRECTED reset (estimate + the offset this watch was STARTED with —
+        # watch_mode["offset"], a snapshot, not the live field), so the countdown always
+        # matches when the worker will actually fire even if the field is edited.
+        corrected = reset_at + timedelta(seconds=watch_mode["offset"])
+        secs = max(0, int((corrected - datetime.now(timezone.utc)).total_seconds()))
         hours, mins = divmod(secs // 60, 60)
-        return "next reset %s · in %dh %02dm" % (reset_at.astimezone().strftime("%H:%M"), hours, mins)
+        tag = " (corrected)" if watch_mode["offset"] else ""
+        return "next reset %s%s · in %dh %02dm" % (corrected.astimezone().strftime("%H:%M"), tag, hours, mins)
 
     def set_buttons(active, stopping=False):
         # active: None (idle/error), "continue", or "quota". The active mode's
@@ -546,6 +647,59 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
         else:  # quota
             quota_button.config(text="Stopping…" if stopping else "⏹  Stop", state="disabled" if stopping else "normal")
             button.config(text="▶  Continue terminals", state="disabled")
+
+    def render_reset_field():
+        # Repaint the "Fire at" entry/hint from the live estimate + current offset.
+        # Skipped while the user is typing (don't stomp the field) or while an invalid
+        # value is pending (leave the red hint up until they fix it or reset).
+        if override["bad"] or root.focus_get() is reset_entry:
+            return
+        entry_text, hint_text = format_reset_field(poll["reset_at"], override["offset"])
+        if reset_entry.get() != entry_text:
+            reset_entry.config(state="normal")  # an Entry must be enabled to edit it
+            reset_entry.delete(0, "end")
+            reset_entry.insert(0, entry_text)
+        reset_hint.config(text=hint_text, fg="#777")
+        # Lock the field while a watch runs (settings apply at start) or before an
+        # estimate exists (nothing to correct against yet) — pure decision in
+        # reset_controls_state so it's unit-tested apart from this Tk glue.
+        watching = controller.is_watching() or controller.is_stopping()
+        entry_enabled, btn_enabled = reset_controls_state(
+            watching=watching, has_estimate=poll["reset_at"] is not None, offset=override["offset"])
+        reset_entry.config(state="normal" if entry_enabled else "disabled")
+        reset_estimate_btn.config(state="normal" if btn_enabled else "disabled")
+
+    def commit_reset_time(*_):
+        # Parse the typed time into a signed offset vs the current estimate (pure
+        # logic in parse_reset_input). Invalid input flags "bad" so the red hint
+        # survives the next refresh; a valid value (or "use estimate") clears it.
+        if controller.is_watching() or controller.is_stopping():
+            return  # settings are locked while watching; ignore a stray late commit
+        offset, error = parse_reset_input(poll["reset_at"], reset_entry.get())
+        if error is not None:
+            override["bad"] = True
+            reset_hint.config(text=error, fg="#a00")
+            return
+        if offset is None:
+            return  # no estimate to correct against yet — leave the field as-is
+        override["offset"] = offset
+        override["bad"] = False
+        render_reset_field()
+
+    def use_estimate():
+        override["offset"] = 0
+        override["bad"] = False
+        render_reset_field()
+
+    def commit_on_return(_e):
+        commit_reset_time()
+        if not override["bad"]:
+            root.focus_set()  # leave the field so render repaints the canonical hint
+        return "break"        # don't ring the bell / insert a newline
+
+    reset_entry.bind("<Return>", commit_on_return)
+    reset_entry.bind("<FocusOut>", commit_reset_time)
+    reset_estimate_btn.config(command=use_estimate)
 
     def refresh():
         watching, stopping = controller.is_watching(), controller.is_stopping()
@@ -587,14 +741,21 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
             live = watching and not watch_mode["quota"]
             sessions_label.config(text=format_sessions(
                 poll["sessions"], poll["sessions_note"], watching=live, cfg=app_cfg))
+        render_reset_field()
         root.after(1000, refresh)
 
     def start_watch(quota):
         if controller.is_watching() or controller.is_stopping():
             return
+        # Starting commits to the last good "Fire at" value; clear any stale
+        # invalid-input flag so the field shows the offset the watch actually uses.
+        override["bad"] = False
         # "Start quota" must open a window even if exec_cmd is configured (exec
         # otherwise wins in action.perform); "Continue terminals" keeps exec_cmd.
-        cfg = replace(app_cfg, start_window=True, exec_cmd=None) if quota else replace(app_cfg, start_window=False)
+        # reset_offset applies the user's reset-time correction to both buttons.
+        cfg = (replace(app_cfg, start_window=True, exec_cmd=None, reset_offset=override["offset"])
+               if quota else
+               replace(app_cfg, start_window=False, reset_offset=override["offset"]))
         try:
             from . import action
             action.perform(cfg, dry_run=True)  # validate up front; fail clearly
@@ -602,7 +763,9 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
             note.config(text=str(e), fg="#a00")
             return
         watch_mode["quota"] = quota
+        watch_mode["offset"] = override["offset"]  # snapshot the offset the worker runs with
         controller.start(cfg)
+        render_reset_field()  # lock the field NOW, not on the next refresh tick (~1s later)
         poll_ccusage()
 
     def toggle_continue():
@@ -774,8 +937,12 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
         root.after(_UPDATE_RECHECK_MS, update_recheck_loop)
 
     # re-check when the window regains focus, so it refreshes the moment you look
-    # (debounced inside check_for_update, so dialog closes / focus storms are cheap)
-    root.bind("<FocusIn>", lambda e: check_for_update(auto=True))
+    # (update check is debounced; poll_ccusage's busy-guard makes a refresh cheap).
+    # The ccusage poll keeps the idle "Fire at" estimate current before you start.
+    def on_focus_in(_e):
+        check_for_update(auto=True)
+        poll_ccusage()
+    root.bind("<FocusIn>", on_focus_in)
 
     def poll_loop():
         if controller.is_watching():
@@ -795,6 +962,7 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
 
     root.protocol("WM_DELETE_WINDOW", on_close)
     poll_sessions()  # populate the instances panel immediately
+    poll_ccusage()   # fetch the reset estimate so "Fire at" pre-fills before watching
     refresh()
     root.after(30000, poll_loop)
     root.after(_SESSION_POLL_IDLE_MS, sessions_loop)

@@ -20,6 +20,21 @@ class TestNextTarget(unittest.TestCase):
         end = utc(2026, 6, 14, 6)
         self.assertEqual(schedule.next_target(_block(end), 90), end + timedelta(seconds=90))
 
+    def test_offset_defaults_to_zero(self):
+        end = utc(2026, 6, 14, 6)
+        self.assertEqual(schedule.next_target(_block(end), 90, 0), schedule.next_target(_block(end), 90))
+
+    def test_positive_offset_pushes_fire_later(self):
+        # a +42m correction for an estimate that runs early: reset + offset + buffer
+        end = utc(2026, 6, 14, 6)
+        self.assertEqual(schedule.next_target(_block(end), 90, 42 * 60),
+                         end + timedelta(seconds=42 * 60 + 90))
+
+    def test_negative_offset_pulls_fire_earlier(self):
+        end = utc(2026, 6, 14, 6)
+        self.assertEqual(schedule.next_target(_block(end), 90, -20 * 60),
+                         end + timedelta(seconds=-20 * 60 + 90))
+
 
 class TestFixedTarget(unittest.TestCase):
     def test_at_today_if_future(self):

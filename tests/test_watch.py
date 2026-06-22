@@ -95,6 +95,69 @@ class TestWatchLoop(unittest.TestCase):
         self.assertEqual(len(fired), 1)
         self.assertEqual(fired[0], T0 + timedelta(seconds=90))
 
+    def test_reset_offset_shifts_fire_time(self):
+        # a +42m correction makes the watch fire at reset + offset + buffer, not
+        # reset + buffer — the GUI "Fire at" override flowing through the loop.
+        T0 = utc(2026, 6, 14, 6)
+        st = {"rolled": False}
+        fired = []
+        fc = FakeClock(T0 - timedelta(minutes=10))
+
+        def gb(timeout=30):
+            return block(2, T0 + timedelta(hours=5)) if st["rolled"] else block(1, T0)
+
+        def perform(c, dry_run=False):
+            fired.append(fc.now())
+            st["rolled"] = True
+            return ["s"]
+
+        watch.run(cfg(reset_offset=42 * 60), clock=fc.now, sleep=fc.sleep, get_block=gb,
+                  perform=perform, stop=lambda: False, use_lock=False, max_fires=1)
+        self.assertEqual(len(fired), 1)
+        self.assertEqual(fired[0], T0 + timedelta(seconds=42 * 60 + 90))
+
+    def test_quota_mode_with_active_block_applies_offset(self):
+        # both GUI buttons honour the correction: quota mode with an active window
+        # fires at reset + offset + buffer too (not just the resume button).
+        T0 = utc(2026, 6, 14, 6)
+        st = {"rolled": False}
+        fired = []
+        fc = FakeClock(T0 - timedelta(minutes=10))
+
+        def gb(timeout=30):
+            return block(2, T0 + timedelta(hours=5)) if st["rolled"] else block(1, T0)
+
+        def perform(c, dry_run=False):
+            fired.append(fc.now())
+            st["rolled"] = True
+            return ["open window"]
+
+        watch.run(cfg(start_window=True, reset_offset=30 * 60), clock=fc.now, sleep=fc.sleep,
+                  get_block=gb, perform=perform, stop=lambda: False, use_lock=False, max_fires=1)
+        self.assertEqual(len(fired), 1)
+        self.assertEqual(fired[0], T0 + timedelta(seconds=30 * 60 + 90))
+
+    def test_negative_offset_with_target_in_past_fires_promptly(self):
+        # a -30m correction whose corrected target is already behind "now" must fire
+        # at once (sleep_until returns "reached" immediately) — not hang or spin.
+        T0 = utc(2026, 6, 14, 6)
+        st = {"rolled": False}
+        fired = []
+        fc = FakeClock(T0)  # now == reset, so target = reset - 30m + 90s is in the past
+
+        def gb(timeout=30):
+            return block(2, T0 + timedelta(hours=5)) if st["rolled"] else block(1, T0)
+
+        def perform(c, dry_run=False):
+            fired.append(fc.now())
+            st["rolled"] = True
+            return ["s"]
+
+        watch.run(cfg(reset_offset=-30 * 60), clock=fc.now, sleep=fc.sleep, get_block=gb,
+                  perform=perform, stop=lambda: False, use_lock=False, max_fires=1)
+        self.assertEqual(len(fired), 1)
+        self.assertEqual(fired[0], T0)  # fired at "now", the past target didn't delay or loop
+
     def test_retries_until_window_rolls(self):
         T0 = utc(2026, 6, 14, 6)
         st = {"fires": 0}

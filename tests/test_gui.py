@@ -2,7 +2,7 @@ import os
 import threading
 import time
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import _support  # noqa: F401
 
@@ -13,7 +13,11 @@ from claude_continue.gui import (
     WatchController,
     effective_cfg,
     format_instances,
+    format_reset_field,
     format_sessions,
+    offset_from_clock,
+    parse_reset_input,
+    reset_controls_state,
     should_annotate_continue,
     should_auto_recheck,
     update_button_color,
@@ -571,6 +575,160 @@ class TestUpdateDecision(unittest.TestCase):
         info = UpdateInfo("0.3.0", "v0.4.0", True, "a.zip", "https://x")
         kind, _ = update_decision(info, frozen=True)
         self.assertEqual(kind, "prompt")
+
+
+def _local_raw(h, m=0):
+    """A tz-aware UTC datetime whose LOCAL wall-clock is h:m — so the offset/field
+    helpers (which call .astimezone()) are deterministic regardless of the test
+    machine's timezone."""
+    return datetime(2026, 6, 14, h, m).astimezone().astimezone(timezone.utc)
+
+
+class TestOffsetFromClock(unittest.TestCase):
+    def test_later_time_is_positive_offset(self):
+        # estimate resets 17:00 local; the real reset is 17:42 -> +42m correction
+        self.assertEqual(offset_from_clock(_local_raw(17, 0), 17, 42), 42 * 60)
+
+    def test_earlier_time_is_negative_offset(self):
+        self.assertEqual(offset_from_clock(_local_raw(17, 30), 17, 10), -20 * 60)
+
+    def test_zero_when_equal(self):
+        self.assertEqual(offset_from_clock(_local_raw(9, 0), 9, 0), 0)
+
+    def test_wraps_to_nearest_across_midnight(self):
+        # estimate 23:50; 00:10 means 20 min LATER (next day), not 23h40m earlier
+        self.assertEqual(offset_from_clock(_local_raw(23, 50), 0, 10), 20 * 60)
+
+    def test_wraps_backward_across_midnight(self):
+        # estimate 00:05; 23:55 means 10 min EARLIER (previous day), not ~24h later
+        self.assertEqual(offset_from_clock(_local_raw(0, 5), 23, 55), -10 * 60)
+
+
+class TestFormatResetField(unittest.TestCase):
+    def test_none_waits_for_a_window(self):
+        entry, hint = format_reset_field(None, 0)
+        self.assertEqual(entry, "")
+        self.assertIn("waiting", hint)
+
+    def test_no_offset_shows_the_estimate(self):
+        entry, hint = format_reset_field(_local_raw(17, 0), 0)
+        self.assertEqual(entry, "17:00")
+        self.assertIn("auto-estimate", hint)
+        self.assertIn("17:00", hint)
+
+    def test_offset_shifts_entry_and_explains_correction(self):
+        entry, hint = format_reset_field(_local_raw(17, 0), 42 * 60)
+        self.assertEqual(entry, "17:42")           # corrected fire time
+        self.assertIn("17:00", hint)               # the raw estimate
+        self.assertIn("+42m", hint)                # the applied correction
+        self.assertIn("every reset", hint)         # reused, not one-shot
+
+    def test_negative_offset_shows_signed_correction(self):
+        entry, hint = format_reset_field(_local_raw(17, 30), -20 * 60)
+        self.assertEqual(entry, "17:10")
+        self.assertIn("-20m", hint)
+
+    def test_sub_minute_offset_reads_as_estimate_not_plus_zero(self):
+        # a nonzero correction that rounds to 0 minutes (e.g. a 20s CLI --reset-offset)
+        # must NOT claim "+0m correction applied" — it reads as the plain estimate.
+        entry, hint = format_reset_field(_local_raw(17, 0), 20)
+        self.assertIn("auto-estimate", hint)
+        self.assertNotIn("+0m", hint)
+        self.assertNotIn("correction applied", hint)
+
+    def test_field_round_trips_through_offset_from_clock(self):
+        # typing the displayed entry text back in yields the same offset (the
+        # property the GUI relies on so a Return on an unchanged field is a no-op)
+        raw = _local_raw(14, 0)
+        entry, _ = format_reset_field(raw, 42 * 60)
+        hh, mm = (int(p) for p in entry.split(":"))
+        self.assertEqual(offset_from_clock(raw, hh, mm), 42 * 60)
+
+
+class TestOffsetFromClockDST(unittest.TestCase):
+    @unittest.skipUnless(hasattr(time, "tzset"), "needs time.tzset to pin the timezone")
+    def test_offset_is_real_elapsed_across_spring_forward(self):
+        # The correction must be REAL elapsed seconds, not naive wall-clock delta:
+        # building the target with .replace() on the estimate's fixed offset would be
+        # an hour wrong across a DST seam. America/New_York springs 02:00->03:00 on
+        # 2026-03-08, so 01:30 EST -> 03:30 EDT is only 1h of real time, not 2h.
+        old_tz = os.environ.get("TZ")
+        os.environ["TZ"] = "America/New_York"
+        time.tzset()
+        try:
+            raw = datetime(2026, 3, 8, 1, 30).astimezone().astimezone(timezone.utc)
+            self.assertEqual(offset_from_clock(raw, 3, 30), 3600)  # 1h real, not 7200
+        finally:
+            if old_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old_tz
+            time.tzset()
+
+    @unittest.skipUnless(hasattr(time, "tzset"), "needs time.tzset to pin the timezone")
+    def test_offset_is_real_elapsed_across_fall_back(self):
+        # 2026-11-01 falls back 02:00->01:00; 00:30 EDT -> 03:30 EST is 4h of real time.
+        old_tz = os.environ.get("TZ")
+        os.environ["TZ"] = "America/New_York"
+        time.tzset()
+        try:
+            raw = datetime(2026, 11, 1, 0, 30).astimezone().astimezone(timezone.utc)
+            self.assertEqual(offset_from_clock(raw, 3, 30), 4 * 3600)  # 4h real, not 3h
+        finally:
+            if old_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old_tz
+            time.tzset()
+
+
+class TestResetControlsState(unittest.TestCase):
+    def test_idle_with_estimate_and_offset_enables_both(self):
+        self.assertEqual(reset_controls_state(watching=False, has_estimate=True, offset=42 * 60),
+                         (True, True))
+
+    def test_watching_locks_everything(self):
+        # settings apply at start, so the field + button are dead while watching
+        self.assertEqual(reset_controls_state(watching=True, has_estimate=True, offset=42 * 60),
+                         (False, False))
+
+    def test_no_estimate_disables_the_field(self):
+        # nothing to correct against yet -> field locked (button also dead at offset 0)
+        self.assertEqual(reset_controls_state(watching=False, has_estimate=False, offset=0),
+                         (False, False))
+
+    def test_zero_offset_disables_only_the_use_estimate_button(self):
+        # already on the estimate -> "use estimate" is a no-op, but the field stays open
+        self.assertEqual(reset_controls_state(watching=False, has_estimate=True, offset=0),
+                         (True, False))
+
+
+class TestParseResetInput(unittest.TestCase):
+    def test_no_estimate_yet_is_a_noop(self):
+        # raw None -> (None, None): nothing to correct against, leave the field as-is
+        self.assertEqual(parse_reset_input(None, "17:42"), (None, None))
+
+    def test_empty_field_is_a_noop_not_a_clear(self):
+        # empty (or whitespace) -> (None, None): a blur/alt-tab mid-edit must NOT wipe
+        # a good correction; clearing is the explicit "use estimate" button instead.
+        self.assertEqual(parse_reset_input(_local_raw(17, 0), ""), (None, None))
+        self.assertEqual(parse_reset_input(_local_raw(17, 0), "   "), (None, None))
+
+    def test_valid_time_parses_to_signed_offset(self):
+        offset, error = parse_reset_input(_local_raw(17, 0), "17:42")
+        self.assertEqual(offset, 42 * 60)
+        self.assertIsNone(error)
+
+    def test_valid_earlier_time_is_negative(self):
+        offset, error = parse_reset_input(_local_raw(17, 30), "17:10")
+        self.assertEqual(offset, -20 * 60)
+        self.assertIsNone(error)
+
+    def test_invalid_time_returns_error_not_offset(self):
+        for bad in ["nope", "25:00", "9", "17:99", "1742"]:
+            offset, error = parse_reset_input(_local_raw(17, 0), bad)
+            self.assertIsNone(offset, bad)
+            self.assertIsNotNone(error, bad)
 
 
 if __name__ == "__main__":
