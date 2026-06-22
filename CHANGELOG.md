@@ -4,6 +4,22 @@ All notable changes to `claude-continue`. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.12.0] — 2026-06-23
+
+### Changed
+- **Redesigned the GUI for a clean, modern look.** The watch window is now a calm,
+  cohesive interface instead of an unstyled default-Tk dialog: a restyled `clam`
+  ttk theme with one warm-neutral palette and a single terracotta accent, a real
+  filled status dot whose colour tracks state (grey idle / green watching / amber
+  stopping / red error), the running Claude instances in their own bordered card
+  with monospace-aligned `name … pid` columns, a clear type hierarchy, and a
+  weighted primary *Continue terminals* action paired with a quieter *Start quota*
+  and a subtle *Remove app…* link. The window now also grows once to fit the
+  instance list so the action buttons never clip. **Purely visual** — every
+  button, field and binding behaves exactly as before. Still stdlib-only
+  (`tkinter`/`tkinter.ttk`), with a UI/monospace font stack that falls back
+  gracefully when a preferred family isn't installed.
+
 ## [0.11.0] — 2026-06-22
 
 ### Added
