@@ -4,7 +4,7 @@ All notable changes to `claude-continue`. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.11.0] — 2026-06-22
 
 ### Added
 - **Pick the reset time the watcher fires on (GUI "Fire at" field + `reset_offset`).**
