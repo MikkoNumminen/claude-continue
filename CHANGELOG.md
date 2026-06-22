@@ -4,6 +4,23 @@ All notable changes to `claude-continue`. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.12.1] — 2026-06-23
+
+### Fixed
+- **Windows self-update no longer silently fails when the install folder is held
+  open.** The updater swapped the install by renaming the whole directory aside,
+  which Windows refuses while any process holds that folder open — an Explorer
+  window on it, antivirus scanning, or another process whose working directory it is
+  — so the swap didn't complete and you stayed on the old version (the "the last
+  update didn't complete" warning). When the rename can't proceed the helper now
+  falls back to an **in-place file overwrite**, which only needs file-level writes
+  (allowed even on a held directory). It backs the install up first and restores it
+  if the overwrite fails — and, crucially, keeps that backup and refuses to relaunch
+  if the restore itself can't finish — so a previously-working install is never left
+  half-updated or bricked. The atomic-rename path used when the folder is free is
+  unchanged. Both paths (and the held-directory and overwrite-failure recovery
+  cases) are validated by integration tests that run the real swap script on Windows.
+
 ## [0.12.0] — 2026-06-23
 
 ### Changed
