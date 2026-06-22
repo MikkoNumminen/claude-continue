@@ -315,6 +315,141 @@ _NOTE_WARN = "#a00"
 _NOTE_OK = "#2a2"
 
 
+# --- visual theme -----------------------------------------------------------
+# A calm, light palette with ONE warm accent (terracotta) used only for the
+# primary action and the focused field. The status dot carries semantic colour
+# (grey idle / green watching / amber stopping / red error); everything else is
+# neutral text on a near-white surface. Driven entirely through a restyled
+# ``clam`` ttk theme so the same drawn look renders on macOS, Windows and Linux
+# (the native aqua/win themes ignore widget colours — clam doesn't).
+_PALETTE = {
+    "bg": "#f3f2ef",        # warm near-white window background
+    "surface": "#ffffff",   # raised card (instances panel)
+    "border": "#e3e0da",    # hairline border / field outline
+    "text": "#23201d",      # near-black, slightly warm body text
+    "muted": "#736d65",     # secondary text (detail, explanation)
+    "faint": "#9a948b",     # tertiary hints (Fire-at hint, update status)
+    "accent": "#b2531d",    # warm terracotta — the single accent
+    "accent_hi": "#974618",  # accent pressed/hover
+    "accent_fg": "#ffffff",  # text on the accent button
+    "sec_text": "#3a352f",  # secondary-button label
+    "sec_hi": "#f0eee9",    # secondary/update button hover fill
+    "field": "#ffffff",     # entry field background
+    "idle": "#bdb8b0",      # dot: idle
+    "watching": "#2f8a3e",  # dot: watching
+    "stopping": "#cf8a1c",  # dot: stopping
+    "error": "#c0392b",     # dot: stopped on error
+    "disabled_bg": "#dcd9d3",
+    "disabled_fg": "#a59f96",
+}
+_DOT_PX = 20  # diameter of the status indicator canvas dot
+
+# Preferred UI / monospace families, best-first. The first one actually installed
+# wins; if none are present we fall back to Tk's own default family, so the app
+# never depends on a specific font being available (cross-platform requirement).
+_UI_FONT_STACK = ("Segoe UI", "SF Pro Text", "Helvetica Neue", "Inter",
+                  "Roboto", "Cantarell", "DejaVu Sans", "Arial")
+_MONO_FONT_STACK = ("Cascadia Mono", "Cascadia Code", "SF Mono", "Menlo",
+                    "Consolas", "Roboto Mono", "DejaVu Sans Mono", "Courier New")
+
+
+def _pick_family(available, preferred, fallback):
+    """First family in ``preferred`` that's installed (``available`` is the set of
+    family names from ``tkfont.families()``), else ``fallback``. Pure, so the
+    graceful-fallback logic is unit-testable without a display."""
+    for family in preferred:
+        if family in available:
+            return family
+    return fallback
+
+
+def _build_fonts(root):  # pragma: no cover - needs a display; logic is in _pick_family
+    """Named ``tkfont.Font`` objects for the type hierarchy, bound to ``root``.
+    Families come from the stacks above with a fall-back to Tk's defaults."""
+    from tkinter import font as tkfont
+    available = set(tkfont.families(root))
+    ui = _pick_family(available, _UI_FONT_STACK, tkfont.nametofont("TkDefaultFont").cget("family"))
+    mono = _pick_family(available, _MONO_FONT_STACK, tkfont.nametofont("TkFixedFont").cget("family"))
+    return {
+        "status": tkfont.Font(root=root, family=ui, size=16, weight="bold"),
+        "body": tkfont.Font(root=root, family=ui, size=10),
+        "small": tkfont.Font(root=root, family=ui, size=9),
+        "button": tkfont.Font(root=root, family=ui, size=10, weight="bold"),
+        "mono": tkfont.Font(root=root, family=mono, size=10),
+    }
+
+
+def _build_style(root, fonts, p):  # pragma: no cover - needs a display
+    """Restyle the ``clam`` ttk theme into the palette above. Falls back silently
+    to whatever theme is active if ``clam`` is unavailable (it ships with Tk, so
+    that's only a defensive guard)."""
+    import tkinter as tk
+    from tkinter import ttk
+    style = ttk.Style(root)
+    try:
+        style.theme_use("clam")
+    except tk.TclError:
+        pass
+    style.configure(".", background=p["bg"], foreground=p["text"], font=fonts["body"])
+    # frames
+    style.configure("App.TFrame", background=p["bg"])
+    style.configure("Card.TFrame", background=p["surface"], bordercolor=p["border"],
+                    relief="solid", borderwidth=1)
+    # labels — the type hierarchy
+    style.configure("TLabel", background=p["bg"], foreground=p["text"], font=fonts["body"])
+    style.configure("Body.TLabel", background=p["bg"], foreground=p["text"], font=fonts["body"])
+    style.configure("Status.TLabel", background=p["bg"], foreground=p["text"], font=fonts["status"])
+    style.configure("Detail.TLabel", background=p["bg"], foreground=p["muted"], font=fonts["body"])
+    style.configure("Hint.TLabel", background=p["bg"], foreground=p["faint"], font=fonts["small"])
+    style.configure("Note.TLabel", background=p["bg"], foreground=p["muted"], font=fonts["body"])
+    style.configure("Mono.TLabel", background=p["surface"], foreground=p["text"], font=fonts["mono"])
+    # entry — flat field with an accent focus ring
+    style.configure("TEntry", fieldbackground=p["field"], foreground=p["text"],
+                    bordercolor=p["border"], lightcolor=p["border"], darkcolor=p["border"],
+                    insertcolor=p["text"], relief="flat", padding=4)
+    style.map("TEntry",
+              bordercolor=[("focus", p["accent"]), ("disabled", p["border"])],
+              lightcolor=[("focus", p["accent"])], darkcolor=[("focus", p["accent"])],
+              fieldbackground=[("disabled", p["bg"])],
+              foreground=[("disabled", p["faint"])])
+    # primary action — the one filled accent button
+    style.configure("Primary.TButton", background=p["accent"], foreground=p["accent_fg"],
+                    font=fonts["button"], borderwidth=0, focuscolor=p["accent"],
+                    relief="flat", padding=(16, 9))
+    style.map("Primary.TButton",
+              background=[("disabled", p["disabled_bg"]), ("pressed", p["accent_hi"]),
+                          ("active", p["accent_hi"])],
+              foreground=[("disabled", p["disabled_fg"])])
+    # secondary action — outlined, quieter than primary
+    style.configure("Secondary.TButton", background=p["bg"], foreground=p["sec_text"],
+                    font=fonts["body"], bordercolor=p["border"], lightcolor=p["border"],
+                    darkcolor=p["border"], borderwidth=1, focuscolor=p["bg"],
+                    relief="solid", padding=(16, 7))
+    style.map("Secondary.TButton",
+              background=[("disabled", p["bg"]), ("pressed", p["sec_hi"]), ("active", p["sec_hi"])],
+              foreground=[("disabled", p["disabled_fg"])])
+    # update button — small outlined control; colour variants carry the signal
+    style.configure("Update.TButton", background=p["bg"], foreground=p["muted"],
+                    font=fonts["small"], bordercolor=p["border"], lightcolor=p["border"],
+                    darkcolor=p["border"], borderwidth=1, focuscolor=p["bg"],
+                    relief="solid", padding=(10, 5))
+    style.map("Update.TButton",
+              background=[("active", p["sec_hi"]), ("disabled", p["bg"])],
+              foreground=[("disabled", p["disabled_fg"])])
+    # foreground-only variants (inherit Update.TButton's box) for the up-to-date /
+    # update-available signal — green when installable, grey when current.
+    style.configure("Pos.Update.TButton", foreground=_BTN_UPDATE_AVAILABLE)
+    style.configure("Muted.Update.TButton", foreground=_BTN_UP_TO_DATE)
+    # link — flat, borderless, muted (Remove app… / use estimate)
+    style.configure("Link.TButton", background=p["bg"], foreground=p["muted"],
+                    font=fonts["small"], borderwidth=0, focuscolor=p["bg"],
+                    relief="flat", padding=(4, 2))
+    style.map("Link.TButton",
+              background=[("active", p["bg"]), ("pressed", p["bg"])],
+              foreground=[("active", p["accent"]), ("disabled", p["disabled_fg"])])
+    return style
+
+
 def watching_note(last_warning, last_fired, fires):
     """The status note shown while watching, as (text, color). The latest warning
     wins over the 'last fired' confirmation when it's at least as recent — a failed
@@ -479,8 +614,7 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
     so printing it to stdout would silently vanish — the GUI is the only sink the
     user will actually see."""
     import tkinter as tk
-    from tkinter import font as tkfont
-    from tkinter import messagebox
+    from tkinter import messagebox, ttk
 
     controller = WatchController(log_path=_default_gui_log_path())
     # Config is snapshotted once at startup; edits to the config file / env take
@@ -514,52 +648,86 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
 
     root = tk.Tk()
     root.title("claude-continue")
-    root.geometry("470x540")
+    root.geometry("460x600")
     root.resizable(True, True)
-    root.minsize(440, 440)
+    root.minsize(440, 560)
+
+    palette = _PALETTE
+    fonts = _build_fonts(root)
+    _build_style(root, fonts, palette)
+    root.configure(background=palette["bg"])
 
     if stale_warning:
         # defer so the main window paints first, then surface the one-line warning
         root.after(200, lambda: messagebox.showwarning("Update incomplete", stale_warning, parent=root))
 
-    dot = tk.Label(root, text="○", font=tkfont.Font(size=30))
-    dot.pack(pady=(18, 0))
-    status = tk.Label(root, text="Idle", font=tkfont.Font(size=15, weight="bold"))
-    status.pack()
-    detail = tk.Label(root, text="press Start to watch the quota", fg="#666")
-    detail.pack(pady=(2, 10))
-    sessions_label = tk.Label(root, text="Claude instances: checking…",
-                              font="TkFixedFont", justify="left", anchor="w", wraplength=440)
-    sessions_label.pack(fill="x", padx=16, pady=(0, 10))
-    explain = tk.Label(root, text="", fg="#555", wraplength=430, justify="center")
-    explain.pack(padx=16, pady=(0, 10))
+    # One padded container holds everything on a 4/8/16/24 spacing grid.
+    outer = ttk.Frame(root, style="App.TFrame", padding=(24, 20, 24, 16))
+    outer.pack(fill="both", expand=True)
+
+    # Bottom group (update status + button, then the subtle Remove link) is packed
+    # FIRST so it pins to the window's bottom edge on resize, exactly as before.
+    remove_button = ttk.Button(outer, text="Remove app…", style="Link.TButton")
+    remove_button.pack(side="bottom", pady=(8, 0))
+    update_button = ttk.Button(outer, text="⟳  Update", width=14, style="Update.TButton")
+    update_button.pack(side="bottom", pady=(12, 0))
+    update_status = ttk.Label(outer, text="", style="Hint.TLabel",
+                              anchor="center", justify="center", wraplength=400)
+    update_status.pack(side="bottom", fill="x")
+
+    # Header: the status dot is a real filled focal element (a Canvas oval whose
+    # colour tracks state), under it the status word and a one-line detail.
+    header = ttk.Frame(outer, style="App.TFrame")
+    header.pack(fill="x")
+    dot_canvas = tk.Canvas(header, width=_DOT_PX, height=_DOT_PX, highlightthickness=0,
+                           background=palette["bg"], bd=0)
+    dot_canvas.pack()
+    dot_item = dot_canvas.create_oval(1, 1, _DOT_PX - 1, _DOT_PX - 1,
+                                      fill=palette["idle"], outline=palette["idle"])
+
+    def set_dot(color):
+        dot_canvas.itemconfig(dot_item, fill=color, outline=color)
+
+    status = ttk.Label(header, text="Idle", style="Status.TLabel", anchor="center")
+    status.pack(pady=(10, 0))
+    detail = ttk.Label(header, text="press Start to watch the quota", style="Detail.TLabel",
+                       anchor="center", justify="center", wraplength=400)
+    detail.pack(pady=(3, 0))
+
+    # Instances panel as its own bordered "card" on a white surface, monospaced so
+    # the name … PID columns line up.
+    card = ttk.Frame(outer, style="Card.TFrame", padding=12)
+    card.pack(fill="x", pady=(16, 0))
+    sessions_label = ttk.Label(card, text="Claude instances: checking…", style="Mono.TLabel",
+                               justify="left", anchor="w", wraplength=380)
+    sessions_label.pack(fill="x")
+
+    explain = ttk.Label(outer, text="", style="Detail.TLabel", wraplength=400,
+                        justify="center", anchor="center")
+    explain.pack(fill="x", pady=(16, 0))
+
     # "Fire at" row: the reset time both buttons act on. Pre-filled with ccusage's
     # estimate; edit it when the estimate is landing wrong and the gap is reused on
     # every later window (see offset_from_clock / format_reset_field).
-    reset_frame = tk.Frame(root)
-    reset_frame.pack()
-    tk.Label(reset_frame, text="Fire at:").pack(side="left")
-    reset_entry = tk.Entry(reset_frame, width=6, justify="center")
-    reset_entry.pack(side="left", padx=(4, 6))
-    reset_estimate_btn = tk.Button(reset_frame, text="use estimate", fg="#36c", borderwidth=0,
-                                   highlightthickness=0, font=tkfont.Font(size=10))
+    reset_frame = ttk.Frame(outer, style="App.TFrame")
+    reset_frame.pack(pady=(16, 0))
+    ttk.Label(reset_frame, text="Fire at", style="Body.TLabel").pack(side="left")
+    reset_entry = ttk.Entry(reset_frame, width=7, justify="center", font=fonts["body"])
+    reset_entry.pack(side="left", padx=(8, 8))
+    reset_estimate_btn = ttk.Button(reset_frame, text="use estimate", style="Link.TButton")
     reset_estimate_btn.pack(side="left")
-    reset_hint = tk.Label(root, text="", fg="#777", wraplength=420, font=tkfont.Font(size=10))
-    reset_hint.pack(pady=(0, 8))
-    button = tk.Button(root, text="▶  Continue terminals", width=24, height=2)
-    button.pack()
-    quota_button = tk.Button(root, text="＋  Start quota", width=24)
-    quota_button.pack(pady=(6, 0))
-    note = tk.Label(root, text="", fg="#a00", wraplength=420)
-    note.pack(pady=(8, 0))
-    # bottom row: a low-key "Remove…" link sits under the Update button
-    remove_button = tk.Button(root, text="Remove app…", fg="#a00", borderwidth=0,
-                              highlightthickness=0, font=tkfont.Font(size=11))
-    remove_button.pack(side="bottom", pady=(0, 8))
-    update_button = tk.Button(root, text="⟳  Update", width=14)
-    update_button.pack(side="bottom", pady=(0, 8))
-    update_status = tk.Label(root, text="", fg="#666", wraplength=430)
-    update_status.pack(side="bottom")
+    reset_hint = ttk.Label(outer, text="", style="Hint.TLabel", wraplength=400,
+                           justify="center", anchor="center")
+    reset_hint.pack(fill="x", pady=(6, 0))
+
+    # Primary action carries the accent weight; quota is the quieter secondary.
+    button = ttk.Button(outer, text="▶  Continue terminals", style="Primary.TButton")
+    button.pack(fill="x", pady=(16, 0))
+    quota_button = ttk.Button(outer, text="＋  Start quota", style="Secondary.TButton")
+    quota_button.pack(fill="x", pady=(8, 0))
+    note = ttk.Label(outer, text="", style="Note.TLabel", wraplength=400,
+                     justify="center", anchor="center")
+    note.pack(fill="x", pady=(12, 0))
 
     def poll_ccusage():
         if poll["busy"]:
@@ -662,7 +830,7 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
             reset_entry.config(state="normal")  # an Entry must be enabled to edit it
             reset_entry.delete(0, "end")
             reset_entry.insert(0, entry_text)
-        reset_hint.config(text=hint_text, fg="#777")
+        reset_hint.configure(text=hint_text, foreground=palette["faint"])
         # Lock the field while a watch runs (settings apply at start) or before an
         # estimate exists (nothing to correct against yet) — pure decision in
         # reset_controls_state so it's unit-tested apart from this Tk glue.
@@ -681,7 +849,7 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
         offset, error = parse_reset_input(poll["reset_at"], reset_entry.get())
         if error is not None:
             override["bad"] = True
-            reset_hint.config(text=error, fg="#a00")
+            reset_hint.configure(text=error, foreground=_NOTE_WARN)
             return
         if offset is None:
             return  # no estimate to correct against yet — leave the field as-is
@@ -710,32 +878,29 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
         # the pre-watch explanation is only relevant before you start
         explain.config(text="" if watching or stopping else watch_explanation(app_cfg))
         if controller.error:
-            dot.config(text="⚠", fg="#a00")
+            set_dot(palette["error"])
             status.config(text="Stopped")
             detail.config(text="")
-            note.config(text=controller.error)
+            note.configure(text=controller.error, foreground=_NOTE_WARN)
             set_buttons(None)
         elif stopping:
-            dot.config(text="◐", fg="#c80")
+            set_dot(palette["stopping"])
             status.config(text="Stopping…")
             detail.config(text="finishing the current cycle")
-            note.config(text="")
+            note.configure(text="", foreground=palette["muted"])
             set_buttons(mode, stopping=True)
         elif watching:
-            dot.config(text="●", fg="#22aa22")
+            set_dot(palette["watching"])
             status.config(text="WATCHING · quota" if watch_mode["quota"] else "WATCHING")
             detail.config(text=countdown_text())
             set_buttons(mode)
             text, color = watching_note(controller.last_warning, controller.last_fired, controller.fires)
-            if color:
-                note.config(text=text, fg=color)
-            else:
-                note.config(text=text)
+            note.configure(text=text, foreground=color or palette["muted"])
         else:
-            dot.config(text="○", fg="#999")
+            set_dot(palette["idle"])
             status.config(text="Idle")
             detail.config(text="resume terminals at each reset, or just keep a window open")
-            note.config(text="")
+            note.configure(text="", foreground=palette["muted"])
             set_buttons(None)
         if win_instances_mode(app_cfg):
             live = should_annotate_continue(watching, watch_mode["quota"], app_cfg.keystroke_all)
@@ -763,7 +928,7 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
             from . import action
             action.perform(cfg, dry_run=True)  # validate up front; fail clearly
         except ActionError as e:
-            note.config(text=str(e), fg="#a00")
+            note.configure(text=str(e), foreground=_NOTE_WARN)
             return
         watch_mode["quota"] = quota
         watch_mode["offset"] = override["offset"]  # snapshot the offset the worker runs with
@@ -870,7 +1035,7 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
         # main-thread state machine: workers only mutate `upd`/`rem`; the dialogs
         # and quit all happen here so Tk is only touched on this thread.
         if rem["phase"] == "removing":
-            update_status.config(text="removing…", fg="#a00")
+            update_status.configure(text="removing…", foreground=_NOTE_WARN)
             remove_button.config(state="disabled")
             update_button.config(state="disabled")
             root.after(500, update_poll)
@@ -919,18 +1084,22 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
         busy = upd["phase"] in ("checking", "applying", "prompting", "quitting")
         update_button.config(state="disabled" if busy else "normal")
         update_status.config(text=upd["msg"])
-        # green when an update is installable, gray when up to date (None until the
-        # first check completes). Tint the button TEXT + the status line — never the
-        # background (a coloured highlightbackground is an ugly box on macOS).
-        # macOS native buttons ignore fg/bg, so the visible signal is a colour
-        # GLYPH in the button label (🟢/✓); also set fg (works on Linux/Windows)
-        # and colour the status line (Labels honour fg on every platform).
+        # The signal is carried three ways: a colour GLYPH in the button label
+        # (🟢/✓ — the only thing that reads on every platform), a foreground-only
+        # ttk style swap on the button (green when installable, grey when current),
+        # and the status line's colour. None until the first check completes.
         frozen = update.is_frozen()
         update_button.config(text=update_button_label(upd["info"], frozen=frozen))
         color = update_button_color(upd["info"], frozen=frozen)
-        if color:
-            update_button.config(fg=color)
-            update_status.config(fg=color)
+        if color == _BTN_UPDATE_AVAILABLE:
+            update_button.configure(style="Pos.Update.TButton")
+            update_status.configure(foreground=color)
+        elif color == _BTN_UP_TO_DATE:
+            update_button.configure(style="Muted.Update.TButton")
+            update_status.configure(foreground=color)
+        else:
+            update_button.configure(style="Update.TButton")
+            update_status.configure(foreground=palette["faint"])
         root.after(500, update_poll)
 
     update_button.config(command=check_for_update)

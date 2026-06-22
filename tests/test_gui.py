@@ -27,7 +27,7 @@ from claude_continue.gui import (
     watching_note,
     win_instances_mode,
 )
-from claude_continue.gui import _BTN_UPDATE_AVAILABLE, _BTN_UP_TO_DATE
+from claude_continue.gui import _BTN_UPDATE_AVAILABLE, _BTN_UP_TO_DATE, _pick_family
 from claude_continue.lock import AlreadyRunning
 from claude_continue.update import UpdateInfo
 
@@ -720,6 +720,20 @@ class TestResetControlsState(unittest.TestCase):
         # already on the estimate -> "use estimate" is a no-op, but the field stays open
         self.assertEqual(reset_controls_state(watching=False, has_estimate=True, offset=0),
                          (True, False))
+
+
+class TestPickFamily(unittest.TestCase):
+    def test_picks_first_installed_preferred(self):
+        avail = {"Consolas", "Arial", "Segoe UI"}
+        self.assertEqual(_pick_family(avail, ("Segoe UI", "Arial"), "Fallback"), "Segoe UI")
+
+    def test_skips_missing_and_takes_next_preferred(self):
+        avail = {"Arial"}
+        self.assertEqual(_pick_family(avail, ("Segoe UI", "Arial"), "Fallback"), "Arial")
+
+    def test_falls_back_when_none_installed(self):
+        # graceful fallback: no preferred family present -> Tk's own default family
+        self.assertEqual(_pick_family(set(), ("Segoe UI", "Arial"), "TkDefault"), "TkDefault")
 
 
 class TestParseResetInput(unittest.TestCase):
