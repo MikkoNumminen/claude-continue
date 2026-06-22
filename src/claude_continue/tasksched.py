@@ -38,6 +38,36 @@ def _inner_argv(launch_argv, watch_flags) -> list:
     return list(launch_argv) + ["watch"] + list(watch_flags)
 
 
+def _cmd_batch_quote(arg: str) -> str:
+    """Quote one token so a ``.cmd`` line passes it to the target exe intact.
+
+    ``subprocess.list2cmdline`` quotes for ``CommandLineToArgvW`` (what the exe
+    parses) but NOT for cmd.exe's batch layer, which runs first: ``%`` triggers
+    variable expansion even inside quotes, and ``& | < > ^ ( )`` are operators in
+    any *unquoted* token (list2cmdline leaves a token without spaces unquoted, so a
+    config value like ``a&b`` would inject). So we do both layers:
+
+    1. ``CommandLineToArgvW``-correct double-quoting (backslashes before a quote
+       doubled, embedded quotes ``\\``-escaped) — and we quote *every* token so
+       cmd's operators are always literal inside the quotes;
+    2. double every ``%`` to ``%%`` so cmd yields a single literal ``%`` to the exe.
+    """
+    out = ['"']
+    backslashes = 0
+    for ch in arg:
+        if ch == "\\":
+            backslashes += 1
+            out.append(ch)
+        elif ch == '"':
+            out.append("\\" * backslashes + '\\"')  # escape the quote + the run of \ before it
+            backslashes = 0
+        else:
+            backslashes = 0
+            out.append(ch)
+    out.append("\\" * backslashes + '"')  # double the \ that would otherwise escape the closing "
+    return "".join(out).replace("%", "%%")
+
+
 def wrapper_body(inner, *, wsl: bool) -> str:
     """Contents of the wrapper script the task invokes.
 
@@ -47,7 +77,9 @@ def wrapper_body(inner, *, wsl: bool) -> str:
     """
     if wsl:
         return "#!/bin/sh\nexec " + " ".join(shlex.quote(a) for a in inner) + "\n"
-    return "@echo off\r\n" + subprocess.list2cmdline(inner) + "\r\n"
+    # NOT list2cmdline: it quotes for the exe's argv parser but not for cmd.exe's
+    # batch layer (% expansion, & | < > operators) — see _cmd_batch_quote.
+    return "@echo off\r\n" + " ".join(_cmd_batch_quote(a) for a in inner) + "\r\n"
 
 
 def wrapper_path() -> Path:
@@ -63,7 +95,10 @@ def tr_value(wrapper: str, *, wsl: bool, distro: str) -> str:
     if wsl:
         argv = ["wsl.exe"] + (["-d", distro] if distro else []) + ["-e", "/bin/sh", wrapper]
         return subprocess.list2cmdline(argv)
-    return wrapper
+    # Quote the action so Task Scheduler parses a spaced install path correctly
+    # (e.g. %LOCALAPPDATA% under "C:\Users\First Last\..."). The wrapper path is
+    # app-controlled; quoting an unspaced path is harmless.
+    return '"%s"' % wrapper
 
 
 def _write_wrapper(launch_argv, watch_flags) -> str:
