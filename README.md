@@ -255,9 +255,13 @@ so no console flashes up — which also means it doesn't attach to a console, so
 for CLI text output prefer the `pip install`. Same runtime deps as the CLI: Node
 (`npx ccusage`) for reset detection, and PowerShell for the optional `--keystroke`
 action. The build is **unsigned**, so Windows SmartScreen may still warn the first
-time ("More info → Run anyway"); a strict third-party antivirus may need an
-allow-list entry for the install folder. Code signing is the only thing that fully
-removes those prompts.
+time ("More info → Run anyway"). A strict third-party antivirus can also block it —
+IPVanish's "Threat Protection" was observed to. If that happens: open the antivirus's
+settings and **allow-list the install folder** (`claude-continue.exe` and its
+`_internal\` directory), restore the file from quarantine if it grabbed it, then
+relaunch — and consider reporting it to the vendor as a false positive. Code signing
+is the only thing that removes the prompts entirely (the free/paid options are tracked
+in `TODO.md`).
 
 On first launch the Windows build **registers itself in the Start Menu** (and adds an
 `App Paths` entry), so typing "claude-continue" in the search bar — or Win+R — opens
