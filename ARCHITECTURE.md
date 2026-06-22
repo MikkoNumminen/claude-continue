@@ -8,7 +8,8 @@ the per-module docstrings (the authoritative detail).
 Claude Code enforces a rolling 5-hour usage window. When the quota is exhausted
 mid-job the session pauses until someone nudges it. `claude-continue` runs a
 long-lived **watch loop**: read the active window's reset time, sleep until
-`reset + buffer`, perform an **action** (resume paused sessions, or open a fresh
+`reset + reset_offset + buffer` (the optional `reset_offset` corrects a
+systematically-early ccusage estimate), perform an **action** (resume paused sessions, or open a fresh
 window), then **verify** the window actually rolled and re-arm — so windows run
 back-to-back with no idle gap.
 
@@ -22,7 +23,7 @@ back-to-back with no idle gap.
    │  _next_plan ── ccusage.get_active_block ── model.Block        │  the loop
    │      │         (npx ccusage blocks --active --json --offline) │  (watch.py)
    │      ▼                                                        │
-   │  schedule.next_target(block, buffer)  ── fixed_target(at/every)│
+   │  schedule.next_target(block, buffer, reset_offset) ─ fixed_target(at/every)│
    │      │ sleep in ≤60s slices (survives Mac sleep)              │
    │      ▼                                                        │
    │  action.perform(cfg) ──┬─ exec_cmd?  → headless `claude -p`   │  the action

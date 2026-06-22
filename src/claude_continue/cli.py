@@ -76,6 +76,10 @@ def add_action_args(p: argparse.ArgumentParser, *, dry_run: bool = False) -> Non
     t = p.add_argument_group("timing")
     t.add_argument("--buffer", type=int, default=None, metavar="S",
                    help="seconds after reset before firing (default: 90)")
+    t.add_argument("--reset-offset", dest="reset_offset", type=int, default=None, metavar="S",
+                   help="seconds to add to ccusage's reset estimate to correct it (may be "
+                        "negative; default: 0). ccusage floors the window start to the hour, "
+                        "so its estimate runs early — this offsets that.")
     t.add_argument("--verify-delay", dest="verify_delay", type=int, default=None, metavar="S")
     t.add_argument("--poll-interval", dest="poll_interval", type=int, default=None, metavar="S")
     t.add_argument("--retry-interval", dest="retry_interval", type=int, default=None, metavar="S")
@@ -170,10 +174,15 @@ def cmd_status(args) -> int:
     else:
         now = _utc_now()
         mins = max(0, int((block.reset_at - now).total_seconds() // 60))
+        fire_at = schedule.next_target(block, cfg.buffer, cfg.reset_offset)
         print("Active window:")
         print("  started: %s" % _fmt(block.start))
         print("  resets:  %s  (in %dh %02dm)" % (_fmt(block.reset_at), mins // 60, mins % 60))
-        print("  fire at: %s  (reset + %ds buffer)" % (_fmt(schedule.next_target(block, cfg.buffer)), cfg.buffer))
+        if cfg.reset_offset:
+            print("  fire at: %s  (reset %+dm correction + %ds buffer)"
+                  % (_fmt(fire_at), round(cfg.reset_offset / 60), cfg.buffer))
+        else:
+            print("  fire at: %s  (reset + %ds buffer)" % (_fmt(fire_at), cfg.buffer))
 
     if cfg.exec_cmd:
         print("Action: exec -> %s" % cfg.exec_cmd)
@@ -252,7 +261,7 @@ def cmd_once(args) -> int:
         if block is None:
             logger.error("no active window to wait for; pass --at HH:MM for a fixed time")
             return 1
-        target = schedule.next_target(block, cfg.buffer)
+        target = schedule.next_target(block, cfg.buffer, cfg.reset_offset)
 
     try:
         if getattr(args, "dry_run", False):

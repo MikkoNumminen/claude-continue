@@ -24,6 +24,7 @@ class TestDefaults(unittest.TestCase):
         self.assertEqual(cfg.filter, ["claude", "✳"])
         self.assertEqual(cfg.retry_cap, 30)
         self.assertEqual(cfg.retry_interval, 120)
+        self.assertEqual(cfg.reset_offset, 0)  # trust the estimate until corrected
 
 
 class TestPrecedence(unittest.TestCase):
@@ -78,6 +79,14 @@ class TestPrecedence(unittest.TestCase):
         self.assertEqual(cfg.retry_cap, 3)
         self.assertEqual(cfg.every_hours, 5.0)
         self.assertEqual(cfg.filter, ["a", "b", "c"])
+
+    def test_reset_offset_is_int_and_may_be_negative(self):
+        # reset_offset is an int field (coerced from env/CLI) and is NOT floored —
+        # a negative correction (estimate runs late) is valid.
+        os.environ["CLAUDE_CONTINUE_RESET_OFFSET"] = "-600"
+        cfg = resolve(config_path=Path("/nonexistent"))
+        self.assertEqual(cfg.reset_offset, -600)
+        self.assertEqual(timing_issues(cfg), [])  # not a clamped timing value
 
     def test_bad_file_falls_back_to_defaults(self):
         fd, path = tempfile.mkstemp(suffix=".json")

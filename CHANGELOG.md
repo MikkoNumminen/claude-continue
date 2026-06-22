@@ -6,9 +6,24 @@ All notable changes to `claude-continue`. Format follows
 
 ## [Unreleased]
 
-Fixes from the 2026-06-22 robustness audit (each finding adversarially verified).
+### Added
+- **Pick the reset time the watcher fires on (GUI "Fire at" field + `reset_offset`).**
+  ccusage floors each window's start to the whole hour, so its reset *estimate* can
+  run early — by however many minutes past the hour your first message was — and the
+  watcher then fires before the real reset. The GUI now shows a **Fire at** field
+  pre-filled with that estimate: if you can see it's wrong, type the real time and
+  claude-continue records the gap and reuses it on **every** later window (both
+  *Continue terminals* and *Start quota*), so it keeps hitting the reset without you
+  re-typing; *use estimate* clears it. Under the hood this is `reset_offset` — a
+  signed-seconds correction added to the estimate before the buffer — also settable
+  via `--reset-offset SECONDS`, `CLAUDE_CONTINUE_RESET_OFFSET`, or the config file
+  for an unattended `watch`/`install`. Default 0 (trust the estimate). The watch's
+  post-fire verify/retry still applies, so a correction that's still slightly early
+  is caught. The GUI correction is session-scoped (it's derived from a live estimate,
+  so it isn't persisted across restarts).
 
 ### Fixed
+From the 2026-06-22 robustness audit (each finding adversarially verified).
 - **Windows scheduled-task wrapper is now cmd-injection / `%`-safe.** The
   `claude-continue watch` wrapper `.cmd` was built with `list2cmdline`, which quotes
   for the exe's argv parser but NOT for cmd.exe's batch layer — a config value with a

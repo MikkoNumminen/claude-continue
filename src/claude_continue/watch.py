@@ -3,7 +3,8 @@
 Cycle:
   1. Decide the next fire time.
        - If a fixed schedule is configured (``at`` / ``every_hours``), use it.
-       - Else read the active ccusage block → fire at ``reset + buffer``.
+       - Else read the active ccusage block → fire at ``reset + reset_offset
+         correction + buffer``.
        - Else (idle / ccusage unavailable) poll and retry.
   2. Sleep until the target, in ≤60s slices so we wake promptly after the Mac
      sleeps (a suspended ``sleep`` would otherwise overshoot by hours).
@@ -90,8 +91,14 @@ def _next_plan(cfg: Config, now: datetime, get_block: BlockGetter, logger) -> _P
             return _Plan("fire", target=now, reason="quota: no active window — opening one")
         return _Plan("poll", reason="idle (no active window)")
 
-    target = schedule.next_target(block, cfg.buffer)
-    return _Plan("fire", target=target, block=block, reason="reset %s" % _fmt(block.reset_at))
+    target = schedule.next_target(block, cfg.buffer, cfg.reset_offset)
+    if cfg.reset_offset:
+        corrected = block.reset_at + timedelta(seconds=cfg.reset_offset)
+        reason = "reset %s (corrected to %s, %+dm)" % (
+            _fmt(block.reset_at), _fmt(corrected), round(cfg.reset_offset / 60))
+    else:
+        reason = "reset %s" % _fmt(block.reset_at)
+    return _Plan("fire", target=target, block=block, reason=reason)
 
 
 def _sleep_until(target: datetime, *, clock: Clock, sleep: Sleeper, stop: Stop, slice_s: int = 60) -> str:

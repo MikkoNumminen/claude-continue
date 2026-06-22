@@ -131,10 +131,12 @@ dependencies; for an unattended, survives-reboot setup use `install` instead.
 ```
 ┌──────── claude-continue ────────────┐
 │            ●  WATCHING               │
-│   next reset 19:00 · in 2h13m        │
+│   next reset 19:42 (corrected) · …   │
 │   Claude instances (2):              │
 │     ● working  -- skipped (busy)  …  │
 │     ○ idle     -> will resume     …  │
+│   Fire at: [ 19:42 ]  use estimate   │
+│   estimate 19:00, +42m correction    │
 │      [  ⏹  Stop  ]                   │
 │      [  ＋ Start quota  ]            │
 │   [ 🟢 Update ]                      │
@@ -158,6 +160,16 @@ Before you start, the window spells out **what watching will do** given your
 config (e.g. "sends 'continue' to idle Claude sessions in iTerm2 … Busy
 sessions are skipped") so there are no surprises. That line is shown in the
 idle state and hidden once watching.
+
+**Fire at** — the reset time both buttons act on. It's pre-filled with ccusage's
+estimate; if you can see the estimate is landing wrong (ccusage floors the window
+start to the whole hour, so its estimate can run *early* by however many minutes
+past the hour your first message was), type the real time and claude-continue
+reuses that same gap on **every** later window — so it keeps hitting the reset
+without you re-typing. *use estimate* clears the correction. The correction lasts
+for the session (it's derived from a live estimate, so it isn't persisted across
+restarts); set `reset_offset` in the config file, or `--reset-offset SECONDS` on
+the CLI, to bake a fixed correction into an unattended `watch`/`install`.
 
 It also shows a live **Claude instances** panel. On macOS it reads iTerm2 (each
 session's status — working/idle — and, while watching, whether it'll be resumed
@@ -332,6 +344,10 @@ Caveats for the Windows resume modes:
 
 - **Auto (default):** reset time comes from `ccusage`. The loop adapts as windows
   drift forward each cycle.
+  - **Correcting a wrong estimate:** ccusage floors the window start to the hour,
+    so its reset estimate can run early. `reset_offset` (seconds; `--reset-offset`,
+    or the GUI's **Fire at** field) is added to the estimate before firing — a
+    signed correction reused on every window. Default 0 (trust the estimate).
 - **Fixed schedule:** if you pass `--at HH:MM` or `--every H [--anchor HH:MM]`,
   that schedule is used instead of ccusage — useful for anchoring windows to your
   working hours, or when Node/ccusage isn't available.
@@ -350,7 +366,8 @@ Precedence: **CLI flags > env vars > config file > defaults.**
   `{"buffer": 120, "filter": ["claude"], "exec_cmd": "claude -p ... "}`).
 - Env vars: `CLAUDE_CONTINUE_<FIELD>` (e.g. `CLAUDE_CONTINUE_BUFFER=120`).
 
-Key settings: `buffer` (90s after reset before firing), `verify_delay` (90s),
+Key settings: `buffer` (90s after reset before firing), `reset_offset` (0s;
+signed correction added to ccusage's reset estimate), `verify_delay` (90s),
 `poll_interval` (600s while idle), `retry_interval` (120s) / `retry_cap` (30,
 so retries span ~1h — enough to cover a worst-case-early estimate),
 `skip_busy` (true), `filter`, `text`, `exec_cmd`, `session`, `timeout` (30s),

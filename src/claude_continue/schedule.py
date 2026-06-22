@@ -14,13 +14,15 @@ from datetime import datetime, timedelta
 from .model import Block
 
 
-def next_target(block: Block, buffer_seconds: int) -> datetime:
-    """The instant to fire for a given active block: its reset + buffer (UTC).
+def next_target(block: Block, buffer_seconds: int, offset_seconds: int = 0) -> datetime:
+    """The instant to fire for a given active block: reset + correction + buffer (UTC).
 
-    The buffer keeps us off the exact boundary, where the dying (exhausted)
-    window may still be in effect.
+    ``offset_seconds`` corrects a systematically-wrong ccusage estimate (it floors
+    the window start to the hour, so the estimate runs early); 0 trusts the estimate
+    as-is. The buffer then keeps us off the exact boundary, where the dying
+    (exhausted) window may still be in effect.
     """
-    return block.reset_at + timedelta(seconds=buffer_seconds)
+    return block.reset_at + timedelta(seconds=offset_seconds + buffer_seconds)
 
 
 def fixed_target(
