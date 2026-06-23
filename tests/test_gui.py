@@ -17,6 +17,7 @@ from claude_continue.gui import (
     format_sessions,
     offset_from_clock,
     parse_reset_input,
+    reset_commit_state,
     reset_controls_state,
     should_annotate_continue,
     should_auto_recheck,
@@ -610,31 +611,32 @@ class TestFormatResetField(unittest.TestCase):
         self.assertEqual(entry, "")
         self.assertIn("waiting", hint)
 
-    def test_no_offset_shows_the_estimate(self):
+    def test_no_offset_is_auto_estimated_and_invites_override(self):
         entry, hint = format_reset_field(_local_raw(17, 0), 0)
-        self.assertEqual(entry, "17:00")
-        self.assertIn("auto-estimate", hint)
-        self.assertIn("17:00", hint)
+        self.assertEqual(entry, "17:00")            # the fire time is shown in the field
+        self.assertIn("auto-estimated", hint)       # flagged as a guess, not authoritative
+        self.assertIn("set the real time", hint)    # invites a manual override
 
-    def test_offset_shifts_entry_and_explains_correction(self):
+    def test_manual_offset_leads_with_the_locked_fire_time_not_the_estimate(self):
         entry, hint = format_reset_field(_local_raw(17, 0), 42 * 60)
-        self.assertEqual(entry, "17:42")           # corrected fire time
-        self.assertIn("17:00", hint)               # the raw estimate
-        self.assertIn("+42m", hint)                # the applied correction
+        self.assertEqual(entry, "17:42")           # the locked-in fire time
+        self.assertIn("17:42", hint)               # the hint reinforces the fire time
         self.assertIn("every reset", hint)         # reused, not one-shot
+        self.assertNotIn("17:00", hint)            # the (often-wrong) raw estimate is NOT surfaced
+        self.assertNotIn("correction", hint)       # not framed as an estimate + correction
 
-    def test_negative_offset_shows_signed_correction(self):
+    def test_negative_offset_still_shows_the_corrected_fire_time(self):
         entry, hint = format_reset_field(_local_raw(17, 30), -20 * 60)
         self.assertEqual(entry, "17:10")
-        self.assertIn("-20m", hint)
+        self.assertIn("17:10", hint)               # leads with the corrected time
+        self.assertNotIn("17:30", hint)            # not the raw estimate
 
-    def test_sub_minute_offset_reads_as_estimate_not_plus_zero(self):
+    def test_sub_minute_offset_reads_as_estimate_not_a_correction(self):
         # a nonzero correction that rounds to 0 minutes (e.g. a 20s CLI --reset-offset)
-        # must NOT claim "+0m correction applied" — it reads as the plain estimate.
+        # reads as the plain auto-estimate, not a manual fire time.
         entry, hint = format_reset_field(_local_raw(17, 0), 20)
-        self.assertIn("auto-estimate", hint)
-        self.assertNotIn("+0m", hint)
-        self.assertNotIn("correction applied", hint)
+        self.assertIn("auto-estimated", hint)
+        self.assertNotIn("every reset", hint)
 
     def test_field_round_trips_through_offset_from_clock(self):
         # typing the displayed entry text back in yields the same offset (the
@@ -762,6 +764,32 @@ class TestParseResetInput(unittest.TestCase):
             offset, error = parse_reset_input(_local_raw(17, 0), bad)
             self.assertIsNone(offset, bad)
             self.assertIsNotNone(error, bad)
+
+
+class TestResetCommitState(unittest.TestCase):
+    def test_valid_sets_new_offset_no_error(self):
+        offset, error = reset_commit_state(_local_raw(17, 0), "17:42", 0)
+        self.assertEqual(offset, 42 * 60)
+        self.assertIsNone(error)
+
+    def test_invalid_keeps_offset_and_reports_error(self):
+        # a bad time keeps the current offset (doesn't wipe a good correction) and
+        # surfaces the error message that blocks starting.
+        offset, error = reset_commit_state(_local_raw(17, 0), "99:99", 1234)
+        self.assertEqual(offset, 1234)
+        self.assertIsNotNone(error)
+
+    def test_empty_field_clears_error_and_keeps_offset(self):
+        # the regression guard: clearing the field after a typo must NOT carry a stale
+        # error (which would dead-end the Start button) — it's a clean no-op.
+        offset, error = reset_commit_state(_local_raw(17, 0), "", 1234)
+        self.assertEqual(offset, 1234)   # current offset preserved
+        self.assertIsNone(error)         # error cleared -> Start is unblocked
+
+    def test_no_estimate_is_a_clean_noop(self):
+        offset, error = reset_commit_state(None, "17:42", 555)
+        self.assertEqual(offset, 555)
+        self.assertIsNone(error)
 
 
 if __name__ == "__main__":

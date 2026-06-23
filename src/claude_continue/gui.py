@@ -494,23 +494,28 @@ def offset_from_clock(raw_reset, hh: int, mm: int) -> int:
 def format_reset_field(raw_reset, offset_seconds: int):
     """Render the GUI "Fire at" control as ``(entry_text, hint_text)``.
 
-    ``entry_text`` is the corrected fire time (estimate + offset) as local HH:MM;
-    ``hint_text`` explains what's applied. ``('', 'waiting…')`` when there's no
-    estimate yet (idle / ccusage down). Pure and testable."""
+    ``entry_text`` is the time the watcher will actually fire (the ccusage estimate
+    plus any manual correction) as local HH:MM — i.e. the time that's "locked in".
+    ``hint_text`` says, in plain terms, when it fires. ``('', 'waiting…')`` when
+    there's no estimate yet (idle / ccusage down). Pure and testable.
+
+    The hint deliberately does NOT surface the raw ccusage estimate when a manual
+    time is set: that estimate is frequently wrong (it's why the user corrected it),
+    so leading with it just obscures the time that's actually locked in."""
     if raw_reset is None:
         return ("", "waiting for an active window…")
-    local = raw_reset.astimezone()  # the raw estimate, local — for the hint text
     # Add the offset to the UTC INSTANT, then re-localize — mirroring offset_from_clock.
-    # Adding to `local` (a fixed-offset datetime) would keep the pre-seam offset and
-    # render the wrong wall-clock across a DST transition (the inverse asymmetry).
+    # Adding to a fixed-offset local datetime would keep the pre-seam offset and render
+    # the wrong wall-clock across a DST transition (the inverse asymmetry).
     corrected = (raw_reset + timedelta(seconds=offset_seconds)).astimezone()
     entry = corrected.strftime("%H:%M")
     mins = int(round(offset_seconds / 60.0))
     if mins == 0:
-        # 0, or a sub-minute correction that rounds to 0 — the entry shows the same
-        # HH:MM as the estimate, so read it as "on the estimate", not "+0m applied".
-        return (entry, "auto-estimate (resets %s) — edit if it's landing wrong" % local.strftime("%H:%M"))
-    return (entry, "estimate %s, %+dm correction applied to every reset" % (local.strftime("%H:%M"), mins))
+        # On the raw ccusage guess (no manual correction). It can be off, so invite an
+        # override rather than presenting it as authoritative.
+        return (entry, "auto-estimated — set the real time above if it fires early or late")
+    # A manual time is set; it repeats on every window. Lead with that locked-in time.
+    return (entry, "fires at %s every reset" % entry)
 
 
 def parse_reset_input(raw_reset, text: str):
@@ -532,6 +537,27 @@ def parse_reset_input(raw_reset, text: str):
     except ValueError:
         return (None, "enter a 24-hour time like 17:42")
     return (offset_from_clock(raw_reset, hh, mm), None)
+
+
+def reset_commit_state(raw_reset, text: str, current_offset: int):
+    """Pure decision for committing the "Fire at" field: ``(offset, error)``.
+
+    - valid HH:MM        -> ``(new_offset, None)``
+    - EMPTY / no estimate -> ``(current_offset, None)`` — a clean no-op that keeps the
+      current offset AND carries NO error. Critically, an emptied field must CLEAR any
+      prior invalid-input flag: a user who types a bad time and then clears the field
+      has to be able to start again (the start path refuses to run while the flag is
+      set). It still doesn't wipe a good correction (the offset is unchanged).
+    - invalid time       -> ``(current_offset, msg)`` — keep the offset, surface ``msg``.
+
+    The caller stores the offset and treats ``error is not None`` as the "bad" flag.
+    Kept Tk-free so this (the branch the start-watch gate depends on) is unit-tested."""
+    offset, error = parse_reset_input(raw_reset, text)
+    if error is not None:
+        return (current_offset, error)
+    if offset is None:
+        return (current_offset, None)
+    return (offset, None)
 
 
 def reset_controls_state(*, watching: bool, has_estimate: bool, offset: int):
@@ -808,8 +834,9 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
         corrected = reset_at + timedelta(seconds=watch_mode["offset"])
         secs = max(0, int((corrected - datetime.now(timezone.utc)).total_seconds()))
         hours, mins = divmod(secs // 60, 60)
-        tag = " (corrected)" if watch_mode["offset"] else ""
-        return "next reset %s%s · in %dh %02dm" % (corrected.astimezone().strftime("%H:%M"), tag, hours, mins)
+        # Lead with the locked-in fire time — no "(corrected)" tag implying a hidden,
+        # different (and likely wrong) estimate; this IS when it fires.
+        return "fires %s · in %dh %02dm" % (corrected.astimezone().strftime("%H:%M"), hours, mins)
 
     def set_buttons(active, stopping=False):
         # active: None (idle/error), "continue", or "quota". The active mode's
@@ -846,21 +873,19 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
         reset_estimate_btn.config(state="normal" if btn_enabled else "disabled")
 
     def commit_reset_time(*_):
-        # Parse the typed time into a signed offset vs the current estimate (pure
-        # logic in parse_reset_input). Invalid input flags "bad" so the red hint
-        # survives the next refresh; a valid value (or "use estimate") clears it.
+        # Resolve the typed time into (offset, error) via the pure reset_commit_state.
+        # Invalid input flags "bad" (the red hint survives the next refresh); a valid
+        # value OR an emptied field clears it — so clearing after a typo un-blocks the
+        # Start button, which refuses to run while "bad" is set.
         if controller.is_watching() or controller.is_stopping():
             return  # settings are locked while watching; ignore a stray late commit
-        offset, error = parse_reset_input(poll["reset_at"], reset_entry.get())
-        if error is not None:
-            override["bad"] = True
-            reset_hint.configure(text=error, foreground=_NOTE_WARN)
-            return
-        if offset is None:
-            return  # no estimate to correct against yet — leave the field as-is
+        offset, error = reset_commit_state(poll["reset_at"], reset_entry.get(), override["offset"])
         override["offset"] = offset
-        override["bad"] = False
-        render_reset_field()
+        override["bad"] = error is not None
+        if error is not None:
+            reset_hint.configure(text=error, foreground=_NOTE_WARN)
+        else:
+            render_reset_field()
 
     def use_estimate():
         override["offset"] = 0
@@ -935,9 +960,14 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
     def start_watch(quota):
         if controller.is_watching() or controller.is_stopping():
             return
-        # Starting commits to the last good "Fire at" value; clear any stale
-        # invalid-input flag so the field shows the offset the watch actually uses.
-        override["bad"] = False
+        # Commit whatever is currently typed in the "Fire at" field FIRST. The offset
+        # is otherwise only updated on the entry's <Return>/<FocusOut>, and clicking a
+        # button doesn't reliably move focus off a ttk.Entry — so a user who edits the
+        # time and clicks the button (without tabbing/Enter) would start on the OLD
+        # value. Re-parsing here makes the latest typed time always take effect.
+        commit_reset_time()
+        if override["bad"]:
+            return  # invalid time typed — the red hint is up; don't start on a stale value
         # "Start quota" must open a window even if exec_cmd is configured (exec
         # otherwise wins in action.perform); "Continue terminals" keeps exec_cmd.
         # reset_offset applies the user's reset-time correction to both buttons.

@@ -241,5 +241,38 @@ class TestSendKeystroke(unittest.TestCase):
                 winterm.send_keystroke("continue")
 
 
+class TestSubprocessStdinHardening(unittest.TestCase):
+    """Every PowerShell call from the GUI must redirect stdin to DEVNULL. A windowed
+    app's STDIN handle can be left invalid by the console-injection fire
+    (AttachConsole/FreeConsole), and inheriting it makes CreateProcess fail with
+    "[WinError 6] The handle is invalid" — silently breaking the instance/ccusage
+    polls for the rest of the session."""
+
+    def _captured_kwargs(self, call):
+        seen = {}
+
+        def fake_run(*a, **kw):
+            seen.update(kw)
+            return subprocess.CompletedProcess([], 0, "", "")
+
+        with mock.patch("claude_continue.winterm._powershell_bin", return_value="powershell"), \
+             mock.patch("claude_continue.winterm.subprocess.run", fake_run):
+            call()
+        return seen
+
+    def test_run_instances_redirects_stdin(self):
+        self.assertEqual(self._captured_kwargs(lambda: winterm._run_instances(5)).get("stdin"),
+                         subprocess.DEVNULL)
+
+    def test_run_window_titles_redirects_stdin(self):
+        self.assertEqual(self._captured_kwargs(lambda: winterm._run_window_titles(5)).get("stdin"),
+                         subprocess.DEVNULL)
+
+    def test_send_keystroke_redirects_stdin(self):
+        self.assertEqual(
+            self._captured_kwargs(lambda: winterm.send_keystroke("continue", window_title="WT")).get("stdin"),
+            subprocess.DEVNULL)
+
+
 if __name__ == "__main__":
     unittest.main()
