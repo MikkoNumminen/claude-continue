@@ -68,6 +68,7 @@ def send_keystroke(text: str, *, window_title: str = DEFAULT_WINDOW_TITLE,
             capture_output=True,
             text=True,
             timeout=timeout,
+            stdin=subprocess.DEVNULL,  # don't inherit the GUI's std handle (WinError 6 after a fire)
             **osenv.no_window_kwargs(),
         )
     except FileNotFoundError as e:
@@ -149,6 +150,7 @@ def _run_instances(timeout: float) -> str:
             capture_output=True,
             text=True,
             timeout=timeout,
+            stdin=subprocess.DEVNULL,  # don't inherit the GUI's std handle (WinError 6 after a fire)
             **osenv.no_window_kwargs(),  # no console-window flash from the GUI poll
         )
     except (OSError, subprocess.SubprocessError) as e:
@@ -217,6 +219,7 @@ def _run_window_titles(timeout: float) -> str:
             capture_output=True,
             text=True,
             timeout=timeout,
+            stdin=subprocess.DEVNULL,  # don't inherit the GUI's std handle (WinError 6 after a fire)
             **osenv.no_window_kwargs(),
         )
     except (OSError, subprocess.SubprocessError) as e:
@@ -241,6 +244,8 @@ def _run_window_titles(timeout: float) -> str:
 # both cooked and raw input modes.)
 
 _ATTACH_PARENT_PROCESS = 0xFFFFFFFF  # AttachConsole(-1): reattach to our own console
+# STD_INPUT/OUTPUT/ERROR_HANDLE — the (DWORD)-10/-11/-12 selectors for Get/SetStdHandle.
+_STD_HANDLES = (0xFFFFFFF6, 0xFFFFFFF5, 0xFFFFFFF4)
 _KEY_EVENT = 0x0001
 _VK_RETURN = 0x0D
 
@@ -297,6 +302,19 @@ def _inject_one(pid, text: str) -> None:
     # truncated to 32 bits on Win64 (the ctypes default c_int would corrupt a
     # high handle value).
     k32.CreateFileW.restype = wintypes.HANDLE
+    k32.GetStdHandle.restype = wintypes.HANDLE
+    k32.GetStdHandle.argtypes = [wintypes.DWORD]
+    k32.SetStdHandle.argtypes = [wintypes.DWORD, wintypes.HANDLE]
+    # AttachConsole/FreeConsole REWRITE this process's std handles. A windowed GUI
+    # has no console and no parent console to re-attach to, so the FreeConsole +
+    # AttachConsole(-1) restore in the finally below FAILS, leaving STDIN/STDOUT/STDERR
+    # pointing at the now-freed Claude console. After that the GUI's next
+    # subprocess.run inherits those stale handles and CreateProcess fails with
+    # "[WinError 6] The handle is invalid" — silently breaking the ccusage and
+    # instance-list polls for the rest of the session once a fire has run. Snapshot the
+    # handles now and put them back if the re-attach can't (a console-less GUI),
+    # returning the process to its pre-fire state.
+    saved_std = [k32.GetStdHandle(h) for h in _STD_HANDLES]
     k32.FreeConsole()  # a process can only be attached to one console at a time
     try:
         if not k32.AttachConsole(int(pid)):
@@ -312,7 +330,14 @@ def _inject_one(pid, text: str) -> None:
             raise RuntimeError("WriteConsoleInput failed for pid %s, err=%s" % (pid, last_err()))
     finally:
         k32.FreeConsole()
-        k32.AttachConsole(_ATTACH_PARENT_PROCESS)  # best-effort: restore CLI stdout
+        # Re-attach to the parent's console (a CLI caller) to restore its stdout. When
+        # that fails — a windowed GUI launched from Explorer has no parent console —
+        # the std handles are left dangling at the freed Claude console, so restore the
+        # snapshot taken before the dance. Without this, every later subprocess.run in
+        # the GUI dies with WinError 6 (see the snapshot comment above).
+        if not k32.AttachConsole(_ATTACH_PARENT_PROCESS):
+            for h, val in zip(_STD_HANDLES, saved_std):
+                k32.SetStdHandle(h, val)
 
 
 def continue_instances(text: str, *, instances=None, dry_run: bool = False,

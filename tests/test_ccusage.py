@@ -136,5 +136,25 @@ class TestGetActiveBlock(unittest.TestCase):
             get_active_block()
 
 
+class TestCcusageStdinHardening(unittest.TestCase):
+    def test_get_active_block_redirects_stdin(self):
+        # the GUI polls ccusage on a timer; it must not inherit the windowed app's
+        # STDIN handle (left invalid by a console-injection fire -> WinError 6).
+        import subprocess
+        from unittest import mock
+        seen = {}
+
+        def fake_run(*a, **kw):
+            seen.update(kw)
+            return subprocess.CompletedProcess([], 0, "{}", "")
+
+        with mock.patch("claude_continue.ccusage.subprocess.run", fake_run):
+            try:
+                get_active_block(timeout=5)
+            except CcusageUnavailable:
+                pass  # parsing the stub output may fail; we only assert the stdin kwarg
+        self.assertEqual(seen.get("stdin"), subprocess.DEVNULL)
+
+
 if __name__ == "__main__":
     unittest.main()

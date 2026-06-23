@@ -54,6 +54,7 @@ def get_active_block(timeout: float = 30.0) -> Block | None:
             capture_output=True,
             text=True,
             timeout=timeout,
+            stdin=subprocess.DEVNULL,  # don't inherit the GUI's std handle (WinError 6 after a fire)
             **osenv.no_window_kwargs(),  # no console-window flash from the GUI poll
         )
     except FileNotFoundError as e:
