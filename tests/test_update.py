@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -255,19 +256,55 @@ class TestWindowsDirSwapScript(unittest.TestCase):
         self.assertIn(r'if exist "C:\app\claude-continue.exe" goto ccok', s)
         self.assertIn(":ccok", s)
 
-    def test_aborts_without_merge_if_move_aside_fails(self):
-        # if the move-aside didn't free the path (exe still present), skip robocopy so
-        # we never merge the new tree onto the old one — un-updated beats half-merged.
-        # Pin ORDER (the substring alone is no longer ambiguous — success uses
-        # `goto ccok` — but assert the abort guard sits between move-aside and robocopy).
+    def test_falls_back_to_inplace_when_move_aside_fails(self):
+        # if the move-aside didn't free the path (exe still present = the dir is held
+        # open by another process), don't bail un-updated — route to the in-place
+        # overwrite fallback. Pin: the guard sits between move-aside and the
+        # rename-path robocopy, and jumps to :ccinplace.
         lines = update.windows_dir_swap_script(r"C:\app", r"C:\new", relaunch=False, pid=1).splitlines()
         move_aside = lines.index(r'move /Y "C:\app" "C:\app.old" >NUL 2>&1')
-        abort = lines.index(r'if exist "C:\app\claude-continue.exe" goto ccrelaunch')
-        robocopy = next(i for i, ln in enumerate(lines) if ln.startswith("robocopy "))
-        self.assertLess(move_aside, abort)   # guard follows the move-aside
-        self.assertLess(abort, robocopy)     # and precedes the merge
-        # the exe-path goto-ccrelaunch is the abort guard ONLY (success uses goto ccok)
-        self.assertEqual(lines.count(r'if exist "C:\app\claude-continue.exe" goto ccrelaunch'), 1)
+        guard = lines.index(r'if exist "C:\app\claude-continue.exe" goto ccinplace')
+        robocopy = next(i for i, ln in enumerate(lines) if ln.startswith(r'robocopy "C:\new" "C:\app" /E /MOVE'))
+        self.assertLess(move_aside, guard)   # guard follows the move-aside
+        self.assertLess(guard, robocopy)     # and precedes the rename-path merge
+        self.assertIn(":ccinplace", lines)
+
+    def test_inplace_backs_up_before_overwriting(self):
+        # the in-place fallback copies the held install to <dir>.old (backup) BEFORE
+        # overwriting the new tree over it, so a partial overwrite can be restored.
+        lines = update.windows_dir_swap_script(r"C:\app", r"C:\new", relaunch=False, pid=1).splitlines()
+        tail = lines[lines.index(":ccinplace"):]
+        backup = next(i for i, ln in enumerate(tail) if ln.startswith(r'robocopy "C:\app" "C:\app.old"'))
+        overwrite = next(i for i, ln in enumerate(tail) if ln.startswith(r'robocopy "C:\new" "C:\app"'))
+        self.assertLess(backup, overwrite)
+
+    def test_inplace_aborts_overwrite_if_backup_fails(self):
+        # if the backup robocopy fails (errorlevel >= 8) the in-place path must NOT
+        # overwrite — relaunch the intact old install instead (no half-written tree).
+        lines = update.windows_dir_swap_script(r"C:\app", r"C:\new", relaunch=False, pid=1).splitlines()
+        tail = lines[lines.index(":ccinplace"):]
+        first_guard = next(ln for ln in tail if ln.startswith("if errorlevel 8"))
+        self.assertEqual(first_guard, "if errorlevel 8 goto ccrelaunch")
+
+    def test_inplace_restores_old_files_on_overwrite_failure(self):
+        # a failed overwrite restores the old files from the backup over the partial
+        # tree, and refuses to relaunch a broken install.
+        lines = update.windows_dir_swap_script(r"C:\app", r"C:\new", relaunch=False, pid=1).splitlines()
+        self.assertIn("if errorlevel 8 goto ccinrestore", lines)
+        rest = lines[lines.index(":ccinrestore"):]
+        restore = next(i for i, ln in enumerate(rest) if ln.startswith(r'robocopy "C:\app.old" "C:\app"'))
+        # the restore's OWN exit code must be checked (robocopy writes the root exe
+        # before recursing, so an incomplete restore can leave the exe present yet the
+        # tree mismatched) BEFORE the exe-presence guard — else a partial restore would
+        # drop the backup and relaunch a bricked install.
+        self.assertEqual(rest[restore + 1], "if errorlevel 8 goto ccend")
+        self.assertEqual(rest[restore + 2], r'if not exist "C:\app\claude-continue.exe" goto ccend')
+
+    def test_inplace_block_precedes_giveup(self):
+        # the cap-give-up tail must stay swap-free (asserted elsewhere); the whole
+        # in-place block therefore has to sit BEFORE :ccgiveup.
+        lines = update.windows_dir_swap_script(r"C:\app", r"C:\new", relaunch=True, pid=1).splitlines()
+        self.assertLess(lines.index(":ccinplace"), lines.index(":ccgiveup"))
 
     def test_rollback_never_nests_backup(self):
         # the restore `move` must be gated on the partial dir being cleared first —
@@ -287,10 +324,9 @@ class TestWindowsDirSwapScript(unittest.TestCase):
 
     def test_clears_and_cleans_old_backup(self):
         s = update.windows_dir_swap_script(r"C:\app", r"C:\new", relaunch=True, pid=1)
-        # rmdir of <dir>.old appears EXACTLY twice: clear-stale before move-aside, and
-        # the final backup drop on success/restore. Pin the count so removing either
-        # occurrence fails (a locked one is finished by cleanup_stale_update).
-        self.assertEqual(s.count(r'rmdir /S /Q "C:\app.old"'), 2)
+        # rmdir of <dir>.old appears three times: clear-stale before move-aside, the
+        # rename-path backup drop on success/restore, and the in-place backup drop.
+        self.assertEqual(s.count(r'rmdir /S /Q "C:\app.old"'), 3)
 
     def test_cap_gives_up_without_swap_or_relaunch(self):
         # when the wait cap expires with our PID STILL alive, jump to :ccgiveup and exit
@@ -303,6 +339,114 @@ class TestWindowsDirSwapScript(unittest.TestCase):
         self.assertNotIn("robocopy", tail)
         self.assertNotIn("move /Y", tail)
         self.assertNotIn('start ""', tail)
+
+
+@unittest.skipUnless(os.name == "nt", "exercises the real Windows swap .cmd via cmd.exe")
+class TestWindowsDirSwapScriptLive(unittest.TestCase):
+    """Run the actual generated .cmd against real temp dirs: the rename path on a free
+    install dir, and the in-place fallback on a HELD-open one (a process whose CWD is
+    the install dir blocks the rename exactly as an Explorer window or AV scan would).
+    Validates the swap end-to-end, not just the script text."""
+
+    def _make_trees(self, d):
+        install = os.path.join(d, "app")
+        os.makedirs(os.path.join(install, "_internal"))
+        with open(os.path.join(install, "claude-continue.exe"), "w") as f:
+            f.write("OLD")
+        with open(os.path.join(install, "_internal", "lib.dll"), "w") as f:
+            f.write("OLDDLL")
+        with open(os.path.join(install, "ORPHAN.txt"), "w") as f:  # an old-only marker file
+            f.write("orphan")
+        new = os.path.join(d, "new", "claude-continue")
+        os.makedirs(os.path.join(new, "_internal"))
+        with open(os.path.join(new, "claude-continue.exe"), "w") as f:
+            f.write("NEW")
+        with open(os.path.join(new, "_internal", "lib.dll"), "w") as f:
+            f.write("NEWDLL")
+        return install, new
+
+    def _run_script(self, d, install, new):
+        # pid 999999 doesn't exist -> tasklist reports no match -> the wait loop falls
+        # straight through to the swap (verified: tasklist returns errorlevel 0 here).
+        script = update.windows_dir_swap_script(install, new, relaunch=False, pid=999999, wait_s=5)
+        sp = os.path.join(d, "swap.cmd")
+        with open(sp, "w", newline="") as f:
+            f.write(script)
+        subprocess.run(["cmd", "/c", sp], cwd=tempfile.gettempdir(), timeout=90,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def _read(self, *parts):
+        with open(os.path.join(*parts)) as f:
+            return f.read()
+
+    def _hold_dir(self, install):
+        # Hold the install dir open the way Explorer / an AV scan does — as a live
+        # process's CURRENT DIRECTORY. That blocks renaming the dir but adds NO
+        # unreadable file inside it, so the in-place backup robocopy can still copy the
+        # tree (an open file handle inside the dir can fail that backup under some
+        # Python file-share modes). The child prints "R" once its CWD is set, so the
+        # lock is established before we proceed (no startup race); killed on cleanup.
+        holder = subprocess.Popen(
+            [sys.executable, "-c",
+             "import os,sys,time; os.chdir(sys.argv[1]); sys.stdout.write('R'); "
+             "sys.stdout.flush(); time.sleep(120)", install],
+            stdout=subprocess.PIPE)
+
+        def _stop():
+            holder.kill()
+            try:
+                holder.wait(timeout=5)
+            except Exception:
+                pass
+
+        self.addCleanup(_stop)
+        holder.stdout.read(1)  # block until the CWD lock is established
+        return holder
+
+    def test_rename_path_swaps_a_free_install(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        install, new = self._make_trees(d)
+        self._run_script(d, install, new)
+        self.assertEqual(self._read(install, "claude-continue.exe"), "NEW")       # new tree landed
+        self.assertEqual(self._read(install, "_internal", "lib.dll"), "NEWDLL")
+        # clean replace (atomic rename + robocopy /MOVE): the old-only orphan is gone,
+        # and the .old backup was dropped.
+        self.assertFalse(os.path.exists(os.path.join(install, "ORPHAN.txt")))
+        self.assertFalse(os.path.exists(install + ".old"))
+
+    def test_inplace_path_swaps_a_held_install(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        install, new = self._make_trees(d)
+        self._hold_dir(install)  # dir held open -> move-aside fails -> in-place path
+        # sanity: the hold really does block the rename, else we'd silently be
+        # re-testing the rename path.
+        with self.assertRaises(OSError):
+            os.rename(install, install + ".probe")
+        self._run_script(d, install, new)
+        self.assertEqual(self._read(install, "claude-continue.exe"), "NEW")       # overwrote despite the lock
+        self.assertEqual(self._read(install, "_internal", "lib.dll"), "NEWDLL")
+        # the in-place overwrite does NOT purge, so the old-only orphan survives —
+        # which also proves the in-place path ran (rename would have dropped it).
+        self.assertTrue(os.path.exists(os.path.join(install, "ORPHAN.txt")))
+
+    def test_inplace_restores_old_install_when_overwrite_fails(self):
+        # drive the in-place path (held dir), then force the OVERWRITE robocopy to fail
+        # deterministically by pointing its source at a non-existent tree (robocopy
+        # exit 16). The script must back up, fail the overwrite, restore the old files
+        # from the backup, and leave the original install intact — never a half-tree.
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        install, _ = self._make_trees(d)
+        bad_new = os.path.join(d, "missing", "claude-continue")  # source doesn't exist -> robocopy 16
+        self._hold_dir(install)
+        with self.assertRaises(OSError):
+            os.rename(install, install + ".probe")          # confirm the dir is held
+        self._run_script(d, install, bad_new)
+        # overwrite failed -> restore ran -> the old install is intact (not bricked).
+        self.assertEqual(self._read(install, "claude-continue.exe"), "OLD")
+        self.assertEqual(self._read(install, "_internal", "lib.dll"), "OLDDLL")
 
 
 def _make_onedir_zip(d, *, with_exe=True):

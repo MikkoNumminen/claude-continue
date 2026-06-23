@@ -432,11 +432,10 @@ def windows_dir_swap_script(install_dir: str, new_tree: str, relaunch: bool, *,
     (checked via errorlevel) is treated as "can't confirm exit" and keeps waiting —
     never a swap-while-alive.
 
-    Only once our process is gone (so the loaded DLLs are unlocked) does it swap:
+    Only once our process is gone (so the loaded DLLs are unlocked) does it swap.
+    The PRIMARY path is an atomic directory rename:
       * clear any stale ``<dir>.old`` backup,
       * ``move`` the live install dir aside to ``<dir>.old`` (same-volume rename),
-      * if that move did NOT free the path, abort without merging — the old install
-        stays intact (un-updated beats a half-merged tree),
       * ``robocopy /MOVE`` the new tree into place (cross-volume safe; robocopy
         exit code >= 8 is a real failure),
       * ROLL BACK if robocopy failed or the new exe is missing: drop the partial
@@ -448,9 +447,25 @@ def windows_dir_swap_script(install_dir: str, new_tree: str, relaunch: bool, *,
         when it is the only surviving copy,
       * relaunch only if an exe actually exists at the install path.
 
-    NOTE (flagged): unit-tested for its text but NOT yet run against a live install
-    on real Windows. The move-aside + abort + rollback keep the worst case bounded
-    and never-bricked; verify on hardware before relying on it."""
+    FALLBACK (``:ccinplace``) when the move-aside fails — i.e. another process holds
+    the install dir open (an Explorer window on it, antivirus scanning, or another
+    process whose current directory is it). Windows refuses to rename such a
+    directory even though FILE writes inside it still succeed, so the rename path
+    can't proceed; previously this just bailed un-updated. Now it overwrites the new
+    tree IN PLACE (no rename), which only needs file-level access:
+      * back up the held install to ``<dir>.old`` first (a COPY, which only READS the
+        held dir, so it works while it's locked) — so a partial overwrite is never
+        left stranded,
+      * if the backup itself fails, do nothing and relaunch the intact old app,
+      * ``robocopy /E`` the new tree's files over the live install (no rename, no
+        purge: orphaned files from the old version are harmless for a one-dir build),
+      * if that overwrite fails or leaves no exe, RESTORE the old files from the
+        backup over the partial tree (never leave a version-mismatched half-tree —
+        that's the "failed to load Python DLL" footgun),
+      * drop the backup only once the install has a working exe again.
+
+    Validated on real Windows: the rename path against a clean install, and the
+    in-place path against a held-open install dir (see the integration tests)."""
     old = install_dir + ".old"
     exe = install_dir + "\\" + _WIN_EXE_NAME
     wait_file = "%TEMP%\\cc-update-wait.txt"
@@ -481,8 +496,9 @@ def windows_dir_swap_script(install_dir: str, new_tree: str, relaunch: bool, *,
         # clear any stale backup, then move the live install dir aside.
         'rmdir /S /Q "%s" >NUL 2>&1' % old,
         'move /Y "%s" "%s" >NUL 2>&1' % (install_dir, old),
-        # move-aside didn't free the path -> bail without merging onto the old tree.
-        'if exist "%s" goto ccrelaunch' % exe,
+        # move-aside didn't free the path (the dir is held open) -> in-place fallback
+        # instead of bailing un-updated.
+        'if exist "%s" goto ccinplace' % exe,
         # copy the new tree in (robocopy is cross-volume safe; /MOVE clears source).
         'robocopy "%s" "%s" /E /MOVE /NFL /NDL /NJH /NJS /NP /R:1 /W:1 >NUL' % (new_tree, install_dir),
         "if errorlevel 8 goto ccrollback",
@@ -507,6 +523,36 @@ def windows_dir_swap_script(install_dir: str, new_tree: str, relaunch: bool, *,
         lines.append('if exist "%s" start "" "%s"' % (exe, exe))
     lines += [
         "goto ccend",
+        # --- in-place fallback (the install dir is held open, so it can't be renamed
+        # aside). Overwrite files in place; a held dir blocks RENAME, not file writes.
+        ":ccinplace",
+        # back up the held install (a copy READS the locked dir, which is allowed) so
+        # a partial overwrite can be undone.
+        'robocopy "%s" "%s" /E /NFL /NDL /NJH /NJS /NP /R:1 /W:1 >NUL' % (install_dir, old),
+        # couldn't even back up -> don't risk an overwrite; relaunch the intact old app.
+        "if errorlevel 8 goto ccrelaunch",
+        # overwrite the new tree's files over the live install (no rename, no purge).
+        'robocopy "%s" "%s" /E /NFL /NDL /NJH /NJS /NP /R:2 /W:3 >NUL' % (new_tree, install_dir),
+        "if errorlevel 8 goto ccinrestore",
+        'if exist "%s" goto ccindone' % exe,   # success: new exe is in place
+        ":ccinrestore",
+        # overwrite failed partway -> restore the old files over the partial tree so we
+        # never leave a version-mismatched half-install (the DLL-load footgun).
+        'robocopy "%s" "%s" /E /NFL /NDL /NJH /NJS /NP /R:2 /W:3 >NUL' % (old, install_dir),
+        # the restore ITSELF can fail partway: robocopy writes the root exe BEFORE it
+        # recurses into _internal, so an exe at the path does NOT prove a complete
+        # restore. If the restore didn't finish, the tree is still mismatched -> keep
+        # <dir>.old (the only intact copy, where cleanup_stale_update looks) and do NOT
+        # drop it or relaunch. Without this, exe-present alone would fall to :ccindone,
+        # delete the backup, and relaunch a bricked install with no recovery copy.
+        "if errorlevel 8 goto ccend",
+        # restore left no exe at all -> same: keep the backup, don't relaunch.
+        'if not exist "%s" goto ccend' % exe,
+        ":ccindone",
+        # drop the backup — reached only when the install has a complete, working tree
+        # (new on overwrite success, fully-restored old after a completed restore).
+        'rmdir /S /Q "%s" >NUL 2>&1' % old,
+        "goto ccrelaunch",
         ":ccgiveup",
         # reached only when the wait cap expired with our PID still alive: tidy the wait
         # file and exit WITHOUT swapping or relaunching (the install is untouched).
