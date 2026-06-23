@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -378,6 +379,30 @@ class TestWindowsDirSwapScriptLive(unittest.TestCase):
         with open(os.path.join(*parts)) as f:
             return f.read()
 
+    def _hold_dir(self, install):
+        # Hold the install dir open the way Explorer / an AV scan does — as a live
+        # process's CURRENT DIRECTORY. That blocks renaming the dir but adds NO
+        # unreadable file inside it, so the in-place backup robocopy can still copy the
+        # tree (an open file handle inside the dir can fail that backup under some
+        # Python file-share modes). The child prints "R" once its CWD is set, so the
+        # lock is established before we proceed (no startup race); killed on cleanup.
+        holder = subprocess.Popen(
+            [sys.executable, "-c",
+             "import os,sys,time; os.chdir(sys.argv[1]); sys.stdout.write('R'); "
+             "sys.stdout.flush(); time.sleep(120)", install],
+            stdout=subprocess.PIPE)
+
+        def _stop():
+            holder.kill()
+            try:
+                holder.wait(timeout=5)
+            except Exception:
+                pass
+
+        self.addCleanup(_stop)
+        holder.stdout.read(1)  # block until the CWD lock is established
+        return holder
+
     def test_rename_path_swaps_a_free_install(self):
         d = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)
@@ -394,17 +419,8 @@ class TestWindowsDirSwapScriptLive(unittest.TestCase):
         d = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         install, new = self._make_trees(d)
-        # Hold an open file handle inside the install dir (on a file the overwrite
-        # never touches) so the move-aside fails and the script must take the in-place
-        # path. An open handle inside a directory blocks renaming that directory on
-        # Windows — the same lock an Explorer window or AV scan imposes — with no
-        # subprocess/startup race.
-        lock_path = os.path.join(install, "HELD.lock")
-        with open(lock_path, "w") as f:
-            f.write("x")
-        holder = open(lock_path)
-        self.addCleanup(holder.close)
-        # sanity: the held handle really does block the rename, else we'd silently be
+        self._hold_dir(install)  # dir held open -> move-aside fails -> in-place path
+        # sanity: the hold really does block the rename, else we'd silently be
         # re-testing the rename path.
         with self.assertRaises(OSError):
             os.rename(install, install + ".probe")
@@ -414,7 +430,6 @@ class TestWindowsDirSwapScriptLive(unittest.TestCase):
         # the in-place overwrite does NOT purge, so the old-only orphan survives —
         # which also proves the in-place path ran (rename would have dropped it).
         self.assertTrue(os.path.exists(os.path.join(install, "ORPHAN.txt")))
-        holder.close()
 
     def test_inplace_restores_old_install_when_overwrite_fails(self):
         # drive the in-place path (held dir), then force the OVERWRITE robocopy to fail
@@ -425,18 +440,13 @@ class TestWindowsDirSwapScriptLive(unittest.TestCase):
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         install, _ = self._make_trees(d)
         bad_new = os.path.join(d, "missing", "claude-continue")  # source doesn't exist -> robocopy 16
-        lock_path = os.path.join(install, "HELD.lock")
-        with open(lock_path, "w") as f:
-            f.write("x")
-        holder = open(lock_path)
-        self.addCleanup(holder.close)
+        self._hold_dir(install)
         with self.assertRaises(OSError):
             os.rename(install, install + ".probe")          # confirm the dir is held
         self._run_script(d, install, bad_new)
         # overwrite failed -> restore ran -> the old install is intact (not bricked).
         self.assertEqual(self._read(install, "claude-continue.exe"), "OLD")
         self.assertEqual(self._read(install, "_internal", "lib.dll"), "OLDDLL")
-        holder.close()
 
 
 def _make_onedir_zip(d, *, with_exe=True):
