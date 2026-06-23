@@ -491,17 +491,20 @@ def offset_from_clock(raw_reset, hh: int, mm: int) -> int:
     return int(round((best - raw_reset).total_seconds()))
 
 
-def format_reset_field(raw_reset, offset_seconds: int):
+def format_reset_field(raw_reset, offset_seconds: int, *, watching: bool = False):
     """Render the GUI "Fire at" control as ``(entry_text, hint_text)``.
 
     ``entry_text`` is the time the watcher will actually fire (the ccusage estimate
     plus any manual correction) as local HH:MM — i.e. the time that's "locked in".
-    ``hint_text`` says, in plain terms, when it fires. ``('', 'waiting…')`` when
-    there's no estimate yet (idle / ccusage down). Pure and testable.
+    ``hint_text`` says, in plain terms, what that time means. ``('', 'waiting…')``
+    when there's no estimate yet (idle / ccusage down). Pure and testable.
 
-    The hint deliberately does NOT surface the raw ccusage estimate when a manual
-    time is set: that estimate is frequently wrong (it's why the user corrected it),
-    so leading with it just obscures the time that's actually locked in."""
+    ``watching`` reflects the on/off toggle: watching is the ONLY state that actually
+    fires, so the hint uses the present tense ("fires at …") only then. While idle
+    (toggle off) it must NOT claim active behaviour — it's a queued setting ("will
+    fire …" / an editable auto-estimate). The hint also deliberately never surfaces
+    the raw ccusage estimate when a manual time is set: that estimate is frequently
+    wrong (it's why the user corrected it), so it just obscures the locked-in time."""
     if raw_reset is None:
         return ("", "waiting for an active window…")
     # Add the offset to the UTC INSTANT, then re-localize — mirroring offset_from_clock.
@@ -509,13 +512,15 @@ def format_reset_field(raw_reset, offset_seconds: int):
     # the wrong wall-clock across a DST transition (the inverse asymmetry).
     corrected = (raw_reset + timedelta(seconds=offset_seconds)).astimezone()
     entry = corrected.strftime("%H:%M")
+    if watching:
+        # toggle ON: it IS firing at this (locked) time on every reset.
+        return (entry, "fires at %s every reset" % entry)
+    # toggle OFF (idle): describe the queued setting, never active firing.
     mins = int(round(offset_seconds / 60.0))
     if mins == 0:
-        # On the raw ccusage guess (no manual correction). It can be off, so invite an
-        # override rather than presenting it as authoritative.
+        # on the raw ccusage guess (no manual correction) — invite an override.
         return (entry, "auto-estimated — set the real time above if it fires early or late")
-    # A manual time is set; it repeats on every window. Lead with that locked-in time.
-    return (entry, "fires at %s every reset" % entry)
+    return (entry, "will fire at %s every reset when started" % entry)
 
 
 def parse_reset_input(raw_reset, text: str):
@@ -857,7 +862,10 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
         # value is pending (leave the red hint up until they fix it or reset).
         if override["bad"] or root.focus_get() is reset_entry:
             return
-        entry_text, hint_text = format_reset_field(poll["reset_at"], override["offset"])
+        # The toggle state drives both the hint wording (present tense only while it's
+        # actually firing) and the field lock below.
+        watching = controller.is_watching() or controller.is_stopping()
+        entry_text, hint_text = format_reset_field(poll["reset_at"], override["offset"], watching=watching)
         if reset_entry.get() != entry_text:
             reset_entry.config(state="normal")  # an Entry must be enabled to edit it
             reset_entry.delete(0, "end")
@@ -866,7 +874,6 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
         # Lock the field while a watch runs (settings apply at start) or before an
         # estimate exists (nothing to correct against yet) — pure decision in
         # reset_controls_state so it's unit-tested apart from this Tk glue.
-        watching = controller.is_watching() or controller.is_stopping()
         entry_enabled, btn_enabled = reset_controls_state(
             watching=watching, has_estimate=poll["reset_at"] is not None, offset=override["offset"])
         reset_entry.config(state="normal" if entry_enabled else "disabled")

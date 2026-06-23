@@ -4,6 +4,14 @@ All notable changes to `claude-continue`. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.12.3] — 2026-06-23
+
+### Fixed
+- **The idle "Fire at" hint no longer claims it's actively firing.** While the watcher
+  is stopped (the toggle is off), the hint read "fires at HH:MM every reset" as though
+  it were running. It now uses queued/future wording when idle ("will fire at HH:MM
+  every reset when started") and the present tense only while actually watching.
+
 ## [0.12.2] — 2026-06-23
 
 ### Fixed
