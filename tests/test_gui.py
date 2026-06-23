@@ -646,6 +646,24 @@ class TestFormatResetField(unittest.TestCase):
         hh, mm = (int(p) for p in entry.split(":"))
         self.assertEqual(offset_from_clock(raw, hh, mm), 42 * 60)
 
+    def test_idle_uses_future_tense_not_active_firing(self):
+        # toggle OFF (idle): the hint must NOT claim it's actively firing — it's a
+        # queued setting that only takes effect once started.
+        _, hint = format_reset_field(_local_raw(17, 0), 42 * 60, watching=False)
+        self.assertIn("will fire at 17:42", hint)
+        self.assertNotIn("fires at 17:42", hint)   # no present-tense active claim while idle
+
+    def test_watching_uses_present_tense_active_firing(self):
+        # toggle ON (watching): it IS firing at the locked time, on every reset.
+        _, hint = format_reset_field(_local_raw(17, 0), 42 * 60, watching=True)
+        self.assertIn("fires at 17:42 every reset", hint)
+        self.assertNotIn("will fire", hint)
+
+    def test_watching_auto_estimate_also_reads_as_active(self):
+        # even with no manual correction, while watching the time is locked and firing.
+        _, hint = format_reset_field(_local_raw(17, 0), 0, watching=True)
+        self.assertIn("fires at 17:00 every reset", hint)
+
 
 class TestOffsetFromClockDST(unittest.TestCase):
     @unittest.skipUnless(hasattr(time, "tzset"), "needs time.tzset to pin the timezone")
