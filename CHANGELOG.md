@@ -4,6 +4,27 @@ All notable changes to `claude-continue`. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.12.2] — 2026-06-23
+
+### Fixed
+- **The Windows watcher no longer breaks after the first resume.** The "continue all"
+  fire attaches to each Claude process's console to inject the keystroke; in the
+  windowed GUI that left the app's own standard handles dangling, so every later
+  ccusage / instance-list poll failed with "[WinError 6] The handle is invalid" — the
+  panel showed "instance list query failed" and the app stopped recognising Claude
+  instances. The console handles are now restored after each injection, and the GUI's
+  subprocess calls redirect stdin so they can't inherit a stale handle.
+- **A changed "Fire at" time now takes effect on the next start.** Editing the field
+  and clicking *Continue terminals* / *Start quota* without first tabbing away or
+  pressing Enter used to start on the previous time; the typed value is now committed
+  before the watch starts (an unparseable time is rejected up front, and clearing the
+  field after a typo no longer dead-ends the button).
+- **The "Fire at" display leads with the time that's actually locked in.** It no longer
+  foregrounds the raw ccusage estimate and a large "−128m correction" (confusing when
+  the estimate is off); it shows the fire time directly ("fires at HH:MM every reset",
+  countdown "fires HH:MM · in …"), and an uncorrected value is honestly labelled an
+  auto-estimate that may need adjusting.
+
 ## [0.12.1] — 2026-06-23
 
 ### Fixed
