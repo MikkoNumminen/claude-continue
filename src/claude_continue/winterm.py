@@ -91,7 +91,7 @@ def send_keystroke(text: str, *, window_title: str = DEFAULT_WINDOW_TITLE,
 # so it can't list itself. There's no Windows equivalent of iTerm2's per-session
 # "is processing" flag, so instances are listed without a working/idle marker.
 
-# "<pid>\t<name>" per Claude Code process: the native ``claude.exe``, or a
+# "<pid>\t<ppid>\t<name>" per Claude Code process: the native ``claude.exe``, or a
 # ``node.exe`` whose command line references the scoped package path
 # ``@anthropic-ai/claude-code`` (its node_modules entry, e.g.
 # ...\node_modules\@anthropic-ai\claude-code\cli.js). Anchoring to the scoped
@@ -101,11 +101,25 @@ def send_keystroke(text: str, *, window_title: str = DEFAULT_WINDOW_TITLE,
 # match while installing — acceptable since continue-all is opt-in. CommandLine
 # reads need no elevation for the user's own processes; reachable from WSL via
 # interop. The Python "[\\\\/]" below emits the PowerShell regex "[\\/]" (\ or /).
+#
+# It also emits ParentProcessId and CreationDate (as a comparable UTC FILETIME) so
+# parse_instances can fold a launcher's worker child onto it: the native
+# ``claude.exe`` is a shim — ``claude --continue`` resolves the session then
+# re-execs ``claude --resume <uuid>`` as a CHILD that SHARES the launcher's console
+# (verified via GetConsoleProcessList). Listing both double-counts one session and
+# would make continue-all inject "continue" into the one console twice. CreationDate
+# guards against PID recycling: Win32_Process reports the *creating* pid and never
+# clears it, and Windows reuses pids, so a dead parent's pid can later belong to an
+# UNRELATED live Claude — but a real parent is created no later than its child, so
+# the fold only fires when parent CreationDate <= child CreationDate (see
+# parse_instances). The ``$(if ...)`` leaves the field empty — never throws — for a
+# process whose CreationDate is unreadable, and an empty time is never folded.
 _INSTANCES_SCRIPT = (
     "Get-CimInstance Win32_Process | "
     "Where-Object { $_.Name -eq 'claude.exe' -or "
     "($_.Name -eq 'node.exe' -and $_.CommandLine -match '@anthropic-ai[\\\\/]claude-code') } | "
-    "ForEach-Object { \"$($_.ProcessId)`t$($_.Name)\" }"
+    "ForEach-Object { \"$($_.ProcessId)`t$($_.ParentProcessId)`t"
+    "$(if ($_.CreationDate) { $_.CreationDate.ToFileTimeUtc() })`t$($_.Name)\" }"
 )
 
 
@@ -119,17 +133,67 @@ def _clean_name(name: str) -> str:
 
 
 def parse_instances(stdout: str) -> list:
-    """Parse the ``"<pid>\\t<name>"`` lister output into ``[(name, pid)]`` — name
-    without the ``.exe`` suffix (e.g. "claude"). Deduped by pid, order-stable."""
-    out, seen = [], set()
+    """Parse the lister output into ``[(name, pid)]`` — one entry per *logical*
+    Claude session, name without the ``.exe`` suffix (e.g. "claude"). Order-stable.
+
+    Each line is ``"<pid>\\t<ppid>\\t<ctime>\\t<name>"`` where ``ctime`` is the
+    creation time as a comparable UTC FILETIME (possibly empty). Shorter legacy rows
+    are still accepted — ``"<pid>\\t<ppid>\\t<name>"`` and ``"<pid>\\t<name>"`` — but
+    with no creation time they are never folded (see below), so this stays drop-in
+    for callers/tests that predate the columns.
+
+    **Launcher/worker fold.** The native ``claude.exe`` is a shim — a ``claude
+    --continue`` resolves the session then re-execs ``claude --resume <uuid>`` as a
+    CHILD that shares the launcher's console (proven via GetConsoleProcessList).
+    Listing both shows one session as two panel rows AND makes continue-all write
+    "continue" into that single console twice. So a process whose PARENT is also a
+    matched Claude process is folded onto the parent and dropped — leaving one row
+    for the pair, which keeps the panel and the action in agreement and the
+    keystroke single. Deduped by pid first; the fold is a second pass so listing
+    order (child before parent) doesn't matter.
+
+    The fold is gated on creation time to stay correct under PID recycling: a dead
+    parent's pid can later belong to an UNRELATED live Claude, making a separate
+    session look like a worker. A real parent is created no later than its child, so
+    we fold only when the matched parent's ctime <= the child's; a recycled "parent"
+    is newer and the child is kept. When either time is unknown the row is kept —
+    never drop a live session on a guess.
+
+    Residual: a Claude that deliberately spawns another Claude in its OWN new
+    console would still be folded (same pid topology, parent older), but Claude Code
+    sessions are launched by shells (an unmatched parent), not by other Claudes, so
+    in practice nothing real is lost."""
+    rows, seen = [], set()  # rows: (pid, ppid, ctime, name) in listing order
     for ln in (stdout or "").splitlines():
         if "\t" not in ln:
             continue
-        pid, name = ln.split("\t", 1)
-        pid = pid.strip()
+        parts = ln.split("\t")
+        if len(parts) >= 4:
+            pid, ppid, ctime, name = parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3]
+        elif len(parts) == 3:
+            pid, ppid, ctime, name = parts[0].strip(), parts[1].strip(), "", parts[2]
+        else:
+            pid, ppid, ctime, name = parts[0].strip(), "", "", parts[1]
         if not pid.isdigit() or pid in seen:
             continue
         seen.add(pid)
+        rows.append((pid, ppid, ctime, name))
+    def _ft(s):  # a FILETIME field -> int, or None when empty/non-numeric (kept)
+        try:
+            return int(s)
+        except (TypeError, ValueError):  # incl. isdigit-True Unicode digits int() rejects
+            return None
+
+    ct_by_pid = {pid: _ft(ctime) for pid, _ppid, ctime, _name in rows}
+    out = []
+    for pid, ppid, ctime, name in rows:
+        parent_ct, child_ct = ct_by_pid.get(ppid), _ft(ctime)
+        # Fold a worker child onto its launcher only when the matched parent is the
+        # real one — created no later than the child. A recycled/stale ppid points
+        # at a newer process and fails this, so the child (a live session) is kept;
+        # an unknown time on either side also keeps the row (never fold on a guess).
+        if parent_ct is not None and child_ct is not None and parent_ct <= child_ct:
+            continue
         out.append((_clean_name(name), pid))
     return out
 

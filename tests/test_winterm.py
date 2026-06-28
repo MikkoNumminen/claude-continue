@@ -48,6 +48,84 @@ class TestParseInstances(unittest.TestCase):
         out = winterm.parse_instances("123\tclaude.exe\n123\tclaude.exe\n")
         self.assertEqual(out, [("claude", "123")])
 
+    def test_four_column_unrelated_parents_keeps_both(self):
+        # "<pid>\t<ppid>\t<ctime>\t<name>" — two sessions whose parents are shells
+        # (not in the matched set) are both kept.
+        out = winterm.parse_instances(
+            "40996\t34540\t1000\tclaude.exe\n16828\t22768\t1500\tclaude.exe\n")
+        self.assertEqual(out, [("claude", "40996"), ("claude", "16828")])
+
+    def test_worker_child_folded_onto_older_launcher(self):
+        # the real shim pair: claude --resume (30880) is a child of claude
+        # --continue (40996), created later and sharing its console -> one row.
+        out = winterm.parse_instances(
+            "40996\t34540\t1000\tclaude.exe\n30880\t40996\t2000\tclaude.exe\n")
+        self.assertEqual(out, [("claude", "40996")])
+
+    def test_fold_holds_when_child_listed_before_parent(self):
+        # listing order must not matter — the worker can appear before its launcher.
+        out = winterm.parse_instances(
+            "30880\t40996\t2000\tclaude.exe\n40996\t34540\t1000\tclaude.exe\n")
+        self.assertEqual(out, [("claude", "40996")])
+
+    def test_two_sessions_plus_one_worker(self):
+        # two real sessions; the first also has a worker child -> two rows total.
+        out = winterm.parse_instances(
+            "40996\t34540\t1000\tclaude.exe\n"
+            "30880\t40996\t2000\tclaude.exe\n"   # worker of 40996 (folded)
+            "16828\t22768\t1500\tclaude.exe\n")  # independent session (kept)
+        self.assertEqual(out, [("claude", "40996"), ("claude", "16828")])
+
+    def test_recycled_ppid_not_folded(self):
+        # ppid 100 is in the matched set, but that process was created AFTER 5000
+        # (5000's real parent shell exited and pid 100 was recycled to a new claude)
+        # -> 5000 is a separate live session and must be kept, not folded away.
+        out = winterm.parse_instances(
+            "5000\t100\t1000\tclaude.exe\n100\t34540\t9000\tclaude.exe\n")
+        self.assertEqual(out, [("claude", "5000"), ("claude", "100")])
+
+    def test_unknown_creation_time_not_folded(self):
+        # no creation times -> can't confirm parentage -> keep both (never drop a
+        # live session on a guess).
+        out = winterm.parse_instances(
+            "40996\t34540\t\tclaude.exe\n30880\t40996\t\tclaude.exe\n")
+        self.assertEqual(out, [("claude", "40996"), ("claude", "30880")])
+
+    def test_one_known_one_unknown_ctime_not_folded(self):
+        # docstring contract: when EITHER time is unknown, keep the row (never fold
+        # on a guess) — both the child-unknown and parent-unknown directions.
+        child_unknown = winterm.parse_instances(
+            "40996\t34540\t1000\tclaude.exe\n30880\t40996\t\tclaude.exe\n")
+        self.assertEqual(child_unknown, [("claude", "40996"), ("claude", "30880")])
+        parent_unknown = winterm.parse_instances(
+            "40996\t34540\t\tclaude.exe\n30880\t40996\t2000\tclaude.exe\n")
+        self.assertEqual(parent_unknown, [("claude", "40996"), ("claude", "30880")])
+
+    def test_non_ascii_digit_ctime_does_not_crash(self):
+        # isdigit() is True for a superscript '²' but int() rejects it — parse must
+        # not raise on odd input; the row is simply kept (treated as unknown time).
+        out = winterm.parse_instances(
+            "40996\t34540\t1000\tclaude.exe\n30880\t40996\t²\tclaude.exe\n")
+        self.assertEqual(out, [("claude", "40996"), ("claude", "30880")])
+
+    def test_legacy_three_column_without_ctime_not_folded(self):
+        # a 3-column legacy row has no creation time -> never folded.
+        out = winterm.parse_instances(
+            "40996\t34540\tclaude.exe\n30880\t40996\tclaude.exe\n")
+        self.assertEqual(out, [("claude", "40996"), ("claude", "30880")])
+
+    def test_non_numeric_ppid_keeps_row(self):
+        # a garbage ppid can't be in the matched set -> the row is kept.
+        out = winterm.parse_instances("123\tNOPE\t1000\tclaude.exe\n")
+        self.assertEqual(out, [("claude", "123")])
+
+    def test_mixed_legacy_and_new_format(self):
+        # a 2-col legacy line alongside a 4-col line: both parsed, neither folded
+        # (the 2-col has no ppid; the 4-col's parent isn't matched).
+        out = winterm.parse_instances(
+            "111\tclaude.exe\n222\t999\t1000\tclaude.exe\n")
+        self.assertEqual(out, [("claude", "111"), ("claude", "222")])
+
 
 class TestListClaudeInstances(unittest.TestCase):
     def test_build_instances_script_matches_claude_processes(self):
@@ -64,11 +142,22 @@ class TestListClaudeInstances(unittest.TestCase):
         # also hit. [\/] matches either path separator.
         self.assertIn(r"@anthropic-ai[\\/]claude-code", s)
         self.assertNotIn("-match 'claude-code'", s)
+        # ParentProcessId + CreationDate are emitted so the launcher/worker pair can
+        # be folded (one row per session) under PID recycling in parse_instances.
+        self.assertIn("ParentProcessId", s)
+        self.assertIn("CreationDate", s)
 
     def test_list_with_injected_runner(self):
         out = winterm.list_claude_instances(
             run=lambda t: "22108\tclaude.exe\n35552\tclaude.exe\n")
         self.assertEqual(out, [("claude", "22108"), ("claude", "35552")])
+
+    def test_list_folds_launcher_worker_pair(self):
+        # the lister now emits ppid + ctime; list_claude_instances returns one row
+        # per session (the worker child of an older launcher is folded away).
+        out = winterm.list_claude_instances(
+            run=lambda t: "40996\t34540\t1000\tclaude.exe\n30880\t40996\t2000\tclaude.exe\n")
+        self.assertEqual(out, [("claude", "40996")])
 
     def test_empty_when_no_instances(self):
         self.assertEqual(winterm.list_claude_instances(run=lambda t: ""), [])

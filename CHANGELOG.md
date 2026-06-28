@@ -4,6 +4,29 @@ All notable changes to `claude-continue`. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **The Windows "Claude instances" panel no longer double-counts a single session
+  (and "continue all" no longer types `continue` into it twice).** The native
+  `claude.exe` is a launcher shim: `claude --continue` resolves the session and
+  then re-execs `claude --resume <uuid>` as a child process that *shares the
+  launcher's console* (confirmed via `GetConsoleProcessList` — launcher and worker
+  live in one console). The instance lister counted both, so one real session
+  showed up as two `claude` rows. With another terminal open — e.g. a WSL/Ubuntu
+  service in its own window — the spare row is easy to misread as *that* terminal
+  being picked up as a Claude case. It wasn't: the lister only ever matches
+  `claude.exe` or `node.exe @anthropic-ai/claude-code`, never `wsl.exe`. The extra
+  row was the launcher/worker pair. The lister now also reports each process's
+  parent and creation time, and `parse_instances` folds a process whose parent is
+  another matched Claude process onto that parent — leaving one row for the pair.
+  The fold is gated on creation time (a real parent is created no later than its
+  child) so a *recycled* parent pid — Windows reuses pids, and a dead parent's pid
+  can later belong to an unrelated live Claude — can't fold away a genuinely
+  separate session; when a creation time is unknown the row is kept. The panel and
+  the continue-all action share this list, so they stay in agreement, and the
+  keystroke lands in each session's console once instead of twice.
+
 ## [0.12.3] — 2026-06-23
 
 ### Fixed
