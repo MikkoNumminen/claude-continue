@@ -146,6 +146,10 @@ class TestListClaudeInstances(unittest.TestCase):
         # be folded (one row per session) under PID recycling in parse_instances.
         self.assertIn("ParentProcessId", s)
         self.assertIn("CreationDate", s)
+        # the query narrows to the two image names server-side (WQL -Filter) so each
+        # poll marshals a handful of processes, not the whole table.
+        self.assertIn("-Filter", s)
+        self.assertIn("Name='claude.exe'", s)
 
     def test_list_with_injected_runner(self):
         out = winterm.list_claude_instances(

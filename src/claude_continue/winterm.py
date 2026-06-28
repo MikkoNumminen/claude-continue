@@ -91,8 +91,8 @@ def send_keystroke(text: str, *, window_title: str = DEFAULT_WINDOW_TITLE,
 # so it can't list itself. There's no Windows equivalent of iTerm2's per-session
 # "is processing" flag, so instances are listed without a working/idle marker.
 
-# "<pid>\t<ppid>\t<name>" per Claude Code process: the native ``claude.exe``, or a
-# ``node.exe`` whose command line references the scoped package path
+# "<pid>\t<ppid>\t<ctime>\t<name>" per Claude Code process: the native ``claude.exe``,
+# or a ``node.exe`` whose command line references the scoped package path
 # ``@anthropic-ai/claude-code`` (its node_modules entry, e.g.
 # ...\node_modules\@anthropic-ai\claude-code\cli.js). Anchoring to the scoped
 # path — not a bare "claude-code" substring — avoids writing `continue` into an
@@ -114,8 +114,12 @@ def send_keystroke(text: str, *, window_title: str = DEFAULT_WINDOW_TITLE,
 # the fold only fires when parent CreationDate <= child CreationDate (see
 # parse_instances). The ``$(if ...)`` leaves the field empty — never throws — for a
 # process whose CreationDate is unreadable, and an empty time is never folded.
+#
+# The server-side ``-Filter`` narrows to the two image names in WQL so each GUI poll
+# marshals a handful of processes instead of the whole process table; the node
+# CommandLine match stays client-side in Where-Object (WQL has no regex).
 _INSTANCES_SCRIPT = (
-    "Get-CimInstance Win32_Process | "
+    "Get-CimInstance Win32_Process -Filter \"Name='claude.exe' OR Name='node.exe'\" | "
     "Where-Object { $_.Name -eq 'claude.exe' -or "
     "($_.Name -eq 'node.exe' -and $_.CommandLine -match '@anthropic-ai[\\\\/]claude-code') } | "
     "ForEach-Object { \"$($_.ProcessId)`t$($_.ParentProcessId)`t"
@@ -159,10 +163,14 @@ def parse_instances(stdout: str) -> list:
     is newer and the child is kept. When either time is unknown the row is kept —
     never drop a live session on a guess.
 
-    Residual: a Claude that deliberately spawns another Claude in its OWN new
-    console would still be folded (same pid topology, parent older), but Claude Code
-    sessions are launched by shells (an unmatched parent), not by other Claudes, so
-    in practice nothing real is lost."""
+    Residuals (both safe-direction — at worst a transient duplicate keystroke or a
+    one-cycle miss that the next poll heals, never a permanently dropped session):
+    a Claude that deliberately spawns another Claude in its OWN new console would
+    still be folded (same pid topology, parent older), but Claude Code sessions are
+    launched by shells (an unmatched parent), not by other Claudes, so in practice
+    nothing real is lost; and the fold keeps the launcher, betting it outlives its
+    worker — if it instead exits between this listing and the fire, that session is
+    skipped for one cycle and resumes on the next poll."""
     rows, seen = [], set()  # rows: (pid, ppid, ctime, name) in listing order
     for ln in (stdout or "").splitlines():
         if "\t" not in ln:
