@@ -4,7 +4,7 @@ All notable changes to `claude-continue`. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.12.4] — 2026-06-28
 
 ### Fixed
 - **The Windows "Claude instances" panel no longer double-counts a single session
