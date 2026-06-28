@@ -27,6 +27,13 @@ All notable changes to `claude-continue`. Format follows
   the continue-all action share this list, so they stay in agreement, and the
   keystroke lands in each session's console once instead of twice.
 
+### Changed
+- **The Windows instance poll is cheaper.** The process query now narrows to the
+  two image names server-side (a WQL `-Filter "Name='claude.exe' OR Name='node.exe'"`)
+  so each ~2-second GUI poll marshals a handful of processes instead of the whole
+  process table; the `node @anthropic-ai/claude-code` command-line match stays
+  client-side (WQL has no regex). Same results, less per-poll work.
+
 ## [0.12.3] — 2026-06-23
 
 ### Fixed
