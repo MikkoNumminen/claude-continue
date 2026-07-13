@@ -4,6 +4,18 @@ All notable changes to `claude-continue`. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **The Windows in-place update robocopy now copies unconditionally (`/IS /IT`).**
+  Robocopy's default is a sync: a file whose size and mtime match the target is
+  classified "Same" and silently skipped even though the intent is "install the
+  new tree". Unreachable in a real update (a fresh extract always has newer
+  mtimes), but it made the held-install swap test flaky on fast CI runners,
+  where the tiny same-size OLD/NEW fixtures could land on the same mtime tick.
+  The test fixtures now also differ in size, like a real build, so the test is
+  deterministic on any robocopy.
+
 ## [0.12.5] — 2026-07-13
 
 ### Fixed
