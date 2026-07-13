@@ -622,6 +622,22 @@ class TestFormatResetField(unittest.TestCase):
         self.assertIn("no active window", hint)
         self.assertIn("next reset", hint)
 
+    def test_none_while_watching_quota_says_it_opens_a_window_itself(self):
+        # quota mode does NOT wait for the user: with no active window the worker
+        # fires immediately to open one (watch.py's quota idle-open), so the hint
+        # must not claim it's waiting for the next Claude message.
+        entry, hint = format_reset_field(None, 0, watching=True, quota=True)
+        self.assertEqual(entry, "")
+        self.assertIn("opening one", hint)
+        self.assertNotIn("once you use Claude", hint)
+
+    def test_none_while_idle_ignores_a_stale_quota_flag(self):
+        # idle wording is mode-independent: quota only matters while watching (the
+        # caller passes the LAST watch's mode, which is stale when stopped).
+        _, hint = format_reset_field(None, 0, watching=False, quota=True)
+        self.assertIn("waiting", hint)
+        self.assertNotIn("opening one", hint)
+
     def test_none_with_correction_says_the_set_time_is_kept(self):
         # A manual correction must not silently disappear with the estimate — the
         # field blanking right after Start otherwise reads as "my time was lost".

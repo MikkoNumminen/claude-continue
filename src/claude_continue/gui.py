@@ -491,7 +491,8 @@ def offset_from_clock(raw_reset, hh: int, mm: int) -> int:
     return int(round((best - raw_reset).total_seconds()))
 
 
-def format_reset_field(raw_reset, offset_seconds: int, *, watching: bool = False):
+def format_reset_field(raw_reset, offset_seconds: int, *, watching: bool = False,
+                       quota: bool = False):
     """Render the GUI "Fire at" control as ``(entry_text, hint_text)``.
 
     ``entry_text`` is the time the watcher will actually fire (the ccusage estimate
@@ -509,10 +510,16 @@ def format_reset_field(raw_reset, offset_seconds: int, *, watching: bool = False
     With no estimate there IS no fire time to show (a window opens on the next
     Claude message, and only then is its reset known), so the empty state must say
     what happens next — and that a manual correction is kept, not lost: the field
-    going blank right after Start otherwise reads as "the time I set vanished"."""
+    going blank right after Start otherwise reads as "the time I set vanished".
+    ``quota`` distinguishes what "next" means while watching with no window: a
+    quota watch opens a window ITSELF right away (watch.py fires immediately when
+    idle), so it must not claim to be waiting for the user; a resume watch really
+    does wait for the next Claude message to open one."""
     if raw_reset is None:
         mins = int(round(offset_seconds / 60.0))
-        kept = " · your %+d min correction is kept" % mins if mins else ""
+        kept = (" · your %+d min correction is kept" % mins) if mins else ""
+        if watching and quota:
+            return ("", "no active window — opening one now" + kept)
         if watching:
             return ("", "no active window — fires at the next reset once you use Claude" + kept)
         return ("", "waiting for an active window — opens on your next Claude message" + kept)
@@ -874,7 +881,9 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
         # The toggle state drives both the hint wording (present tense only while it's
         # actually firing) and the field lock below.
         watching = controller.is_watching() or controller.is_stopping()
-        entry_text, hint_text = format_reset_field(poll["reset_at"], override["offset"], watching=watching)
+        entry_text, hint_text = format_reset_field(
+            poll["reset_at"], override["offset"],
+            watching=watching, quota=watch_mode["quota"])
         if reset_entry.get() != entry_text:
             reset_entry.config(state="normal")  # an Entry must be enabled to edit it
             reset_entry.delete(0, "end")
