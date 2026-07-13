@@ -491,7 +491,8 @@ def offset_from_clock(raw_reset, hh: int, mm: int) -> int:
     return int(round((best - raw_reset).total_seconds()))
 
 
-def format_reset_field(raw_reset, offset_seconds: int, *, watching: bool = False):
+def format_reset_field(raw_reset, offset_seconds: int, *, watching: bool = False,
+                       quota: bool = False):
     """Render the GUI "Fire at" control as ``(entry_text, hint_text)``.
 
     ``entry_text`` is the time the watcher will actually fire (the ccusage estimate
@@ -504,9 +505,24 @@ def format_reset_field(raw_reset, offset_seconds: int, *, watching: bool = False
     (toggle off) it must NOT claim active behaviour — it's a queued setting ("will
     fire …" / an editable auto-estimate). The hint also deliberately never surfaces
     the raw ccusage estimate when a manual time is set: that estimate is frequently
-    wrong (it's why the user corrected it), so it just obscures the locked-in time."""
+    wrong (it's why the user corrected it), so it just obscures the locked-in time.
+
+    With no estimate there IS no fire time to show (a window opens on the next
+    Claude message, and only then is its reset known), so the empty state must say
+    what happens next — and that a manual correction is kept, not lost: the field
+    going blank right after Start otherwise reads as "the time I set vanished".
+    ``quota`` distinguishes what "next" means while watching with no window: a
+    quota watch opens a window ITSELF right away (watch.py fires immediately when
+    idle), so it must not claim to be waiting for the user; a resume watch really
+    does wait for the next Claude message to open one."""
     if raw_reset is None:
-        return ("", "waiting for an active window…")
+        mins = int(round(offset_seconds / 60.0))
+        kept = (" · your %+d min correction is kept" % mins) if mins else ""
+        if watching and quota:
+            return ("", "no active window — opening one now" + kept)
+        if watching:
+            return ("", "no active window — fires at the next reset once you use Claude" + kept)
+        return ("", "waiting for an active window — opens on your next Claude message" + kept)
     # Add the offset to the UTC INSTANT, then re-localize — mirroring offset_from_clock.
     # Adding to a fixed-offset local datetime would keep the pre-seam offset and render
     # the wrong wall-clock across a DST transition (the inverse asymmetry).
@@ -865,7 +881,9 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
         # The toggle state drives both the hint wording (present tense only while it's
         # actually firing) and the field lock below.
         watching = controller.is_watching() or controller.is_stopping()
-        entry_text, hint_text = format_reset_field(poll["reset_at"], override["offset"], watching=watching)
+        entry_text, hint_text = format_reset_field(
+            poll["reset_at"], override["offset"],
+            watching=watching, quota=watch_mode["quota"])
         if reset_entry.get() != entry_text:
             reset_entry.config(state="normal")  # an Entry must be enabled to edit it
             reset_entry.delete(0, "end")
@@ -1167,15 +1185,19 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
 
     # re-check when the window regains focus, so it refreshes the moment you look
     # (update check is debounced; poll_ccusage's busy-guard makes a refresh cheap).
-    # The ccusage poll keeps the idle "Fire at" estimate current before you start.
+    # The focus poll refreshes the "Fire at" estimate instantly; poll_loop keeps
+    # it current between focuses.
     def on_focus_in(_e):
         check_for_update(auto=True)
         poll_ccusage()
     root.bind("<FocusIn>", on_focus_in)
 
     def poll_loop():
-        if controller.is_watching():
-            poll_ccusage()
+        # Poll while idle too, not just while watching: idle used to refresh only
+        # on FocusIn, so the field could carry a long-dead window's reset time for
+        # hours — which then blanked the instant Start was clicked (the start-time
+        # poll found no active window), reading as "the time I set vanished".
+        poll_ccusage()
         root.after(30000, poll_loop)
 
     def on_close():

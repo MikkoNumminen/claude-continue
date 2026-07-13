@@ -4,6 +4,23 @@ All notable changes to `claude-continue`. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.12.5] — 2026-07-13
+
+### Fixed
+- **The "Fire at" time no longer seems to vanish when you click Continue.** While
+  idle, the reset estimate was only refreshed at startup and when the window
+  regained focus, so the field could show the reset time of a quota window that
+  had long since ended — and the fresh poll triggered by clicking *Continue
+  terminals* then blanked it, reading as "the time I set disappeared". The
+  estimate is now also polled every 30 s while idle, so the field stays truthful
+  before you start.
+- **The empty "Fire at" state now says what happens next.** With no active
+  window (no Claude usage since the last reset) there is no fire time to show;
+  the hint now explains that a window opens on your next Claude message and —
+  while watching — that the watcher fires at that window's reset. A manually
+  set time correction is explicitly called out as kept, because it is: it
+  re-applies to every later window.
+
 ## [0.12.4] — 2026-06-28
 
 ### Fixed
