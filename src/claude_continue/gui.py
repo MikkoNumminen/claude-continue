@@ -504,9 +504,18 @@ def format_reset_field(raw_reset, offset_seconds: int, *, watching: bool = False
     (toggle off) it must NOT claim active behaviour — it's a queued setting ("will
     fire …" / an editable auto-estimate). The hint also deliberately never surfaces
     the raw ccusage estimate when a manual time is set: that estimate is frequently
-    wrong (it's why the user corrected it), so it just obscures the locked-in time."""
+    wrong (it's why the user corrected it), so it just obscures the locked-in time.
+
+    With no estimate there IS no fire time to show (a window opens on the next
+    Claude message, and only then is its reset known), so the empty state must say
+    what happens next — and that a manual correction is kept, not lost: the field
+    going blank right after Start otherwise reads as "the time I set vanished"."""
     if raw_reset is None:
-        return ("", "waiting for an active window…")
+        mins = int(round(offset_seconds / 60.0))
+        kept = " · your %+d min correction is kept" % mins if mins else ""
+        if watching:
+            return ("", "no active window — fires at the next reset once you use Claude" + kept)
+        return ("", "waiting for an active window — opens on your next Claude message" + kept)
     # Add the offset to the UTC INSTANT, then re-localize — mirroring offset_from_clock.
     # Adding to a fixed-offset local datetime would keep the pre-seam offset and render
     # the wrong wall-clock across a DST transition (the inverse asymmetry).
@@ -1167,15 +1176,19 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
 
     # re-check when the window regains focus, so it refreshes the moment you look
     # (update check is debounced; poll_ccusage's busy-guard makes a refresh cheap).
-    # The ccusage poll keeps the idle "Fire at" estimate current before you start.
+    # The focus poll refreshes the "Fire at" estimate instantly; poll_loop keeps
+    # it current between focuses.
     def on_focus_in(_e):
         check_for_update(auto=True)
         poll_ccusage()
     root.bind("<FocusIn>", on_focus_in)
 
     def poll_loop():
-        if controller.is_watching():
-            poll_ccusage()
+        # Poll while idle too, not just while watching: idle used to refresh only
+        # on FocusIn, so the field could carry a long-dead window's reset time for
+        # hours — which then blanked the instant Start was clicked (the start-time
+        # poll found no active window), reading as "the time I set vanished".
+        poll_ccusage()
         root.after(30000, poll_loop)
 
     def on_close():

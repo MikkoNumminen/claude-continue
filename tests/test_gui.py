@@ -610,6 +610,32 @@ class TestFormatResetField(unittest.TestCase):
         entry, hint = format_reset_field(None, 0)
         self.assertEqual(entry, "")
         self.assertIn("waiting", hint)
+        self.assertIn("next Claude message", hint)  # says how a window opens
+        self.assertNotIn("correction", hint)        # no phantom correction at offset 0
+
+    def test_none_while_watching_explains_it_arms_on_next_window(self):
+        # WATCHING with no active window (the reset passed with no usage since):
+        # there is no fire time to show, so the hint must say what happens next
+        # instead of the idle "waiting…" wording.
+        entry, hint = format_reset_field(None, 0, watching=True)
+        self.assertEqual(entry, "")
+        self.assertIn("no active window", hint)
+        self.assertIn("next reset", hint)
+
+    def test_none_with_correction_says_the_set_time_is_kept(self):
+        # A manual correction must not silently disappear with the estimate — the
+        # field blanking right after Start otherwise reads as "my time was lost".
+        _, hint = format_reset_field(None, 42 * 60, watching=True)
+        self.assertIn("+42", hint)
+        self.assertIn("kept", hint)
+        _, idle_hint = format_reset_field(None, -20 * 60, watching=False)
+        self.assertIn("-20", idle_hint)
+        self.assertIn("kept", idle_hint)
+
+    def test_none_with_sub_minute_offset_reads_as_no_correction(self):
+        # a stray sub-minute offset (e.g. a 20s CLI --reset-offset) is not a set time
+        _, hint = format_reset_field(None, 20, watching=True)
+        self.assertNotIn("kept", hint)
 
     def test_no_offset_is_auto_estimated_and_invites_override(self):
         entry, hint = format_reset_field(_local_raw(17, 0), 0)
