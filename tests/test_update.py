@@ -359,10 +359,21 @@ class TestWindowsDirSwapScriptLive(unittest.TestCase):
             f.write("orphan")
         new = os.path.join(d, "new", "claude-continue")
         os.makedirs(os.path.join(new, "_internal"))
+        # The NEW contents MUST differ in SIZE from the OLD ones, as a real build
+        # does. Equal-size pairs ("NEW"/"OLD") were the source of a long CI flake:
+        # written microseconds apart, on a fast runner they could land on the same
+        # mtime tick, and robocopy then classified the pair "Same" and SKIPPED the
+        # in-place overwrite while still exiting success — 'OLD' != 'NEW', but only
+        # when the ticks happened to collide. A size difference makes the class
+        # "Changed", which robocopy always copies, deterministically. (The swap
+        # script now also passes /IS /IT, closing the same-size skip for real; the
+        # "Modified" class — same size+mtime, differing NTFS change time — is only
+        # coverable with /IM, which older Windows robocopy lacks, so the updater
+        # doesn't use it and this test doesn't manufacture that state.)
         with open(os.path.join(new, "claude-continue.exe"), "w") as f:
-            f.write("NEW")
+            f.write("NEW-V2")
         with open(os.path.join(new, "_internal", "lib.dll"), "w") as f:
-            f.write("NEWDLL")
+            f.write("NEWDLL-V2")
         return install, new
 
     def _run_script(self, d, install, new):
@@ -408,8 +419,8 @@ class TestWindowsDirSwapScriptLive(unittest.TestCase):
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         install, new = self._make_trees(d)
         self._run_script(d, install, new)
-        self.assertEqual(self._read(install, "claude-continue.exe"), "NEW")       # new tree landed
-        self.assertEqual(self._read(install, "_internal", "lib.dll"), "NEWDLL")
+        self.assertEqual(self._read(install, "claude-continue.exe"), "NEW-V2")       # new tree landed
+        self.assertEqual(self._read(install, "_internal", "lib.dll"), "NEWDLL-V2")
         # clean replace (atomic rename + robocopy /MOVE): the old-only orphan is gone,
         # and the .old backup was dropped.
         self.assertFalse(os.path.exists(os.path.join(install, "ORPHAN.txt")))
@@ -425,8 +436,8 @@ class TestWindowsDirSwapScriptLive(unittest.TestCase):
         with self.assertRaises(OSError):
             os.rename(install, install + ".probe")
         self._run_script(d, install, new)
-        self.assertEqual(self._read(install, "claude-continue.exe"), "NEW")       # overwrote despite the lock
-        self.assertEqual(self._read(install, "_internal", "lib.dll"), "NEWDLL")
+        self.assertEqual(self._read(install, "claude-continue.exe"), "NEW-V2")       # overwrote despite the lock
+        self.assertEqual(self._read(install, "_internal", "lib.dll"), "NEWDLL-V2")
         # the in-place overwrite does NOT purge, so the old-only orphan survives —
         # which also proves the in-place path ran (rename would have dropped it).
         self.assertTrue(os.path.exists(os.path.join(install, "ORPHAN.txt")))

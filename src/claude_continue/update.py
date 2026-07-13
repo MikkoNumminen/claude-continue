@@ -457,11 +457,17 @@ def windows_dir_swap_script(install_dir: str, new_tree: str, relaunch: bool, *,
         held dir, so it works while it's locked) — so a partial overwrite is never
         left stranded,
       * if the backup itself fails, do nothing and relaunch the intact old app,
-      * ``robocopy /E`` the new tree's files over the live install (no rename, no
-        purge: orphaned files from the old version are harmless for a one-dir build),
+      * ``robocopy /E /IS /IT`` the new tree's files over the live install (no
+        rename, no purge: orphaned files from the old version are harmless for a
+        one-dir build). ``/IS /IT`` force robocopy to COPY rather than SYNC: by
+        default it silently SKIPS a file whose size and mtime match the target
+        ("Same" class), and the intent here is an unconditional overwrite —
+        without it a same-size file landing on the same mtime tick stays at the
+        old version while robocopy still exits success,
       * if that overwrite fails or leaves no exe, RESTORE the old files from the
         backup over the partial tree (never leave a version-mismatched half-tree —
-        that's the "failed to load Python DLL" footgun),
+        that's the "failed to load Python DLL" footgun); ``/IS /IT`` again, so a
+        "Same"-classified partial file can't survive the restore,
       * drop the backup only once the install has a working exe again.
 
     Validated on real Windows: the rename path against a clean install, and the
@@ -532,13 +538,16 @@ def windows_dir_swap_script(install_dir: str, new_tree: str, relaunch: bool, *,
         # couldn't even back up -> don't risk an overwrite; relaunch the intact old app.
         "if errorlevel 8 goto ccrelaunch",
         # overwrite the new tree's files over the live install (no rename, no purge).
-        'robocopy "%s" "%s" /E /NFL /NDL /NJH /NJS /NP /R:2 /W:3 >NUL' % (new_tree, install_dir),
+        # /IS /IT: COPY, don't sync — robocopy otherwise SKIPS "Same" files (equal
+        # size + mtime) and would leave them at the old version while exiting success.
+        'robocopy "%s" "%s" /E /IS /IT /NFL /NDL /NJH /NJS /NP /R:2 /W:3 >NUL' % (new_tree, install_dir),
         "if errorlevel 8 goto ccinrestore",
         'if exist "%s" goto ccindone' % exe,   # success: new exe is in place
         ":ccinrestore",
         # overwrite failed partway -> restore the old files over the partial tree so we
         # never leave a version-mismatched half-install (the DLL-load footgun).
-        'robocopy "%s" "%s" /E /NFL /NDL /NJH /NJS /NP /R:2 /W:3 >NUL' % (old, install_dir),
+        # /IS /IT for the same reason as the overwrite: an unconditional copy-back.
+        'robocopy "%s" "%s" /E /IS /IT /NFL /NDL /NJH /NJS /NP /R:2 /W:3 >NUL' % (old, install_dir),
         # the restore ITSELF can fail partway: robocopy writes the root exe BEFORE it
         # recurses into _internal, so an exe at the path does NOT prove a complete
         # restore. If the restore didn't finish, the tree is still mismatched -> keep
