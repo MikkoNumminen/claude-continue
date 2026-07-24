@@ -4,6 +4,17 @@ All notable changes to `claude-continue`. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **The in-app update retries a transiently failing asset download.** ``check()``
+  already retried GitHub 5xx blips, but the download itself didn't — so a
+  momentary CDN 504 (observed live seconds after v0.13.0 was published: an
+  instant 504, then a clean 200 on retry) failed the whole update with
+  "download failed: http error 504". The download now retries with the same
+  short backoff, rewriting the file from scratch on each attempt so a partial
+  body never reaches the checksum step.
+
 ## [0.13.0] — 2026-07-24
 
 ### Fixed

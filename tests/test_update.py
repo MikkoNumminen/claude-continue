@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.error
 import zipfile
 from unittest import mock
 
@@ -806,6 +807,90 @@ class TestSslContext(unittest.TestCase):
         path = next(p for p in update._CA_FALLBACKS if os.path.exists(p))
         empty.load_verify_locations(cafile=path)
         self.assertGreater(empty.cert_store_stats().get("x509_ca", 0), 0)
+
+
+class _FakeDownloadResp:
+    """Fake urlopen() response for _download: served via shutil.copyfileobj, which
+    calls .read(n) in a loop until it gets b"". Optionally raises mid-copy (after
+    the given chunks) to simulate a connection dropping partway through a body."""
+    def __init__(self, chunks, raise_after=None):
+        self._chunks = list(chunks)
+        self._raise_after = raise_after
+
+    def read(self, n=-1):
+        if self._chunks:
+            return self._chunks.pop(0)
+        if self._raise_after is not None:
+            exc, self._raise_after = self._raise_after, None
+            raise exc
+        return b""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+_OK_URL = "https://github.com/x/y/releases/download/v1/z.zip"
+
+
+class TestDownloadRetry(unittest.TestCase):
+    def _http(self, code, reason="Error"):
+        return urllib.error.HTTPError(_OK_URL, code, reason, None, None)
+
+    def _dest(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        return os.path.join(d, "asset.zip")
+
+    def test_transient_then_success(self):
+        dest = self._dest()
+        resp2 = _FakeDownloadResp([b"second-attempt-bytes"])
+        sleeps = []
+        with mock.patch("claude_continue.update.urllib.request.urlopen",
+                        side_effect=[self._http(504, "Gateway Time-out"), resp2]) as uo:
+            update._download(_OK_URL, dest, 10.0, sleep=sleeps.append)
+        self.assertEqual(uo.call_count, 2)
+        self.assertEqual(sleeps, [1.0])
+        with open(dest, "rb") as f:
+            self.assertEqual(f.read(), b"second-attempt-bytes")
+
+    def test_non_transient_fails_immediately(self):
+        dest = self._dest()
+        sleeps = []
+        with mock.patch("claude_continue.update.urllib.request.urlopen",
+                        side_effect=[self._http(404, "Not Found")]) as uo:
+            with self.assertRaises(urllib.error.HTTPError) as cm:
+                update._download(_OK_URL, dest, 10.0, sleep=sleeps.append)
+        self.assertEqual(cm.exception.code, 404)
+        self.assertEqual(uo.call_count, 1)
+        self.assertEqual(sleeps, [])
+
+    def test_all_attempts_transient_raises_final(self):
+        dest = self._dest()
+        sleeps = []
+        errs = [self._http(504, "Gateway Time-out") for _ in range(3)]
+        with mock.patch("claude_continue.update.urllib.request.urlopen", side_effect=errs) as uo:
+            with self.assertRaises(urllib.error.HTTPError) as cm:
+                update._download(_OK_URL, dest, 10.0, sleep=sleeps.append)
+        self.assertIs(cm.exception, errs[-1])
+        self.assertEqual(uo.call_count, 3)
+        self.assertEqual(sleeps, [1.0, 2.0])
+
+    def test_partial_body_does_not_survive_a_failed_attempt(self):
+        dest = self._dest()
+        # attempt 1: writes some bytes, then the connection drops mid-copy (transient).
+        resp1 = _FakeDownloadResp([b"partial-junk"], raise_after=urllib.error.URLError("connection reset"))
+        # attempt 2: succeeds cleanly.
+        resp2 = _FakeDownloadResp([b"full-good-bytes"])
+        sleeps = []
+        with mock.patch("claude_continue.update.urllib.request.urlopen", side_effect=[resp1, resp2]) as uo:
+            update._download(_OK_URL, dest, 10.0, sleep=sleeps.append)
+        self.assertEqual(uo.call_count, 2)
+        self.assertEqual(sleeps, [1.0])
+        with open(dest, "rb") as f:
+            self.assertEqual(f.read(), b"full-good-bytes")
 
 
 class TestUrlGuard(unittest.TestCase):
