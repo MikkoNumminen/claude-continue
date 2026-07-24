@@ -7,6 +7,7 @@ from pathlib import Path
 import _support  # noqa: F401
 
 from claude_continue.config import (
+    DEFAULT_FILTER,
     MIN_TIMING_SECONDS,
     Config,
     clamp_timing,
@@ -74,11 +75,13 @@ class TestPrecedence(unittest.TestCase):
         os.environ["CLAUDE_CONTINUE_RETRY_CAP"] = "3"
         os.environ["CLAUDE_CONTINUE_EVERY_HOURS"] = "5.0"
         os.environ["CLAUDE_CONTINUE_FILTER"] = "a, b ,c"
+        os.environ["CLAUDE_CONTINUE_SKIP_DIRS"] = "HRManager, D:\\koodaamista\\rag"
         cfg = resolve(config_path=Path("/nonexistent"))
         self.assertIs(cfg.skip_busy, False)
         self.assertEqual(cfg.retry_cap, 3)
         self.assertEqual(cfg.every_hours, 5.0)
         self.assertEqual(cfg.filter, ["a", "b", "c"])
+        self.assertEqual(cfg.skip_dirs, ["HRManager", "D:\\koodaamista\\rag"])
 
     def test_reset_offset_is_int_and_may_be_negative(self):
         # reset_offset is an int field (coerced from env/CLI) and is NOT floored —
@@ -87,6 +90,23 @@ class TestPrecedence(unittest.TestCase):
         cfg = resolve(config_path=Path("/nonexistent"))
         self.assertEqual(cfg.reset_offset, -600)
         self.assertEqual(timing_issues(cfg), [])  # not a clamped timing value
+
+    def test_file_list_field_string_becomes_one_entry(self):
+        # a hand-edited `"skip_dirs": "D:\\proj"` must act as ONE entry, not
+        # char-iterate; NOT comma-split (paths may contain commas — the env var
+        # is the comma-separated form).
+        path = self._write({"skip_dirs": "D:\\proj,x", "filter": "claude"})
+        cfg = resolve(config_path=path)
+        self.assertEqual(cfg.skip_dirs, ["D:\\proj,x"])
+        self.assertEqual(cfg.filter, ["claude"])
+
+    def test_file_list_field_unusable_shape_keeps_default(self):
+        # `"skip_dirs": true` fed verbatim would crash every iteration site —
+        # including inside the GUI's Tk refresh callback, freezing the app.
+        path = self._write({"skip_dirs": True, "filter": 5})
+        cfg = resolve(config_path=path)
+        self.assertEqual(cfg.skip_dirs, [])
+        self.assertEqual(cfg.filter, DEFAULT_FILTER)
 
     def test_bad_file_falls_back_to_defaults(self):
         fd, path = tempfile.mkstemp(suffix=".json")

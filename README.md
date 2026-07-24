@@ -174,15 +174,22 @@ the CLI, to bake a fixed correction into an unattended `watch`/`install`.
 It also shows a live **Claude instances** panel. On macOS it reads iTerm2 (each
 session's status — working/idle — and, while watching, whether it'll be resumed
 or skipped), or tmux panes in `--tmux` mode (any platform). On **Windows** it
-lists the running Claude Code processes (`claude.exe`, or the npm `node` CLI) —
-the closest equivalent to the macOS session list; Windows has no per-session
-"is processing" signal, so there's no working/idle marker. `claude.exe` is a
-launcher shim that re-execs a worker child in the same console, so a process whose
-parent is another running Claude (created no later than it) is folded onto that
-parent — the panel usually shows the pair as one row, and continue-all writes
-`continue` to each console once rather than twice. (On WSL, where Claude runs as a
-Linux process the Windows process query can't see, the panel notes it has no live
-view.)
+lists the running Claude Code **terminal sessions** (`claude.exe`, or the npm
+`node` CLI) — the closest equivalent to the macOS session list; Windows has no
+per-session "is processing" signal, so there's no working/idle marker. Helper
+processes that also run as `claude.exe` — Chrome's `--chrome-native-host`
+native-messaging host, and headless `-p`/`--print` one-shots owned by some
+other app — aren't real terminal sessions, so they're never listed and never
+receive a `continue`. `claude.exe` is also a launcher shim that re-execs a
+worker child in the same console, so a process whose parent is another running
+Claude (created no later than it) is folded onto that parent — the panel
+usually shows the pair as one row, and continue-all writes `continue` to each
+console once rather than twice. Each row names the session's working folder
+when it can be read (e.g. "claude · HRManager (pid 11672)"), so rows are no
+longer indistinguishable; a folder listed in `skip_dirs`/`--skip-dir` (see
+below) shows as "skipped" instead, matching what continue-all actually does.
+(On WSL, where Claude runs as a Linux process the Windows process query can't
+see, the panel notes it has no live view.)
 
 The **⟳ Update** button checks the latest GitHub release and, if a newer one
 exists, downloads it and restarts the app in place (the standalone macOS `.app`
@@ -334,13 +341,21 @@ claude-continue watch --keystroke --window-title "Windows Terminal"
 
 Caveats for the Windows resume modes:
 
-- **`--keystroke-all` types into _every_ detected Claude console**, found by
-  enumerating `claude.exe` / `node.exe @anthropic-ai/claude-code` processes — not a
-  single chosen window. There is **no skip-busy filter** on this path (unlike the
-  iTerm2/tmux broadcast), so a session that happens to be mid-turn at reset will
-  also receive `continue`. In practice the paused-at-limit sessions are the idle
-  ones, but if you run sessions you don't want nudged, prefer `--exec` or
-  `--keystroke` with a specific `--window-title`.
+- **`--keystroke-all` types into _every_ detected Claude terminal console**, found
+  by enumerating `claude.exe` / `node.exe @anthropic-ai/claude-code` processes —
+  not a single chosen window. Helper processes (Chrome's native-messaging host,
+  headless `-p`/`--print` one-shots) are recognized by their command line and
+  excluded, so they never receive a `continue`. There is **no skip-busy filter**
+  on this path (unlike the iTerm2/tmux broadcast), so a session that happens to
+  be mid-turn at reset will also receive `continue`. In practice the
+  paused-at-limit sessions are the idle ones, but if you run sessions you don't
+  want nudged, prefer `--exec` or `--keystroke` with a specific `--window-title`
+  — or exclude that session's working directory with `--skip-dir DIR` (repeatable;
+  or `skip_dirs` in the config file, `CLAUDE_CONTINUE_SKIP_DIRS` comma-separated
+  in the environment). An entry is a full path (excludes that directory and
+  anything under it; a bare drive like `D:` deliberately covers the whole
+  drive) or a bare folder name matched by basename (e.g. "HRManager") — handy
+  for "that terminal is doing its own thing, don't touch it".
 - It re-injects on every fire (and on each bounded retry), so the same console can
   be sent `continue` more than once across a single reset if the first attempt
   didn't visibly take.

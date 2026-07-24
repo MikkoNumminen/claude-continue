@@ -12,8 +12,10 @@ reliable default on Windows.
 
 from __future__ import annotations
 
+import ntpath
 import shutil
 import subprocess
+from typing import NamedTuple
 
 from . import osenv
 
@@ -90,8 +92,28 @@ def send_keystroke(text: str, *, window_title: str = DEFAULT_WINDOW_TITLE,
 # ``claude-code`` package); the claude-continue app itself is never one of these,
 # so it can't list itself. There's no Windows equivalent of iTerm2's per-session
 # "is processing" flag, so instances are listed without a working/idle marker.
+#
+# Not every claude process is a terminal session, though. The same binary also
+# runs as Chrome's native-messaging host (``claude.exe --chrome-native-host``, a
+# background helper Chrome spawns with its stdio on named pipes) and as headless
+# one-shots / Agent-SDK workers (``claude -p`` / ``--print``) that some OTHER app
+# owns. None of those is a paused terminal waiting for "continue" — listing them
+# double-counts the panel and makes continue-all write into a console the user
+# never sees (observed live: a fire injecting `continue` into the Chrome host,
+# read by the user as "my other terminal got flagged"). parse_instances
+# classifies each row by its real argv and keeps only terminal sessions.
 
-# "<pid>\t<ppid>\t<ctime>\t<name>" per Claude Code process: the native ``claude.exe``,
+
+class Instance(NamedTuple):
+    """One logical Claude terminal session: process name (sans ``.exe``), pid,
+    and — when readable — the session's working directory ('' when unknown).
+    Indexable like the historical ``(name, pid)`` tuples; consumers accept both
+    shapes so pre-``cwd`` callers/tests stay valid."""
+    name: str
+    pid: str
+    cwd: str = ""
+
+# "<pid>\t<ppid>\t<ctime>\t<name>\t<cmdline>" per Claude Code process: the native ``claude.exe``,
 # or a ``node.exe`` whose command line references the scoped package path
 # ``@anthropic-ai/claude-code`` (its node_modules entry, e.g.
 # ...\node_modules\@anthropic-ai\claude-code\cli.js). Anchoring to the scoped
@@ -118,13 +140,120 @@ def send_keystroke(text: str, *, window_title: str = DEFAULT_WINDOW_TITLE,
 # The server-side ``-Filter`` narrows to the two image names in WQL so each GUI poll
 # marshals a handful of processes instead of the whole process table; the node
 # CommandLine match stays client-side in Where-Object (WQL has no regex).
+#
+# The last column is the raw CommandLine, so parse_instances can tell a terminal
+# session from a helper (--chrome-native-host) or a headless one-shot (-p /
+# --print) by its REAL argv. Embedded whitespace is flattened to plain spaces
+# server-side — ``\s`` (not just CR/LF/TAB) because Python's splitlines() also
+# breaks on VT/FF/FS-class controls and (under UTF-8 stdio) NEL/U+2028/U+2029,
+# and a row split there truncates the command line mid-argument, which could
+# false-classify a live session. Flattening swaps one argv whitespace separator
+# for another, so it can't move the exact-token flags the classifier looks for
+# in or out of an argument (and the parser below treats space and tab alike).
 _INSTANCES_SCRIPT = (
     "Get-CimInstance Win32_Process -Filter \"Name='claude.exe' OR Name='node.exe'\" | "
     "Where-Object { $_.Name -eq 'claude.exe' -or "
     "($_.Name -eq 'node.exe' -and $_.CommandLine -match '@anthropic-ai[\\\\/]claude-code') } | "
     "ForEach-Object { \"$($_.ProcessId)`t$($_.ParentProcessId)`t"
-    "$(if ($_.CreationDate) { $_.CreationDate.ToFileTimeUtc() })`t$($_.Name)\" }"
+    "$(if ($_.CreationDate) { $_.CreationDate.ToFileTimeUtc() })`t$($_.Name)`t"
+    "$($_.CommandLine -replace '\\s', ' ')\" }"
 )
+
+
+# Exact argv tokens that mark a claude process as something other than an
+# interactive terminal session. `--chrome-native-host` is the Chrome extension's
+# native-messaging helper (no terminal at all); `-p` / `--print` is headless
+# one-shot / Agent-SDK mode — a claude some OTHER program owns and reads, where
+# an injected "continue" would land in that program's console, not a paused
+# session. A prior substring-regex attempt at this was rejected (prompt text can
+# contain "-p"); matching whole argv tokens from a real command-line parse is
+# what makes it safe — a prompt is ONE token, quotes and all, and can never
+# equal a bare flag. Accepted residual: a value-taking flag whose VALUE is
+# literally one of these tokens (e.g. `--append-system-prompt --print`) is still
+# classified headless — avoiding that would mean modeling claude's whole flag
+# table, and passing a bare flag token as a value is self-inflicted.
+_NON_SESSION_ARGS = ("--chrome-native-host", "-p", "--print")
+
+
+def _argv_from_cmdline(cmdline: str) -> list:
+    """Split a Windows command line into argv the way the modern (post-2008 /
+    UCRT) C runtime does — i.e. what claude.exe and node actually receive: the
+    program-name token ends at the closing quote or first whitespace (no escape
+    processing); after it, 2n backslashes before a quote collapse to n, 2n+1
+    escape the quote, and ``""`` inside quotes emits a literal quote and STAYS
+    in quotes. (shell32's CommandLineToArgvW still implements the older exit-
+    quotes rule for ``""`` — it is not the relevant oracle here.) Pure, so
+    classification is testable on any platform. Divergence on pathological
+    input is acceptable — the caller treats any surprise as "keep the
+    session"."""
+    s = (cmdline or "").strip()
+    if not s:
+        return []
+    if s[0] == '"':
+        end = s.find('"', 1)
+        end = len(s) if end == -1 else end
+        argv, i = [s[1:end]], end + 1
+    else:
+        cuts = [c for c in (s.find(" "), s.find("\t")) if c != -1]
+        end = min(cuts) if cuts else len(s)
+        argv, i = [s[:end]], end
+    cur: list = []
+    in_quotes = started = False
+    while i < len(s):
+        c = s[i]
+        if c == "\\":
+            n = 0
+            while i < len(s) and s[i] == "\\":
+                n, i = n + 1, i + 1
+            if i < len(s) and s[i] == '"':
+                cur.append("\\" * (n // 2))
+                if n % 2:  # odd: the quote is escaped -> literal
+                    cur.append('"')
+                    i += 1
+                # even: leave the quote for the branch below (it toggles)
+            else:
+                cur.append("\\" * n)
+            started = True
+        elif c == '"':
+            if in_quotes and i + 1 < len(s) and s[i + 1] == '"':
+                cur.append('"')  # "" inside quotes = one literal quote
+                i += 2
+            else:
+                in_quotes = not in_quotes
+                i += 1
+            started = True
+        elif c in " \t" and not in_quotes:
+            if started:
+                argv.append("".join(cur))
+                cur, started = [], False
+            i += 1
+        else:
+            cur.append(c)
+            started = True
+            i += 1
+    if started:
+        argv.append("".join(cur))
+    return argv
+
+
+def _is_terminal_session(cmdline: str) -> bool:
+    """False only when the command line PROVES this claude process is not an
+    interactive terminal session (see ``_NON_SESSION_ARGS``). Biased toward
+    keeping: no command line (legacy rows, unreadable) or any parse surprise
+    means True — a wrongly-dropped row is a session silently never resumed (the
+    cardinal sin here), while a wrongly-kept one costs at most a stray keystroke
+    into a console. argv[0] (the program path) is never a flag, so it's skipped,
+    and the scan stops at a bare ``--``: everything after it is positional
+    prompt text (so ``claude -- -p`` is an interactive session whose prompt is
+    "-p" and is kept; a real print-mode ``-p`` always precedes any ``--``)."""
+    if not (cmdline or "").strip():
+        return True
+    for tok in _argv_from_cmdline(cmdline)[1:]:
+        if tok == "--":
+            return True
+        if tok in _NON_SESSION_ARGS:
+            return False
+    return True
 
 
 def build_instances_script() -> str:
@@ -137,14 +266,25 @@ def _clean_name(name: str) -> str:
 
 
 def parse_instances(stdout: str) -> list:
-    """Parse the lister output into ``[(name, pid)]`` — one entry per *logical*
-    Claude session, name without the ``.exe`` suffix (e.g. "claude"). Order-stable.
+    """Parse the lister output into ``[Instance]`` — one entry per *logical*
+    Claude terminal session, name without the ``.exe`` suffix (e.g. "claude").
+    Order-stable. ``cwd`` is always '' here — the command-line protocol can't
+    carry it; ``list_claude_instances`` fills it in from the live process.
 
-    Each line is ``"<pid>\\t<ppid>\\t<ctime>\\t<name>"`` where ``ctime`` is the
-    creation time as a comparable UTC FILETIME (possibly empty). Shorter legacy rows
-    are still accepted — ``"<pid>\\t<ppid>\\t<name>"`` and ``"<pid>\\t<name>"`` — but
-    with no creation time they are never folded (see below), so this stays drop-in
-    for callers/tests that predate the columns.
+    Each line is ``"<pid>\\t<ppid>\\t<ctime>\\t<name>\\t<cmdline>"`` where ``ctime``
+    is the creation time as a comparable UTC FILETIME (possibly empty) and
+    ``cmdline`` is the process's command line (CR/LF/TAB flattened server-side).
+    Shorter legacy rows are still accepted — without a cmdline the row is never
+    classified away, and without a ctime never folded (see below) — so this stays
+    drop-in for callers/tests that predate the columns.
+
+    **Kind classification.** A row whose argv shows it is not a terminal session
+    (``_is_terminal_session``: Chrome's ``--chrome-native-host`` helper, headless
+    ``-p``/``--print`` one-shots and SDK workers) is dropped — those consoles
+    belong to Chrome or to whatever app spawned the worker, so "continue" written
+    there lands in a console no user is looking at, and the panel row shows a
+    "terminal" that doesn't exist. Matching is whole-argv-token only, biased
+    toward keeping (see the docstrings above).
 
     **Launcher/worker fold.** The native ``claude.exe`` is a shim — a ``claude
     --continue`` resolves the session then re-execs ``claude --resume <uuid>`` as a
@@ -172,11 +312,24 @@ def parse_instances(stdout: str) -> list:
     worker — if it instead exits between this listing and the fire, that session is
     skipped for one cycle and resumes on the next poll."""
     rows, seen = [], set()  # rows: (pid, ppid, ctime, name) in listing order
-    for ln in (stdout or "").splitlines():
+    # Rows are delimited by newlines only. splitlines() would also break on
+    # VT/FF/FS-class controls (and NEL/U+2028/U+2029 under UTF-8 stdio), which
+    # the lister's whitespace-flattening should have removed — but a truncated
+    # command line mid-argument could false-classify a live session, so never
+    # give a stray control character the power to split a row here either.
+    for ln in (stdout or "").split("\n"):
+        ln = ln.rstrip("\r")  # tolerate raw CRLF from an injected runner
         if "\t" not in ln:
             continue
         parts = ln.split("\t")
-        if len(parts) >= 4:
+        if len(parts) >= 5:
+            pid, ppid, ctime, name = parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3]
+            # 5th column: the command line. The lister flattened embedded tabs, so
+            # normally this is one part; re-joining any tail keeps a hand-built row
+            # with a raw tab faithful. Not a terminal session -> not listed.
+            if not _is_terminal_session("\t".join(parts[4:])):
+                continue
+        elif len(parts) == 4:
             pid, ppid, ctime, name = parts[0].strip(), parts[1].strip(), parts[2].strip(), parts[3]
         elif len(parts) == 3:
             pid, ppid, ctime, name = parts[0].strip(), parts[1].strip(), "", parts[2]
@@ -202,17 +355,33 @@ def parse_instances(stdout: str) -> list:
         # an unknown time on either side also keeps the row (never fold on a guess).
         if parent_ct is not None and child_ct is not None and parent_ct <= child_ct:
             continue
-        out.append((_clean_name(name), pid))
+        out.append(Instance(_clean_name(name), pid))
     return out
 
 
-def list_claude_instances(*, timeout: float = 30.0, run=None) -> list:
-    """Return ``[(name, pid)]`` for running Claude Code processes (native
-    ``claude.exe`` or the npm node CLI), excluding the claude-continue app.
-    ``run`` runs the PowerShell lister and returns its stdout — injectable so the
-    panel is testable without a real shell."""
+def list_claude_instances(*, timeout: float = 30.0, run=None, cwd_fn=None) -> list:
+    """Return ``[Instance]`` for running Claude Code terminal sessions (native
+    ``claude.exe`` or the npm node CLI), excluding the claude-continue app and
+    non-terminal claude processes (see ``parse_instances``). Each instance's
+    ``cwd`` is filled in best-effort so the panel can say WHICH terminal each row
+    is ("claude · HRManager") and skip-dirs can match — '' when unreadable, which
+    only ever degrades to the old anonymous row. ``run`` runs the PowerShell
+    lister and returns its stdout; ``cwd_fn`` maps a pid to its working directory
+    — both injectable so the panel is testable without a real shell/process."""
     run = run or _run_instances
-    return parse_instances(run(timeout))
+    instances = parse_instances(run(timeout))
+    if cwd_fn is None:
+        cwd_fn = _cwd_of_pid if osenv.is_windows() else None
+    if cwd_fn is None:
+        return instances
+    out = []
+    for inst in instances:
+        try:
+            cwd = cwd_fn(inst.pid) or ""
+        except Exception:  # noqa: BLE001 - cwd is best-effort garnish, never fatal
+            cwd = ""
+        out.append(inst._replace(cwd=cwd))
+    return out
 
 
 def _run_instances(timeout: float) -> str:
@@ -230,6 +399,121 @@ def _run_instances(timeout: float) -> str:
     if proc.returncode != 0:
         raise RuntimeError("instance list failed (%d): %s" % (proc.returncode, (proc.stderr or "").strip()))
     return proc.stdout
+
+
+def _cwd_of_pid(pid) -> str:
+    """Best-effort current directory of another process, '' on any failure.
+
+    Windows has no supported API for another process's cwd; the standard trick
+    (what Process Explorer does) is reading it out of the target's PEB:
+    NtQueryInformationProcess gives the PEB address, and
+    PEB->ProcessParameters->CurrentDirectory is a UNICODE_STRING in the target's
+    memory. Offsets below are the stable, documented x64 layout (ProcessParameters
+    at PEB+0x20, CurrentDirectory at +0x38), so a non-64-bit build skips rather
+    than misread. Needs only PROCESS_QUERY_INFORMATION|PROCESS_VM_READ, which the
+    user has on their own processes. Purely a read — unlike AttachConsole this
+    never touches our console or the target. ctypes is imported lazily so the
+    module still imports on other platforms (where this is never called)."""
+    import ctypes
+    from ctypes import wintypes
+
+    if ctypes.sizeof(ctypes.c_void_p) != 8:
+        return ""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return ""
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    ntdll = ctypes.WinDLL("ntdll")  # type: ignore[attr-defined]
+
+    class _ProcBasicInfo(ctypes.Structure):
+        _fields_ = [("Reserved1", ctypes.c_void_p), ("PebBaseAddress", ctypes.c_void_p),
+                    ("Reserved2", ctypes.c_void_p * 2), ("UniqueProcessId", ctypes.c_void_p),
+                    ("Reserved3", ctypes.c_void_p)]
+
+    k32.OpenProcess.restype = wintypes.HANDLE  # pointer-sized, like CreateFileW above
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.ReadProcessMemory.argtypes = [wintypes.HANDLE, wintypes.LPCVOID, wintypes.LPVOID,
+                                      ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)]
+    handle = k32.OpenProcess(0x0410, False, pid)  # QUERY_INFORMATION | VM_READ
+    if not handle:
+        return ""
+    try:
+        def read(addr, size):
+            buf = ctypes.create_string_buffer(size)
+            got = ctypes.c_size_t(0)
+            ok = k32.ReadProcessMemory(wintypes.HANDLE(handle), ctypes.c_void_p(addr),
+                                       buf, size, ctypes.byref(got))
+            return buf.raw if ok and got.value == size else None
+
+        pbi = _ProcBasicInfo()
+        status = ntdll.NtQueryInformationProcess(wintypes.HANDLE(handle), 0,  # ProcessBasicInformation
+                                                 ctypes.byref(pbi), ctypes.sizeof(pbi), None)
+        if status != 0 or not pbi.PebBaseAddress:
+            return ""
+        raw = read(int(pbi.PebBaseAddress) + 0x20, 8)  # PEB->ProcessParameters
+        if raw is None:
+            return ""
+        params = int.from_bytes(raw, "little")
+        raw = read(params + 0x38, 16)  # CurrentDirectory: UNICODE_STRING {Len, Max, pad, Buffer}
+        if raw is None:
+            return ""
+        length = int.from_bytes(raw[0:2], "little")
+        buffer = int.from_bytes(raw[8:16], "little")
+        if not buffer or not 0 < length <= 0x8000:  # MAX_PATH-ish sanity bound
+            return ""
+        raw = read(buffer, length)
+        if raw is None:
+            return ""
+        return raw.decode("utf-16-le", "replace")
+    finally:
+        k32.CloseHandle(wintypes.HANDLE(handle))
+
+
+def dir_label(cwd: str) -> str:
+    """Short display name for a session's working directory — the final path
+    component (e.g. "HRManager"), '' when unknown. ntpath (not os.path) so
+    Windows paths are handled identically on the Linux CI. Pure."""
+    if not (cwd or "").strip():
+        return ""
+    norm = ntpath.normpath(cwd.strip())
+    return ntpath.basename(norm) or norm  # a drive root ("C:\\") has no basename
+
+
+def dir_skipped(cwd: str, skip_dirs) -> bool:
+    """True when a session working in ``cwd`` is excluded by the user's
+    ``skip_dirs``. An entry containing a path separator (or drive colon) matches
+    that directory itself or anything under it; a bare entry matches the folder
+    NAME, so "HRManager" excludes ``D:\\...\\HRManager`` without typing the full
+    path. A bare drive ("D:" or "D:\\") deliberately matches the whole drive, and
+    a drive-relative entry ("D:proj") reads as the absolute "D:\\proj" — a
+    session's cwd is always fully qualified, so taken literally those shapes
+    would silently match everything or nothing. Case-insensitive throughout
+    (Windows paths). An unknown cwd ('') never matches — a session we can't
+    identify keeps being resumed rather than silently dropped. Pure (ntpath),
+    so testable on any platform."""
+    if isinstance(skip_dirs, str):  # a bare string must never char-iterate
+        skip_dirs = [skip_dirs]
+    if not (cwd or "").strip() or not skip_dirs:
+        return False
+    norm = ntpath.normcase(ntpath.normpath(cwd.strip()))
+    base = ntpath.basename(norm)
+    for entry in skip_dirs:
+        e = str(entry or "").strip()
+        if not e:
+            continue
+        if "\\" in e or "/" in e or ":" in e:
+            if len(e) >= 2 and e[1] == ":" and e[0].isalpha():
+                # "D:" is the whole drive; "D:proj" means "D:\proj" (see docstring)
+                e = e[:2] + "\\" + e[2:].lstrip("\\/")
+            en = ntpath.normcase(ntpath.normpath(e))
+            if en == "\\":
+                continue  # a lone separator would prefix-match every UNC path
+            if norm == en or norm.startswith(en.rstrip("\\") + "\\"):
+                return True
+        elif ntpath.normcase(e) == base:
+            return True
+    return False
 
 
 # --- Window-title listing (used by the doctor to vet the keystroke target) ---
@@ -413,9 +697,15 @@ def _inject_one(pid, text: str) -> None:
 
 
 def continue_instances(text: str, *, instances=None, dry_run: bool = False,
-                       timeout: float = 30.0, inject=None, list_fn=None, is_alive=None) -> list:
+                       timeout: float = 30.0, inject=None, list_fn=None, is_alive=None,
+                       skip_dirs=()) -> list:
     """Send ``text``+Enter to EVERY running Claude session by injecting into each
     one's console input. Returns one label per session acted on.
+
+    A session whose working directory matches ``skip_dirs`` (see ``dir_skipped``)
+    is left untouched — the user's way of saying "that terminal is doing its own
+    thing, don't resume it". The GUI panel renders the same match as "skipped",
+    keeping the panel and the action in agreement.
 
     Best-effort per session: a process that exited (or denies attach) is skipped,
     so one dead session never aborts the rest. We re-check ``pid_alive`` right
@@ -428,7 +718,8 @@ def continue_instances(text: str, *, instances=None, dry_run: bool = False,
     retry re-fires (ccusage's reset estimate was early), a session that already
     resumed and is mid-work can receive a second `continue`. That's the platform
     tradeoff for resuming sessions that SendKeys can't reach at all.
-    ``instances``/``inject``/``list_fn``/``is_alive`` are injectable for tests."""
+    ``instances``/``inject``/``list_fn``/``is_alive`` are injectable for tests;
+    ``instances`` may be ``Instance``s or legacy ``(name, pid)`` tuples."""
     list_fn = list_fn or list_claude_instances
     inject = inject or _inject_one
     is_alive = is_alive or osenv.pid_alive
@@ -436,8 +727,14 @@ def continue_instances(text: str, *, instances=None, dry_run: bool = False,
         instances = list_fn(timeout=timeout)
     keys = text + "\r"
     out, failures = [], []
-    for name, pid in instances:
-        label = "continue -> %s (pid %s)" % (name, pid)
+    for inst in instances:
+        name, pid = inst[0], inst[1]
+        cwd = inst[2] if len(inst) > 2 else ""
+        if dir_skipped(cwd, skip_dirs):
+            continue  # user-excluded project — leave that terminal alone
+        where = dir_label(cwd)
+        label = ("continue -> %s (pid %s, %s)" % (name, pid, where) if where
+                 else "continue -> %s (pid %s)" % (name, pid))
         if dry_run:
             out.append(label)
             continue

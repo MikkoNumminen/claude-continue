@@ -7,6 +7,32 @@ All notable changes to `claude-continue`. Format follows
 ## [Unreleased]
 
 ### Fixed
+- **The Windows "Claude instances" panel no longer lists — or types `continue`
+  into — Chrome's native-messaging helper or a headless one-shot.** The same
+  `claude.exe` also runs as Chrome's `claude.exe --chrome-native-host` (spawned
+  by the Claude-in-Chrome extension, stdio on named pipes) and as `claude -p` /
+  `--print` one-shots and Agent-SDK workers some other app owns; the lister
+  couldn't tell these from a paused terminal session, so they showed up as
+  extra rows and a fire could inject `continue` into the Chrome host's console
+  — read live as a phantom extra terminal. The lister now also reports each
+  process's command line and `parse_instances` classifies rows by a real argv
+  parse (`_argv_from_cmdline`, following `CommandLineToArgvW`'s quoting rules) —
+  never substring matching, so a session whose quoted prompt merely mentions
+  "-p" is kept. Bias is toward keeping: no/unparseable command line leaves the
+  row in.
+
+### Added
+- **Each "Claude instances" row now names its terminal**, e.g. "claude ·
+  HRManager (pid 11672)", instead of four indistinguishable rows. The working
+  directory is read best-effort from the process's PEB (the Process Explorer
+  trick); unreadable cwd just falls back to the old unlabeled row.
+- **`--skip-dir DIR`** (repeatable; config file `skip_dirs`; env
+  `CLAUDE_CONTINUE_SKIP_DIRS`, comma-separated) excludes a session from
+  continue-all by its working directory — "that terminal is doing its own
+  thing, don't resume it". An entry is a full path (covers subdirectories) or
+  a bare folder name matched case-insensitively by basename (e.g.
+  "HRManager"). The GUI panel marks matching rows "skipped" using the same
+  match the action uses, so panel and action can't disagree.
 - **The Windows in-place update robocopy now copies unconditionally (`/IS /IT`).**
   Robocopy's default is a sync: a file whose size and mtime match the target is
   classified "Same" and silently skipped even though the intent is "install the

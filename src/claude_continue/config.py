@@ -28,7 +28,7 @@ _INT_FIELDS = {
     "timeout",
 }
 _FLOAT_FIELDS = {"every_hours"}
-_LIST_FIELDS = {"filter"}
+_LIST_FIELDS = {"filter", "skip_dirs"}
 
 # Timing values must be positive. For poll/retry/verify, a zero/negative value
 # makes ``watch._sleep_until`` return "reached" immediately, turning the
@@ -60,6 +60,11 @@ class Config:
     keystroke: bool = False  # Windows/WSL: type `text` into a terminal window (opt-in)
     window_title: str = "Windows Terminal"  # window to target in keystroke mode
     keystroke_all: bool = False  # Windows: continue EVERY running Claude session via console-input injection, not one window
+    # Windows continue-all: never send `continue` to a Claude session working in
+    # one of these directories — "that terminal is doing its own thing". Entries
+    # are full paths (match the dir and everything under it) or bare folder names
+    # (match by basename, e.g. "HRManager"); see winterm.dir_skipped.
+    skip_dirs: list = field(default_factory=list)
     tmux: bool = False  # resume via `tmux send-keys` — terminal-agnostic (any terminal, macOS/Linux)
     tmux_busy_pattern: str = "esc to interrupt"  # pane content marking a mid-turn (busy) session
     start_window: bool = False  # "quota mode": open a fresh window headlessly instead of resuming terminals
@@ -112,6 +117,25 @@ def _coerce_env(name: str, raw: str):
     return raw
 
 
+def _coerce_file_list(value):
+    """Shape a config-file value for a list field, or None when unusable.
+
+    File values arrive as raw JSON with no coercion, and a list field fed a
+    non-iterable (``"skip_dirs": true``) blows up wherever it's iterated — for
+    skip_dirs that's inside the GUI's Tk refresh callback, which then never
+    re-schedules itself: the whole app freezes with no visible error. A bare
+    string is an equally plausible hand-edit (``"skip_dirs": "D:\\\\proj"``) and
+    would silently char-iterate. So: a list passes through, a string becomes a
+    one-entry list (NOT comma-split — a real path may contain commas; the env
+    var is the comma-separated form), anything else is unusable and the caller
+    keeps the default."""
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    return None
+
+
 def resolve(overrides: dict | None = None, *, config_path: Path = CONFIG_PATH) -> Config:
     """Build a Config from defaults, then file, then env, then explicit overrides.
 
@@ -123,8 +147,13 @@ def resolve(overrides: dict | None = None, *, config_path: Path = CONFIG_PATH) -
     valid = {f.name for f in fields(Config)}
 
     for key, value in _load_file(config_path).items():
-        if key in valid:
-            setattr(cfg, key, value)
+        if key not in valid:
+            continue
+        if key in _LIST_FIELDS:
+            value = _coerce_file_list(value)
+            if value is None:
+                continue  # unusable shape (e.g. `true`) — keep the default
+        setattr(cfg, key, value)
 
     for name in valid:
         env_key = "CLAUDE_CONTINUE_" + name.upper()

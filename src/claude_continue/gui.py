@@ -251,29 +251,46 @@ def win_instances_mode(cfg) -> bool:
     return osenv.is_windows() and not cfg.tmux
 
 
-def format_instances(instances, note, *, watching=False) -> str:
+def format_instances(instances, note, *, watching=False, skip_dirs=()) -> str:
     """Render the Windows 'Claude instances' panel — the running Claude Code
-    processes (``claude.exe`` / node CLI). Windows has no iTerm2-style
-    "is processing" signal, so there's no working/idle marker; each is shown as
-    running. ``instances`` is a list of (name, pid), or None when unavailable.
+    terminal sessions (``claude.exe`` / node CLI; helper processes like Chrome's
+    native host are already classified away by the lister). Windows has no
+    iTerm2-style "is processing" signal, so there's no working/idle marker; each
+    is shown as running. ``instances`` is a list of ``winterm.Instance`` (legacy
+    (name, pid) tuples accepted), or None when unavailable. Each row names the
+    session's working folder when known ("claude · HRManager") so the user can
+    tell WHICH terminal a row is — the fix for rows being indistinguishable and
+    getting mis-attributed to the wrong terminal.
 
     While watching (continue-all mode), each row is annotated "-> will continue"
     so the panel and the action agree — the panel showing N instances now means
     all N get a `continue` at reset, closing the gap that made it look like the
-    watcher ignored them."""
+    watcher ignored them. A row matching ``skip_dirs`` is annotated "skipped"
+    instead (always, not just while watching — it's standing config), rendered
+    from the SAME ``winterm.dir_skipped`` match the action uses, so what the
+    panel claims and what continue-all does can't drift apart."""
     if instances is None:
         return "Claude instances: " + (note or "checking…")
     if not instances:
         return "Claude instances: none running"
     lines = ["Claude instances (%d):" % len(instances)]
-    for name, pid in instances[:_MAX_SESSIONS_SHOWN]:
+    for inst in instances[:_MAX_SESSIONS_SHOWN]:
+        name, pid = inst[0], inst[1]
+        cwd = inst[2] if len(inst) > 2 else ""
         # native install lists as "claude"; an npm node CLI lists as "claude (node)"
         # so it still reads as a Claude instance, not a stray node process.
         label = name if name == "claude" else "claude (%s)" % name
-        if watching:
-            lines.append("  ● %-13s %-15s (pid %s)" % (label, "-> will continue", pid))
+        folder = winterm.dir_label(cwd)
+        if folder:
+            label = "%s · %s" % (label, folder)
+        if len(label) > 24:  # cap the WHOLE label — "claude (node) · <folder>" rows
+            label = label[:23] + "…"  # too, so no row outgrows the card's wraplength
+        if winterm.dir_skipped(cwd, skip_dirs):
+            lines.append("  ○ %-24s %-16s (pid %s)" % (label, "skipped", pid))
+        elif watching:
+            lines.append("  ● %-24s %-16s (pid %s)" % (label, "-> will continue", pid))
         else:
-            lines.append("  ● %-13s (pid %s)" % (label, pid))
+            lines.append("  ● %-24s (pid %s)" % (label, pid))
     if len(instances) > _MAX_SESSIONS_SHOWN:
         lines.append("  ...and %d more" % (len(instances) - _MAX_SESSIONS_SHOWN))
     return "\n".join(lines)
@@ -750,8 +767,12 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
     # the name … PID columns line up.
     card = ttk.Frame(outer, style="Card.TFrame", padding=12)
     card.pack(fill="x", pady=(16, 0))
+    # wraplength fits the widest instance row (bullet 4 + label 24 + annotation 17 +
+    # "(pid 12345)" 11 ≈ 57 mono chars — format_instances caps the label at 24);
+    # fit_to_content() grows the window to match on the first populated poll, so
+    # the wider rows don't wrap inside the card.
     sessions_label = ttk.Label(card, text="Claude instances: checking…", style="Mono.TLabel",
-                               justify="left", anchor="w", wraplength=380)
+                               justify="left", anchor="w", wraplength=460)
     sessions_label.pack(fill="x")
 
     explain = ttk.Label(outer, text="", style="Detail.TLabel", wraplength=400,
@@ -971,7 +992,8 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
             set_buttons(None)
         if win_instances_mode(app_cfg):
             live = should_annotate_continue(watching, watch_mode["quota"], app_cfg.keystroke_all)
-            sessions_label.config(text=format_instances(poll["sessions"], poll["sessions_note"], watching=live))
+            sessions_label.config(text=format_instances(poll["sessions"], poll["sessions_note"],
+                                                        watching=live, skip_dirs=app_cfg.skip_dirs))
         else:
             live = watching and not watch_mode["quota"]
             sessions_label.config(text=format_sessions(
