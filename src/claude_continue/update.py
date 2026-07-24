@@ -250,11 +250,27 @@ def _verify_digest(path: str, digest: str | None) -> None:
         raise UpdateError("checksum mismatch (expected %s…, got %s…)" % (expected[:12], actual[:12]))
 
 
-def _download(url: str, dest: str, timeout: float) -> None:
+def _download(url: str, dest: str, timeout: float, *, attempts: int = 3, sleep=time.sleep) -> None:
+    """Fetch ``url`` to ``dest``, retrying transient failures (GitHub 5xx/429,
+    timeouts) with the same short backoff as ``check()``. The release CDN can
+    504 for a moment right after an asset is published (observed live on
+    v0.13.0: an instant 504, then a clean 200 seconds later), and check()
+    retrying while the actual download didn't meant one blip still failed the
+    whole update. Each attempt reopens ``dest`` with "wb", so a partial body
+    from a failed try never survives into the checksum step."""
     _check_url(url)
     req = urllib.request.Request(url, headers={"User-Agent": _UA["User-Agent"]})
-    with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as resp, open(dest, "wb") as out:
-        shutil.copyfileobj(resp, out)
+    for attempt in range(attempts):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as resp, \
+                    open(dest, "wb") as out:
+                shutil.copyfileobj(resp, out)
+            return
+        except Exception as e:  # noqa: BLE001 - non-transient (or final) failures re-raise
+            if attempt < attempts - 1 and _is_transient(e):
+                sleep(1.0 * (attempt + 1))  # 1s, 2s — matches check()
+                continue
+            raise
 
 
 # --- apply ------------------------------------------------------------------
