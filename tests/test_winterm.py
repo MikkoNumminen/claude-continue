@@ -208,6 +208,31 @@ class TestKindClassification(unittest.TestCase):
             '200\t100\t2000\tclaude.exe\t"C:\\bin\\claude.exe" --resume abc\n')
         self.assertEqual(out, [("claude", "100", "")])
 
+    def test_prompt_after_double_dash_is_positional_not_a_flag(self):
+        # `claude -- -p` is an interactive session whose PROMPT is "-p" — the scan
+        # stops at the bare `--` (end of options), so the row is kept. A real
+        # print-mode `-p` always precedes any `--` and is still dropped.
+        kept = winterm.parse_instances(
+            '100\t1\t1000\tclaude.exe\t"C:\\bin\\claude.exe" -- -p\n')
+        self.assertEqual(kept, [("claude", "100", "")])
+        dropped = winterm.parse_instances(
+            '100\t1\t1000\tclaude.exe\t"C:\\bin\\claude.exe" -p -- x\n')
+        self.assertEqual(dropped, [])
+
+    def test_stray_control_char_cannot_split_a_row(self):
+        # the lister flattens \s server-side, but parse must not trust that: a
+        # vertical tab inside a quoted argument once split the row via
+        # splitlines(), truncating the cmdline to `... "-p` — a false exclusion.
+        # Rows are newline-delimited ONLY; the VT stays inside the argument.
+        out = winterm.parse_instances(
+            '100\t1\t1000\tclaude.exe\t"C:\\bin\\claude.exe" "-p\x0bmore stuff"\n'
+            '200\t2\t1000\tclaude.exe\t"C:\\bin\\claude.exe"\n')
+        self.assertEqual(out, [("claude", "100", ""), ("claude", "200", "")])
+
+    def test_crlf_rows_from_injected_runner_still_parse(self):
+        out = winterm.parse_instances("100\t1\t1000\tclaude.exe\r\n200\t2\t1000\tclaude.exe\r\n")
+        self.assertEqual(out, [("claude", "100", ""), ("claude", "200", "")])
+
 
 class TestDirHelpers(unittest.TestCase):
     def test_dir_label_is_final_component(self):
@@ -236,6 +261,34 @@ class TestDirHelpers(unittest.TestCase):
     def test_blank_entries_ignored(self):
         self.assertFalse(winterm.dir_skipped("D:\\x", ["", "  "]))
 
+    def test_bare_drive_entry_means_the_whole_drive(self):
+        # "D:" and "D:\" both deliberately cover the drive — documented behavior,
+        # not an accident of prefix matching.
+        self.assertTrue(winterm.dir_skipped("D:\\anything\\at\\all", ["D:"]))
+        self.assertTrue(winterm.dir_skipped("D:\\anything", ["D:\\"]))
+        self.assertFalse(winterm.dir_skipped("C:\\other", ["D:"]))
+
+    def test_drive_relative_entry_reads_as_absolute(self):
+        # "D:proj" taken literally is drive-relative and would match NOTHING
+        # (a session cwd is always fully qualified) — it reads as "D:\proj".
+        self.assertTrue(winterm.dir_skipped("D:\\proj\\sub", ["D:proj"]))
+        self.assertFalse(winterm.dir_skipped("D:\\project", ["D:proj"]))
+
+    def test_lone_separator_entry_ignored(self):
+        # "\" would prefix-match every UNC cwd — never resuming those sessions.
+        self.assertFalse(winterm.dir_skipped("\\\\server\\share\\proj", ["\\"]))
+        self.assertFalse(winterm.dir_skipped("\\\\server\\share\\proj", ["/"]))
+
+    def test_unc_entry_matches_its_subtree_only(self):
+        self.assertTrue(winterm.dir_skipped("\\\\srv\\share\\proj\\x", ["\\\\srv\\share\\proj"]))
+        self.assertFalse(winterm.dir_skipped("\\\\srv\\shareX\\proj", ["\\\\srv\\share"]))
+
+    def test_string_skip_dirs_treated_as_one_entry_not_chars(self):
+        # a bare string (mis-shaped config) must act as a single entry — char
+        # iteration would turn "\\" into a match-everything-UNC entry.
+        self.assertTrue(winterm.dir_skipped("D:\\x\\HRManager", "HRManager"))
+        self.assertFalse(winterm.dir_skipped("\\\\srv\\share\\proj", "D:\\HRManager"))
+
 
 class TestListClaudeInstances(unittest.TestCase):
     def test_build_instances_script_matches_claude_processes(self):
@@ -260,10 +313,11 @@ class TestListClaudeInstances(unittest.TestCase):
         # poll marshals a handful of processes, not the whole table.
         self.assertIn("-Filter", s)
         self.assertIn("Name='claude.exe'", s)
-        # the CommandLine column feeds the terminal-vs-helper classification; its
-        # embedded CR/LF/TAB are flattened so a prompt can't break (or forge) the
-        # one-line-per-process tab protocol.
-        self.assertIn("$_.CommandLine -replace '[\\r\\n\\t]', ' '", s)
+        # the CommandLine column feeds the terminal-vs-helper classification; ALL
+        # embedded whitespace (\s — not just CR/LF/TAB: also VT/FF/NEL-class chars
+        # Python's splitlines() would split a row on) is flattened so a prompt
+        # can't break (or forge) the one-line-per-process tab protocol.
+        self.assertIn("$_.CommandLine -replace '\\s', ' '", s)
 
     def test_list_with_injected_runner(self):
         out = winterm.list_claude_instances(

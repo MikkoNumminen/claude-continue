@@ -143,18 +143,20 @@ class Instance(NamedTuple):
 #
 # The last column is the raw CommandLine, so parse_instances can tell a terminal
 # session from a helper (--chrome-native-host) or a headless one-shot (-p /
-# --print) by its REAL argv. Embedded CR/LF/TAB are flattened to spaces
-# server-side so a prompt containing them can't break the one-line-per-process,
-# tab-separated protocol (or forge a row); the flattening swaps one argv
-# whitespace separator for another, so it can't move the exact-token flags the
-# classifier looks for in or out of an argument.
+# --print) by its REAL argv. Embedded whitespace is flattened to plain spaces
+# server-side — ``\s`` (not just CR/LF/TAB) because Python's splitlines() also
+# breaks on VT/FF/FS-class controls and (under UTF-8 stdio) NEL/U+2028/U+2029,
+# and a row split there truncates the command line mid-argument, which could
+# false-classify a live session. Flattening swaps one argv whitespace separator
+# for another, so it can't move the exact-token flags the classifier looks for
+# in or out of an argument (and the parser below treats space and tab alike).
 _INSTANCES_SCRIPT = (
     "Get-CimInstance Win32_Process -Filter \"Name='claude.exe' OR Name='node.exe'\" | "
     "Where-Object { $_.Name -eq 'claude.exe' -or "
     "($_.Name -eq 'node.exe' -and $_.CommandLine -match '@anthropic-ai[\\\\/]claude-code') } | "
     "ForEach-Object { \"$($_.ProcessId)`t$($_.ParentProcessId)`t"
     "$(if ($_.CreationDate) { $_.CreationDate.ToFileTimeUtc() })`t$($_.Name)`t"
-    "$($_.CommandLine -replace '[\\r\\n\\t]', ' ')\" }"
+    "$($_.CommandLine -replace '\\s', ' ')\" }"
 )
 
 
@@ -166,18 +168,24 @@ _INSTANCES_SCRIPT = (
 # session. A prior substring-regex attempt at this was rejected (prompt text can
 # contain "-p"); matching whole argv tokens from a real command-line parse is
 # what makes it safe — a prompt is ONE token, quotes and all, and can never
-# equal a bare flag.
+# equal a bare flag. Accepted residual: a value-taking flag whose VALUE is
+# literally one of these tokens (e.g. `--append-system-prompt --print`) is still
+# classified headless — avoiding that would mean modeling claude's whole flag
+# table, and passing a bare flag token as a value is self-inflicted.
 _NON_SESSION_ARGS = ("--chrome-native-host", "-p", "--print")
 
 
 def _argv_from_cmdline(cmdline: str) -> list:
-    """Split a Windows command line into argv, following CommandLineToArgvW's
-    rules: the program-name token ends at the closing quote or first whitespace
-    (no escape processing); after it, 2n backslashes before a quote collapse to
-    n, 2n+1 escape the quote, and ``""`` inside quotes emits a literal quote.
-    Pure, so classification is testable on any platform. Divergence on
-    pathological input is acceptable — the caller treats any surprise as "keep
-    the session"."""
+    """Split a Windows command line into argv the way the modern (post-2008 /
+    UCRT) C runtime does — i.e. what claude.exe and node actually receive: the
+    program-name token ends at the closing quote or first whitespace (no escape
+    processing); after it, 2n backslashes before a quote collapse to n, 2n+1
+    escape the quote, and ``""`` inside quotes emits a literal quote and STAYS
+    in quotes. (shell32's CommandLineToArgvW still implements the older exit-
+    quotes rule for ``""`` — it is not the relevant oracle here.) Pure, so
+    classification is testable on any platform. Divergence on pathological
+    input is acceptable — the caller treats any surprise as "keep the
+    session"."""
     s = (cmdline or "").strip()
     if not s:
         return []
@@ -234,11 +242,18 @@ def _is_terminal_session(cmdline: str) -> bool:
     keeping: no command line (legacy rows, unreadable) or any parse surprise
     means True — a wrongly-dropped row is a session silently never resumed (the
     cardinal sin here), while a wrongly-kept one costs at most a stray keystroke
-    into a console. argv[0] (the program path) is never a flag, so it's skipped."""
+    into a console. argv[0] (the program path) is never a flag, so it's skipped,
+    and the scan stops at a bare ``--``: everything after it is positional
+    prompt text (so ``claude -- -p`` is an interactive session whose prompt is
+    "-p" and is kept; a real print-mode ``-p`` always precedes any ``--``)."""
     if not (cmdline or "").strip():
         return True
-    argv = _argv_from_cmdline(cmdline)
-    return not any(tok in _NON_SESSION_ARGS for tok in argv[1:])
+    for tok in _argv_from_cmdline(cmdline)[1:]:
+        if tok == "--":
+            return True
+        if tok in _NON_SESSION_ARGS:
+            return False
+    return True
 
 
 def build_instances_script() -> str:
@@ -297,7 +312,13 @@ def parse_instances(stdout: str) -> list:
     worker — if it instead exits between this listing and the fire, that session is
     skipped for one cycle and resumes on the next poll."""
     rows, seen = [], set()  # rows: (pid, ppid, ctime, name) in listing order
-    for ln in (stdout or "").splitlines():
+    # Rows are delimited by newlines only. splitlines() would also break on
+    # VT/FF/FS-class controls (and NEL/U+2028/U+2029 under UTF-8 stdio), which
+    # the lister's whitespace-flattening should have removed — but a truncated
+    # command line mid-argument could false-classify a live session, so never
+    # give a stray control character the power to split a row here either.
+    for ln in (stdout or "").split("\n"):
+        ln = ln.rstrip("\r")  # tolerate raw CRLF from an injected runner
         if "\t" not in ln:
             continue
         parts = ln.split("\t")
@@ -464,9 +485,15 @@ def dir_skipped(cwd: str, skip_dirs) -> bool:
     ``skip_dirs``. An entry containing a path separator (or drive colon) matches
     that directory itself or anything under it; a bare entry matches the folder
     NAME, so "HRManager" excludes ``D:\\...\\HRManager`` without typing the full
-    path. Case-insensitive throughout (Windows paths). An unknown cwd ('') never
-    matches — a session we can't identify keeps being resumed rather than
-    silently dropped. Pure (ntpath), so testable on any platform."""
+    path. A bare drive ("D:" or "D:\\") deliberately matches the whole drive, and
+    a drive-relative entry ("D:proj") reads as the absolute "D:\\proj" — a
+    session's cwd is always fully qualified, so taken literally those shapes
+    would silently match everything or nothing. Case-insensitive throughout
+    (Windows paths). An unknown cwd ('') never matches — a session we can't
+    identify keeps being resumed rather than silently dropped. Pure (ntpath),
+    so testable on any platform."""
+    if isinstance(skip_dirs, str):  # a bare string must never char-iterate
+        skip_dirs = [skip_dirs]
     if not (cwd or "").strip() or not skip_dirs:
         return False
     norm = ntpath.normcase(ntpath.normpath(cwd.strip()))
@@ -476,7 +503,12 @@ def dir_skipped(cwd: str, skip_dirs) -> bool:
         if not e:
             continue
         if "\\" in e or "/" in e or ":" in e:
+            if len(e) >= 2 and e[1] == ":" and e[0].isalpha():
+                # "D:" is the whole drive; "D:proj" means "D:\proj" (see docstring)
+                e = e[:2] + "\\" + e[2:].lstrip("\\/")
             en = ntpath.normcase(ntpath.normpath(e))
+            if en == "\\":
+                continue  # a lone separator would prefix-match every UNC path
             if norm == en or norm.startswith(en.rstrip("\\") + "\\"):
                 return True
         elif ntpath.normcase(e) == base:

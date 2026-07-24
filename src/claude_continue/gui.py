@@ -281,16 +281,16 @@ def format_instances(instances, note, *, watching=False, skip_dirs=()) -> str:
         # so it still reads as a Claude instance, not a stray node process.
         label = name if name == "claude" else "claude (%s)" % name
         folder = winterm.dir_label(cwd)
-        if len(folder) > 14:  # keep the row inside the card (see wraplength below)
-            folder = folder[:13] + "…"
         if folder:
             label = "%s · %s" % (label, folder)
+        if len(label) > 24:  # cap the WHOLE label — "claude (node) · <folder>" rows
+            label = label[:23] + "…"  # too, so no row outgrows the card's wraplength
         if winterm.dir_skipped(cwd, skip_dirs):
-            lines.append("  ○ %-22s %-16s (pid %s)" % (label, "skipped", pid))
+            lines.append("  ○ %-24s %-16s (pid %s)" % (label, "skipped", pid))
         elif watching:
-            lines.append("  ● %-22s %-16s (pid %s)" % (label, "-> will continue", pid))
+            lines.append("  ● %-24s %-16s (pid %s)" % (label, "-> will continue", pid))
         else:
-            lines.append("  ● %-22s (pid %s)" % (label, pid))
+            lines.append("  ● %-24s (pid %s)" % (label, pid))
     if len(instances) > _MAX_SESSIONS_SHOWN:
         lines.append("  ...and %d more" % (len(instances) - _MAX_SESSIONS_SHOWN))
     return "\n".join(lines)
@@ -767,11 +767,12 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
     # the name … PID columns line up.
     card = ttk.Frame(outer, style="Card.TFrame", padding=12)
     card.pack(fill="x", pady=(16, 0))
-    # wraplength fits the widest instance row (label 22 + annotation 16 + pid, ~54
-    # mono chars); fit_to_content() grows the window to match on the first populated
-    # poll, so the wider rows don't wrap inside the card.
+    # wraplength fits the widest instance row (bullet 4 + label 24 + annotation 17 +
+    # "(pid 12345)" 11 ≈ 57 mono chars — format_instances caps the label at 24);
+    # fit_to_content() grows the window to match on the first populated poll, so
+    # the wider rows don't wrap inside the card.
     sessions_label = ttk.Label(card, text="Claude instances: checking…", style="Mono.TLabel",
-                               justify="left", anchor="w", wraplength=440)
+                               justify="left", anchor="w", wraplength=460)
     sessions_label.pack(fill="x")
 
     explain = ttk.Label(outer, text="", style="Detail.TLabel", wraplength=400,

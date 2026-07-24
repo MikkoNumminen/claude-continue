@@ -353,9 +353,9 @@ Caveats for the Windows resume modes:
   — or exclude that session's working directory with `--skip-dir DIR` (repeatable;
   or `skip_dirs` in the config file, `CLAUDE_CONTINUE_SKIP_DIRS` comma-separated
   in the environment). An entry is a full path (excludes that directory and
-  anything under it) or a bare folder name matched by basename (e.g.
-  "HRManager") — handy for "that terminal is doing its own thing, don't touch
-  it".
+  anything under it; a bare drive like `D:` deliberately covers the whole
+  drive) or a bare folder name matched by basename (e.g. "HRManager") — handy
+  for "that terminal is doing its own thing, don't touch it".
 - It re-injects on every fire (and on each bounded retry), so the same console can
   be sent `continue` more than once across a single reset if the first attempt
   didn't visibly take.

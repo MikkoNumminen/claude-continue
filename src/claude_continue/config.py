@@ -117,6 +117,25 @@ def _coerce_env(name: str, raw: str):
     return raw
 
 
+def _coerce_file_list(value):
+    """Shape a config-file value for a list field, or None when unusable.
+
+    File values arrive as raw JSON with no coercion, and a list field fed a
+    non-iterable (``"skip_dirs": true``) blows up wherever it's iterated — for
+    skip_dirs that's inside the GUI's Tk refresh callback, which then never
+    re-schedules itself: the whole app freezes with no visible error. A bare
+    string is an equally plausible hand-edit (``"skip_dirs": "D:\\\\proj"``) and
+    would silently char-iterate. So: a list passes through, a string becomes a
+    one-entry list (NOT comma-split — a real path may contain commas; the env
+    var is the comma-separated form), anything else is unusable and the caller
+    keeps the default."""
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    return None
+
+
 def resolve(overrides: dict | None = None, *, config_path: Path = CONFIG_PATH) -> Config:
     """Build a Config from defaults, then file, then env, then explicit overrides.
 
@@ -128,8 +147,13 @@ def resolve(overrides: dict | None = None, *, config_path: Path = CONFIG_PATH) -
     valid = {f.name for f in fields(Config)}
 
     for key, value in _load_file(config_path).items():
-        if key in valid:
-            setattr(cfg, key, value)
+        if key not in valid:
+            continue
+        if key in _LIST_FIELDS:
+            value = _coerce_file_list(value)
+            if value is None:
+                continue  # unusable shape (e.g. `true`) — keep the default
+        setattr(cfg, key, value)
 
     for name in valid:
         env_key = "CLAUDE_CONTINUE_" + name.upper()

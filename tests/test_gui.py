@@ -451,11 +451,17 @@ class TestFormatInstances(unittest.TestCase):
         self.assertIn("claude", out)
         self.assertNotIn("·", out)
 
-    def test_long_folder_name_truncated_to_fit_card(self):
+    def test_long_label_truncated_to_fit_card(self):
+        # the WHOLE label is capped (not just the folder), so the node-CLI shape
+        # "claude (node) · <folder>" can't outgrow the card either.
         out = format_instances(
-            [("claude", "1", "D:\\koodaamista\\mikkonumminen.dev-and-then-some")], "")
-        self.assertIn("mikkonumminen…", out)
-        self.assertNotIn("mikkonumminen.dev-and-then-some", out)
+            [("claude", "1", "D:\\koodaamista\\mikkonumminen.dev-and-then-some"),
+             ("node", "2", "D:\\koodaamista\\another-very-long-folder-name")], "")
+        self.assertNotIn("and-then-some", out)
+        self.assertNotIn("very-long-folder-name", out)
+        for line in out.splitlines()[1:]:
+            self.assertLessEqual(len(line), 60)  # bullet+label+annotation+pid budget
+        self.assertEqual(out.count("…"), 2)
 
     def test_skip_dir_row_marked_skipped_not_continued(self):
         # panel/action agreement: the row skip_dirs excludes must SAY so — and must
