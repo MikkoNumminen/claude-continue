@@ -28,7 +28,7 @@ _INT_FIELDS = {
     "timeout",
 }
 _FLOAT_FIELDS = {"every_hours"}
-_LIST_FIELDS = {"filter"}
+_LIST_FIELDS = {"filter", "skip_dirs"}
 
 # Timing values must be positive. For poll/retry/verify, a zero/negative value
 # makes ``watch._sleep_until`` return "reached" immediately, turning the
@@ -60,6 +60,11 @@ class Config:
     keystroke: bool = False  # Windows/WSL: type `text` into a terminal window (opt-in)
     window_title: str = "Windows Terminal"  # window to target in keystroke mode
     keystroke_all: bool = False  # Windows: continue EVERY running Claude session via console-input injection, not one window
+    # Windows continue-all: never send `continue` to a Claude session working in
+    # one of these directories — "that terminal is doing its own thing". Entries
+    # are full paths (match the dir and everything under it) or bare folder names
+    # (match by basename, e.g. "HRManager"); see winterm.dir_skipped.
+    skip_dirs: list = field(default_factory=list)
     tmux: bool = False  # resume via `tmux send-keys` — terminal-agnostic (any terminal, macOS/Linux)
     tmux_busy_pattern: str = "esc to interrupt"  # pane content marking a mid-turn (busy) session
     start_window: bool = False  # "quota mode": open a fresh window headlessly instead of resuming terminals

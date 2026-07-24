@@ -55,6 +55,13 @@ class TestKeystrokeAll(unittest.TestCase):
         self.assertEqual(cont.call_args.args[0], "continue")  # cfg.text flows through
         self.assertFalse(cont.call_args.kwargs.get("dry_run"))
 
+    def test_skip_dirs_flow_through_to_continue_all(self):
+        # the config's "leave that terminal alone" list must reach the injection
+        with _ForcePlatform("windows"), \
+             mock.patch("claude_continue.action.winterm.continue_instances", return_value=[]) as cont:
+            perform(Config(keystroke_all=True, skip_dirs=["HRManager"]), dry_run=False)
+        self.assertEqual(cont.call_args.kwargs.get("skip_dirs"), ["HRManager"])
+
     def test_no_sessions_running_returns_empty_not_error(self):
         with _ForcePlatform("windows"), \
              mock.patch("claude_continue.action.winterm.continue_instances", return_value=[]):

@@ -74,11 +74,13 @@ class TestPrecedence(unittest.TestCase):
         os.environ["CLAUDE_CONTINUE_RETRY_CAP"] = "3"
         os.environ["CLAUDE_CONTINUE_EVERY_HOURS"] = "5.0"
         os.environ["CLAUDE_CONTINUE_FILTER"] = "a, b ,c"
+        os.environ["CLAUDE_CONTINUE_SKIP_DIRS"] = "HRManager, D:\\koodaamista\\rag"
         cfg = resolve(config_path=Path("/nonexistent"))
         self.assertIs(cfg.skip_busy, False)
         self.assertEqual(cfg.retry_cap, 3)
         self.assertEqual(cfg.every_hours, 5.0)
         self.assertEqual(cfg.filter, ["a", "b", "c"])
+        self.assertEqual(cfg.skip_dirs, ["HRManager", "D:\\koodaamista\\rag"])
 
     def test_reset_offset_is_int_and_may_be_negative(self):
         # reset_offset is an int field (coerced from env/CLI) and is NOT floored —

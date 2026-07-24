@@ -64,6 +64,10 @@ def add_action_args(p: argparse.ArgumentParser, *, dry_run: bool = False) -> Non
     a.add_argument("--keystroke-all", dest="keystroke_all", action="store_true", default=None,
                    help="Windows: continue EVERY running Claude session by writing into each "
                         "one's console input (any window/tab/pane, no focus stealing) — the GUI's default")
+    a.add_argument("--skip-dir", dest="skip_dirs", action="append", default=None, metavar="DIR",
+                   help="Windows continue-all: never send the text to a Claude session working "
+                        "in DIR — a full path (covers subdirectories) or a bare folder name; "
+                        "repeatable")
     a.add_argument("--tmux", dest="tmux", action="store_true", default=None,
                    help="resume Claude panes running inside tmux (any terminal, macOS/Linux)")
     a.add_argument("--tmux-busy-pattern", dest="tmux_busy_pattern", default=None, metavar="TEXT",
@@ -132,6 +136,9 @@ def overrides_to_argv(overrides: dict) -> list:
             argv += ["--every", str(value)]
         elif name == "filter":
             argv += ["--filter", ",".join(value)]
+        elif name == "skip_dirs":
+            for d in value:
+                argv += ["--skip-dir", str(d)]
         elif name in ("node_path", "log_path"):
             continue  # launchd-only, not watch flags
         else:

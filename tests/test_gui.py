@@ -440,6 +440,39 @@ class TestFormatInstances(unittest.TestCase):
         out = format_instances([("claude", "22108"), ("claude", "35552")], "", watching=True)
         self.assertEqual(out.count("-> will continue"), 2)  # both get a continue
 
+    def test_row_names_the_working_folder(self):
+        # each row says WHICH terminal it is, so rows can't be mis-attributed
+        # to the wrong terminal ("claude · HRManager", not four identical rows).
+        out = format_instances([("claude", "11672", "D:\\koodaamista\\HRManager\\")], "")
+        self.assertIn("claude · HRManager", out)
+
+    def test_row_without_cwd_stays_anonymous(self):
+        out = format_instances([("claude", "22108", "")], "")
+        self.assertIn("claude", out)
+        self.assertNotIn("·", out)
+
+    def test_long_folder_name_truncated_to_fit_card(self):
+        out = format_instances(
+            [("claude", "1", "D:\\koodaamista\\mikkonumminen.dev-and-then-some")], "")
+        self.assertIn("mikkonumminen…", out)
+        self.assertNotIn("mikkonumminen.dev-and-then-some", out)
+
+    def test_skip_dir_row_marked_skipped_not_continued(self):
+        # panel/action agreement: the row skip_dirs excludes must SAY so — and must
+        # never claim "-> will continue" — even mid-watch. Same matcher as the action.
+        out = format_instances(
+            [("claude", "1", "D:\\koodaamista\\HRManager\\"),
+             ("claude", "2", "D:\\koodaamista\\web\\")],
+            "", watching=True, skip_dirs=["HRManager"])
+        self.assertEqual(out.count("-> will continue"), 1)
+        self.assertEqual(out.count("skipped"), 1)
+
+    def test_skip_annotation_shown_even_while_idle(self):
+        # skip_dirs is standing config, not a watch-time effect
+        out = format_instances([("claude", "1", "D:\\x\\HRManager")], "",
+                               watching=False, skip_dirs=["HRManager"])
+        self.assertIn("skipped", out)
+
 
 class TestWatchingNote(unittest.TestCase):
     def test_nothing_to_show(self):

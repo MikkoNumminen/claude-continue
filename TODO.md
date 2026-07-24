@@ -24,6 +24,18 @@ Known **no free option** (record, don't chase): macOS notarization needs the App
 Developer Program ($99/yr) — paid, no free equivalent. Keep the documented manual
 Gatekeeper workaround (right-click → Open / `xattr -dr com.apple.quarantine`).
 
+## GUI control for per-row skip-dirs
+
+`skip_dirs` (excluding a session's working directory from continue-all) is
+currently config-file / env / `--skip-dir` only; the "Claude instances" panel
+shows which rows are skipped but has no way to toggle one from the GUI. Add a
+per-row control (e.g. a right-click or small button) that adds/removes that
+row's folder from `skip_dirs` — needs a small persist path first, since the GUI
+today only *reads* `Config`, it never writes the config file back out.
+
+- [ ] Per-row "skip this session" toggle in the instances panel, backed by a
+  new config-write path (today `gui.py` has no code that saves `Config` to disk).
+
 ## Hardening surfaced by the #37 review (free, deferred as out-of-scope there)
 
 - [x] `update.cleanup_stale_update` reaps every `cc-update-*` temp dir unconditionally

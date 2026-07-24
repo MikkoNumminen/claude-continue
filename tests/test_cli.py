@@ -341,6 +341,16 @@ class TestOverridesRoundTrip(unittest.TestCase):
     def test_start_window_true_emits_bare_flag(self):
         self.assertEqual(cli.overrides_to_argv({"start_window": True}), ["--start-window"])
 
+    def test_skip_dir_flag_repeatable_and_roundtrips(self):
+        p = cli.build_parser()
+        install_args = p.parse_args(
+            ["install", "--skip-dir", "HRManager", "--skip-dir", "D:\\koodaamista\\rag"])
+        self.assertEqual(install_args.skip_dirs, ["HRManager", "D:\\koodaamista\\rag"])
+        argv = cli.overrides_to_argv(cli.build_overrides(install_args))
+        self.assertEqual(argv.count("--skip-dir"), 2)
+        watch_args = p.parse_args(["watch"] + argv)
+        self.assertEqual(watch_args.skip_dirs, ["HRManager", "D:\\koodaamista\\rag"])
+
 
 class TestFireCommand(unittest.TestCase):
     def test_fire_dry_run_calls_perform_with_dry_run(self):

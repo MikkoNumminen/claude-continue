@@ -76,7 +76,8 @@ def _continue_all(cfg: Config, dry_run: bool) -> list:
     loop re-arms, matching how an empty session list behaves on the other
     platforms."""
     try:
-        return winterm.continue_instances(cfg.text, dry_run=dry_run, timeout=float(cfg.timeout))
+        return winterm.continue_instances(cfg.text, dry_run=dry_run, timeout=float(cfg.timeout),
+                                          skip_dirs=cfg.skip_dirs)
     except (RuntimeError, OSError, subprocess.SubprocessError) as e:
         raise ActionError("continue-all failed: %s" % e) from e
 
