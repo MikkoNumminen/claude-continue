@@ -54,6 +54,18 @@ CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR"
 # leave real headroom — this is a bounded tail read, not a full-file parse.
 TAIL_BYTES = 512 * 1024
 
+# ...but a bounded read can slice the decisive entry in half, and then we drop it as
+# a partial line and report "unreadable" for a session we could in fact answer for.
+# That is not hypothetical: real transcripts here contain single JSONL lines of
+# 2.5 MB (one large assistant turn), and Claude Code appends a small `system`
+# turn_duration entry after each one — so the tail holds exactly one skippable
+# entry and half of the answer. The consequences are the ones this module exists to
+# prevent: an unreadable session is held back forever, and if every session goes
+# unreadable the watch loop falls back to the ccusage signal and the old re-fire
+# storm returns. So when the small window comes back with no answer AND it was
+# truncated, widen once. Still bounded — a runaway file is never read whole.
+WIDE_TAIL_BYTES = 8 * 1024 * 1024
+
 # A transcript untouched for longer than this is a closed/abandoned session, not
 # something waiting on a reset. Used only when scanning *all* projects (no live
 # process list to narrow by).
@@ -350,6 +362,50 @@ def _timestamp(entry: dict) -> Optional[datetime]:
 
 # --- public lookups ----------------------------------------------------------
 
+# Answers keyed by (path, mtime, size). A transcript is an append-only log, so
+# content that has not changed cannot have a different answer — and both callers
+# ask repeatedly: the GUI polls every 5s while watching, and the watch loop's
+# verifier re-reads on every retry. Without this, an 8 MB widened read would be
+# repeated thousands of times over an overnight run for no new information.
+# Residual: an in-place rewrite that preserved BOTH mtime and size would be missed,
+# which a JSONL append log does not do.
+_CACHE: dict = {}
+_CACHE_LIMIT = 64
+
+
+def _read_state(path: Path):
+    """``(LimitState, cwd)`` for one transcript, widening the read if a bounded tail
+    could not answer. Cached on (mtime, size).
+
+    The two small values are extracted here and the line list is dropped: caching
+    the lines instead would pin up to ``WIDE_TAIL_BYTES`` of decoded strings per
+    entry, which across the cache is hundreds of megabytes held for the life of the
+    process.
+    """
+    try:
+        stat = path.stat()
+        key = (str(path), stat.st_mtime, stat.st_size)
+    except OSError:
+        return (UNKNOWN, "")
+    hit = _CACHE.get(key)
+    if hit is not None:
+        return hit
+
+    lines = tail_lines(path, TAIL_BYTES)
+    state = state_from_lines(lines)
+    # An unreadable answer from a window that did NOT reach the start of the file
+    # may just be a decisive entry sliced in half (see WIDE_TAIL_BYTES).
+    if not state.known and stat.st_size > TAIL_BYTES:
+        lines = tail_lines(path, WIDE_TAIL_BYTES)
+        state = state_from_lines(lines)
+
+    result = (replace(state, path=str(path)), _cwd_from_lines(lines))
+    if len(_CACHE) >= _CACHE_LIMIT:
+        _CACHE.clear()  # crude but bounded; the working set is a handful of sessions
+    _CACHE[key] = result
+    return result
+
+
 def state_for_cwd(cwd: str, *, root: Optional[Path] = None) -> LimitState:
     """Limit state of the session working in ``cwd`` (UNKNOWN when unreadable)."""
     directory = project_dir(cwd, root=root)
@@ -358,9 +414,7 @@ def state_for_cwd(cwd: str, *, root: Optional[Path] = None) -> LimitState:
     path = newest_transcript(directory)
     if path is None:
         return UNKNOWN
-    # `replace` rather than a field-by-field rebuild: a hand-copied constructor
-    # silently drops any field added to LimitState later.
-    return replace(state_from_lines(tail_lines(path)), path=str(path))
+    return _read_state(path)[0]
 
 
 def recent_states(*, now: datetime, root: Optional[Path] = None,
@@ -390,12 +444,10 @@ def recent_states(*, now: datetime, root: Optional[Path] = None,
                 continue
         except OSError:
             continue
-        lines = tail_lines(path)
-        state = state_from_lines(lines)
+        state, cwd = _read_state(path)
         if not state.known:
             continue
-        out.append((_cwd_from_lines(lines) or directory.name,
-                    replace(state, path=str(path))))
+        out.append((cwd or directory.name, state))
     return out
 
 

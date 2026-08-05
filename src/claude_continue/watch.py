@@ -317,11 +317,14 @@ def run(
     # scanning the developer's actual ~/.claude.
     real_action = perform is None
     perform = perform or action_mod.perform
-    # The per-session limit view the verifier prefers over ccusage. Only meaningful
-    # when require_limit is on: with it off the user has explicitly asked to fire
-    # regardless of session state, so verification stays on the ccusage signal.
-    if (snapshot is None and real_action and cfg.require_limit
-            and not cfg.start_window and not cfg.exec_cmd):
+    # The per-session limit view the verifier prefers over ccusage. Deliberately NOT
+    # conditioned on require_limit: the gate decides who gets typed into, while this
+    # decides whether the fire took, and the ccusage signal is broken either way. A
+    # user who opts out of the gate would otherwise still get the re-fire storm this
+    # release exists to remove. Skipped only where there is no session to read: exec
+    # runs a headless command and quota mode opens a window without touching a
+    # terminal, so both keep ccusage as their only meaningful signal.
+    if snapshot is None and real_action and not cfg.start_window and not cfg.exec_cmd:
         def snapshot():  # noqa: E306 - closes over cfg/clock
             return action_mod.snapshot(cfg, clock())
 

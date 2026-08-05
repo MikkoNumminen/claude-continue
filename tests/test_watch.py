@@ -1,6 +1,7 @@
 import logging
 import unittest
 from datetime import timedelta
+from unittest import mock
 
 import _support  # noqa: F401
 from _support import FakeClock, utc
@@ -538,6 +539,44 @@ class TestWatchLoop(unittest.TestCase):
                   stop=lambda: fc.now() > T0 + timedelta(hours=4), use_lock=False)
         self.assertEqual(len(fired), 3)  # initial + 2 bounded retries, then dedupe
         self.assertTrue(all(f >= T0 + timedelta(hours=1) for f in fired))
+
+    def test_transcript_verification_is_not_tied_to_the_limit_gate(self):
+        """Opting out of the gate must not opt you back into the re-fire storm.
+
+        The gate decides WHO gets typed into; verification decides whether the fire
+        took. ccusage is the broken signal either way, so `--no-require-limit` has
+        to keep the transcript check — otherwise those users still get 30 `continue`s
+        into sessions that are working fine.
+        """
+        self.assertIsNotNone(self._snapshot_used(require_limit=True),
+                             "gate on: transcript verification missing")
+        self.assertIsNotNone(self._snapshot_used(require_limit=False),
+                             "gate off must still verify against transcripts, not ccusage")
+
+    def _snapshot_used(self, *, require_limit):
+        """The snapshot port run() handed its verifier, or None if it built none.
+
+        `perform` is deliberately NOT injected: run() only builds the default
+        snapshot alongside the default performer, so injecting one would hide the
+        very wiring under test.
+        """
+        T0 = utc(2026, 6, 14, 6)
+        fc = FakeClock(T0 - timedelta(minutes=1))
+        captured = {}
+        orig = watch._verify_and_retry
+
+        def spy(cfg_, block_, **kw):
+            captured["snapshot"] = kw.get("snapshot")
+            return orig(cfg_, block_, **kw)
+
+        with mock.patch.object(watch, "_verify_and_retry", spy), \
+             mock.patch.object(watch.action_mod, "perform", return_value=["s"]), \
+             mock.patch.object(watch.action_mod, "snapshot",
+                               return_value=action_mod.Snapshot(known=True, idle=1)):
+            watch.run(cfg(require_limit=require_limit), clock=fc.now, sleep=fc.sleep,
+                      get_block=lambda t: block(1, T0), stop=lambda: False,
+                      use_lock=False, max_fires=1)
+        return captured.get("snapshot")
 
     def test_unknown_snapshot_falls_back_to_the_ccusage_check(self):
         # No readable transcript must not disable verification entirely.

@@ -21,6 +21,11 @@ All notable changes to `claude-continue`. Format follows
   file until a freshly opened `claude` writes its first turn, so without this a
   long-dead limit could wave a `continue` into a brand-new session — the very
   thing the gate exists to prevent.
+- Transcript answers are cached on (path, mtime, size). Both callers ask
+  repeatedly — the GUI polls every 5s while watching and the verifier re-reads on
+  every retry — and an append-only log that has not changed cannot have a
+  different answer. Only the two small extracted values are cached, never the
+  line list, which would pin megabytes per entry for the life of the process.
 - `status` and `doctor` report the gate: which sessions are ready, which are
   waiting and until when, which are stale, and which have no readable transcript. The Windows
   instances panel annotates each row the same way, so what the panel promises and
@@ -53,6 +58,18 @@ All notable changes to `claude-continue`. Format follows
   transcript says exactly when it becomes resumable. The loop honours that time
   directly, because nothing else can: by then ccusage reports no active window at
   all and an idle poll never fires in resume mode.
+- **An oversized transcript entry no longer makes a session unreadable.** The
+  limit state is read from a bounded tail, and a bounded read can slice the
+  decisive entry in half — real transcripts here hold single JSONL lines of
+  2.5 MB, followed by the small `system` entry Claude Code appends after each
+  turn, so the window held one skippable entry and half the answer. The session
+  was then held back forever, and once every session read as unreadable the watch
+  loop fell back to ccusage and the re-fire storm returned. The read now widens
+  once (still bounded) when a truncated window comes back with no answer.
+- **Transcript verification no longer depends on the gate being on.** The gate
+  decides who gets typed into; verification decides whether the fire took, and
+  ccusage is the broken signal either way — so `--no-require-limit` users were
+  still getting the re-fire storm this release exists to remove.
 - **`fire` and `once` report a closed limit gate instead of crashing.**
   `NothingToResume` is not an `ActionError`, so it escaped both commands' handlers
   and surfaced as an uncaught traceback whenever no session was parked on a limit.

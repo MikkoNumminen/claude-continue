@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from datetime import timedelta
 from pathlib import Path
+from unittest import mock
 
 import _support  # noqa: F401
 from _support import utc
@@ -260,8 +261,126 @@ class TestTailLines(unittest.TestCase):
         self.assertEqual(limits.tail_lines(Path("nope-does-not-exist.jsonl")), [])
 
 
+class TestOversizedEntries(unittest.TestCase):
+    """A bounded tail read can slice the decisive entry in half, and dropping it as
+    a partial line reports "unreadable" for a session we could answer for. Real
+    transcripts here hold single JSONL lines of 2.5 MB, and Claude Code appends a
+    small `system` entry after each turn — so the window holds one skippable entry
+    and half the answer. Held-forever is the mild consequence; the sharp one is that
+    an all-unreadable snapshot sends the watch loop back to the ccusage signal and
+    the re-fire storm."""
+
+    def setUp(self):
+        limits._CACHE.clear()
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def _write(self, *entries):
+        d = self.root / "D--koodaamista-app"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "s.jsonl").write_text("\n".join(entries) + "\n", encoding="utf-8")
+
+    def _big(self, text_bytes, ts="2026-08-05T06:00:00Z"):
+        return entry(timestamp=ts, message={"role": "assistant",
+                                            "content": [{"type": "text", "text": "x" * text_bytes}]})
+
+    def _system(self, ts="2026-08-05T06:00:01Z"):
+        return entry(type="system", subtype="turn_duration", timestamp=ts)
+
+    def test_an_entry_larger_than_the_tail_window_still_answers(self):
+        self._write(self._big(limits.TAIL_BYTES * 2), self._system())
+        st = limits.state_for_cwd("D:\\koodaamista\\app", root=self.root)
+        self.assertTrue(st.known, "an oversized turn made the session unreadable")
+        self.assertFalse(st.limited)
+
+    def test_an_oversized_turn_before_a_limit_still_reports_the_limit(self):
+        self._write(self._big(limits.TAIL_BYTES * 2), limit_entry(), self._system())
+        st = limits.state_for_cwd("D:\\koodaamista\\app", root=self.root)
+        self.assertTrue(st.limited)
+        self.assertIsNotNone(st.reset_at)
+
+    def test_the_widened_read_is_still_bounded(self):
+        # a file with nothing decisive anywhere must not tempt us into reading it
+        # whole; it stays UNKNOWN rather than growing the read without limit
+        self._write(*[user_entry(ts="2026-08-05T06:00:00Z") for _ in range(3)])
+        self.assertFalse(limits.state_for_cwd("D:\\koodaamista\\app", root=self.root).known)
+
+    def test_a_small_file_never_triggers_the_wide_read(self):
+        reads = []
+        real = limits.tail_lines
+
+        def spy(path, max_bytes=limits.TAIL_BYTES):
+            reads.append(max_bytes)
+            return real(path, max_bytes)
+
+        self._write(assistant_entry())
+        with mock.patch.object(limits, "tail_lines", spy):
+            limits.state_for_cwd("D:\\koodaamista\\app", root=self.root)
+        self.assertEqual(reads, [limits.TAIL_BYTES])
+
+
+class TestStateCache(unittest.TestCase):
+    """Both callers ask repeatedly — the GUI polls every 5s while watching and the
+    verifier re-reads on every retry — so an unchanged transcript must not be
+    re-parsed (and a widened 8 MB read must not be repeated) for no new answer."""
+
+    def setUp(self):
+        limits._CACHE.clear()
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = self.root / "D--koodaamista-app"
+        self.dir.mkdir(parents=True)
+        self.path = self.dir / "s.jsonl"
+
+    def _write(self, *entries, mtime=None):
+        self.path.write_text("\n".join(entries) + "\n", encoding="utf-8")
+        if mtime is not None:
+            os.utime(self.path, (mtime, mtime))
+
+    def test_unchanged_file_is_read_once(self):
+        self._write(limit_entry(), mtime=1000)
+        with mock.patch.object(limits, "tail_lines", wraps=limits.tail_lines) as spy:
+            for _ in range(5):
+                limits.state_for_cwd("D:\\koodaamista\\app", root=self.root)
+        self.assertEqual(spy.call_count, 1)
+
+    def test_a_changed_file_is_re_read(self):
+        # the whole point: a session that resumes must stop reporting a limit
+        self._write(limit_entry(), mtime=1000)
+        self.assertTrue(limits.state_for_cwd("D:\\koodaamista\\app", root=self.root).limited)
+        self._write(limit_entry(), user_entry(), assistant_entry(), mtime=2000)
+        self.assertFalse(limits.state_for_cwd("D:\\koodaamista\\app", root=self.root).limited)
+
+    def test_same_mtime_but_different_size_is_re_read(self):
+        # an append landing inside one filesystem timestamp tick must not be missed
+        self._write(limit_entry(), mtime=1000)
+        self.assertTrue(limits.state_for_cwd("D:\\koodaamista\\app", root=self.root).limited)
+        self._write(limit_entry(), user_entry(), assistant_entry(), mtime=1000)
+        self.assertFalse(limits.state_for_cwd("D:\\koodaamista\\app", root=self.root).limited)
+
+    def test_cache_stays_bounded(self):
+        for i in range(limits._CACHE_LIMIT + 20):
+            p = self.dir / ("s%d.jsonl" % i)
+            p.write_text(limit_entry() + "\n", encoding="utf-8")
+            limits._read_state(p)
+        self.assertLessEqual(len(limits._CACHE), limits._CACHE_LIMIT)
+
+    def test_cache_does_not_pin_the_transcript_contents(self):
+        # Caching the line list would hold up to WIDE_TAIL_BYTES of decoded strings
+        # per entry — hundreds of megabytes across the cache, for the life of the
+        # process. Only the two small extracted values belong in there.
+        self._write(limit_entry(), mtime=1000)
+        limits.state_for_cwd("D:\\koodaamista\\app", root=self.root)
+        for cached in limits._CACHE.values():
+            for value in cached:
+                self.assertNotIsInstance(value, (list, tuple, dict, bytes))
+
+
 class TestDiscovery(unittest.TestCase):
     def setUp(self):
+        limits._CACHE.clear()
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
         self.addCleanup(self._tmp.cleanup)
