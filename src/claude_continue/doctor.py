@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 
 from . import action as action_mod
 from . import launchd as launchd_mod
+from . import limits as limits_mod
 from . import osenv, schedule
 from . import scheduler as scheduler_mod
 from . import winterm as winterm_mod
@@ -201,6 +202,13 @@ def _check_action(cfg: Config, *, which, exists, preview, window_titles=None) ->
         # continue-all (Windows console injection) ignores filter/skip_busy, so
         # don't cite them there — they only govern the iTerm2/tmux broadcast.
         if cfg.keystroke_all and plat == osenv.WINDOWS:
+            # An empty preview with the gate on usually means sessions ARE running
+            # and simply aren't limited. Saying "no running Claude sessions" there
+            # sends the user hunting for a process problem that doesn't exist; the
+            # limits check below has the real story.
+            if cfg.require_limit:
+                return Check("action", WARN,
+                             "nothing to resume right now — see the limits check for why")
             return Check("action", WARN, "no running Claude sessions to continue right now")
         return Check("action", WARN, "nothing to act on right now (filter %s, skip_busy=%s)" % (cfg.filter, cfg.skip_busy))
     return Check("action", OK, "%d target(s): %s" % (len(out), ", ".join(out)))
@@ -216,6 +224,7 @@ def run_checks(
     action_preview=None,
     window_titles=None,
     now=None,
+    session_states=None,
 ) -> list:
     """Run every preflight check and return the ordered list of results."""
     now = now or (lambda: datetime.now(timezone.utc))
@@ -236,7 +245,41 @@ def run_checks(
         _check_config(cfg),
         _check_action(cfg, which=which, exists=iterm_exists, preview=action_preview,
                       window_titles=window_titles),
+        _check_limit_gate(cfg, now, states=session_states),
     ]
+
+
+def _check_limit_gate(cfg: Config, now, states=None) -> Check:
+    """Can we actually tell which sessions are waiting on a reset?
+
+    With the gate on, an unreadable transcript means nothing is ever resumed. That
+    failure is quiet by design (better silent than typing into working terminals),
+    so the doctor is where it has to be loud.
+    """
+    if not cfg.require_limit:
+        return Check("limits", WARN,
+                     "gate OFF — every matching session gets the text, limited or not "
+                     "(--require-limit turns it back on)")
+    if cfg.exec_cmd or cfg.start_window:
+        return Check("limits", OK, "not used by this action (no session is typed into)")
+    states = states or action_mod.session_states
+    # One clock read for the whole check: `now()` twice could classify the same
+    # session either side of a staleness boundary and read as self-contradictory.
+    at = now()
+    try:
+        found = states(cfg, at)
+    except Exception as e:  # noqa: BLE001 - a probe must not fail the doctor
+        return Check("limits", FAIL, "could not read session state: %s" % e)
+    if not found:
+        return Check("limits", WARN,
+                     "no Claude sessions found — nothing would be resumed right now")
+    unreadable = [label for label, state in found if not state.known]
+    summary = "%d session(s): %s" % (len(found), limits_mod.summarise(found, at))
+    if unreadable:
+        return Check("limits", WARN,
+                     "%s; no readable transcript for %s — those are held back, so a "
+                     "reset would pass unnoticed" % (summary, ", ".join(unreadable)))
+    return Check("limits", OK, summary)
 
 
 def worst_status(checks) -> str:

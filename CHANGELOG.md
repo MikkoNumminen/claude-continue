@@ -6,7 +6,73 @@ All notable changes to `claude-continue`. Format follows
 
 ## [Unreleased]
 
+### Added
+- **A limit gate: `continue` is only typed into sessions that are actually parked
+  on a spent rate limit** (`require_limit`, on by default; `--no-require-limit`
+  restores the old fire-at-everything behaviour). Claude Code writes a
+  `You've hit your session limit · resets 8:40am` entry into a session's own
+  transcript when it cuts it off, and stops once the session resumes. The new
+  `limits.py` reads that, so a session that merely finished its work is left
+  alone instead of being told to `continue` something nobody asked for. It also
+  yields the **real** reset time, straight from the server, rather than
+  ccusage's floor-to-the-hour estimate.
+- A limit more than 12 hours past its reset is treated as abandoned, not as
+  something to nudge. A project's newest transcript is the *previous* session's
+  file until a freshly opened `claude` writes its first turn, so without this a
+  long-dead limit could wave a `continue` into a brand-new session — the very
+  thing the gate exists to prevent.
+- Transcript answers are cached on (path, mtime, size). Both callers ask
+  repeatedly — the GUI polls every 5s while watching and the verifier re-reads on
+  every retry — and an append-only log that has not changed cannot have a
+  different answer. Only the two small extracted values are cached, never the
+  line list, which would pin megabytes per entry for the life of the process.
+- `status` and `doctor` report the gate: which sessions are ready, which are
+  waiting and until when, which are stale, and which have no readable transcript. The Windows
+  instances panel annotates each row the same way, so what the panel promises and
+  what a fire does cannot drift apart.
+
 ### Fixed
+- **A fire is no longer verified against a signal that cannot show success.**
+  ccusage floors a block's start to the hour and calls the end five hours later,
+  so a resume landing *inside* that bucket produces messages ccusage attributes
+  to the same block. The post-fire check read "the window never rolled" while the
+  sessions were working perfectly well, and re-fired `continue` every two minutes
+  for the whole retry budget. Observed live on 2026-08-05: 62 `continue`s into
+  two healthy sessions across two windows. Verification now reads the sessions'
+  own transcripts and stops the moment nothing is limited any more; ccusage
+  remains the fallback when no transcript is readable.
+- **An early fire no longer leaves the real reset unattended.** With a negative
+  `reset_offset` larger than the retry budget (~61m at the defaults), every retry
+  correctly reported "not rolled yet" about a window that still had an hour to
+  run, the budget ran out *before* the reset, and the window was then written off
+  as handled — so nothing fired at the actual reset either. Observed live: a -80m
+  correction gave up 16 minutes early and left a two-hour coverage gap. The loop
+  now tracks which fire *times* it has tried per window, so a missed corrected
+  time still gets a second attempt at the uncorrected reset.
+- **The give-up message no longer blames quota for a scheduling mistake.** Saying
+  "quota coverage has lapsed" about a window with an hour left to run was simply
+  wrong and hid the actual fault. It now says the fire was early, by how much,
+  and that the real reset is being re-armed.
+- **A still-limited session is re-armed on its own stated reset, not retried
+  blind.** Re-firing at a session Claude is still refusing is pure noise; the
+  transcript says exactly when it becomes resumable. The loop honours that time
+  directly, because nothing else can: by then ccusage reports no active window at
+  all and an idle poll never fires in resume mode.
+- **An oversized transcript entry no longer makes a session unreadable.** The
+  limit state is read from a bounded tail, and a bounded read can slice the
+  decisive entry in half — real transcripts here hold single JSONL lines of
+  2.5 MB, followed by the small `system` entry Claude Code appends after each
+  turn, so the window held one skippable entry and half the answer. The session
+  was then held back forever, and once every session read as unreadable the watch
+  loop fell back to ccusage and the re-fire storm returned. The read now widens
+  once (still bounded) when a truncated window comes back with no answer.
+- **Transcript verification no longer depends on the gate being on.** The gate
+  decides who gets typed into; verification decides whether the fire took, and
+  ccusage is the broken signal either way — so `--no-require-limit` users were
+  still getting the re-fire storm this release exists to remove.
+- **`fire` and `once` report a closed limit gate instead of crashing.**
+  `NothingToResume` is not an `ActionError`, so it escaped both commands' handlers
+  and surfaced as an uncaught traceback whenever no session was parked on a limit.
 - **The in-app update retries a transiently failing asset download.** ``check()``
   already retried GitHub 5xx blips, but the download itself didn't — so a
   momentary CDN 504 (observed live seconds after v0.13.0 was published: an

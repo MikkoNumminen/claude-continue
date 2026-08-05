@@ -1,10 +1,12 @@
 import logging
 import unittest
 from datetime import timedelta
+from unittest import mock
 
 import _support  # noqa: F401
 from _support import FakeClock, utc
 
+from claude_continue import action as action_mod
 from claude_continue import watch
 from claude_continue.ccusage import CcusageUnavailable
 from claude_continue.config import Config
@@ -380,6 +382,258 @@ class TestWatchLoop(unittest.TestCase):
         watch.run(cfg(retry_cap=4), clock=fc.now, sleep=fc.sleep, get_block=gb, perform=perform,
                   stop=lambda: False, use_lock=False, max_fires=1)
         self.assertEqual(len(fired), 1 + 4)  # initial fire + retry_cap re-fires, then stop
+
+    def test_early_fire_gets_a_second_attempt_at_the_real_reset(self):
+        """Regression for the 2026-08-05 coverage gap.
+
+        A -80m "Fire at" correction fired at 20:41 for a window resetting at 22:00.
+        The retry budget (90s + 30x120s = 61m) ran out at 21:44, still 16 minutes
+        before the reset it was waiting for, and the window was then written off as
+        handled — so nothing fired at 22:00 either and the quota sat idle for hours.
+        The corrected time missing must leave the real reset still armed.
+        """
+        T0 = utc(2026, 6, 14, 10)  # window reset
+        early = timedelta(minutes=-80)
+        fc = FakeClock(T0 - timedelta(hours=2))
+        fired = []
+        st = {"rolled": False}
+
+        def gb(timeout=30):
+            return block(1, T0 + timedelta(hours=5)) if st["rolled"] else block(1, T0)
+
+        def perform(c, dry_run=False):
+            fired.append(fc.now())
+            if fc.now() >= T0:  # only a fire at/after the real reset can take
+                st["rolled"] = True
+            return ["s"]
+
+        watch.run(cfg(reset_offset=int(early.total_seconds()), retry_cap=2),
+                  clock=fc.now, sleep=fc.sleep, get_block=gb, perform=perform,
+                  stop=lambda: fc.now() > T0 + timedelta(hours=2), use_lock=False)
+        self.assertTrue(fired, "never fired at all")
+        self.assertLess(fired[0], T0, "the corrected (early) time should be tried first")
+        self.assertTrue(any(f >= T0 for f in fired),
+                        "the real reset was never attempted after the early fire missed")
+
+    def test_gave_up_message_names_an_early_fire_instead_of_blaming_quota(self):
+        # Saying "quota coverage has lapsed" about a window with an hour left to run
+        # is simply wrong, and it hides the actual fault (the fire time).
+        T0 = utc(2026, 6, 14, 10)
+        records = []
+
+        class _Log:
+            def info(self, msg, *a):
+                records.append(("info", msg % a if a else msg))
+
+            def warning(self, msg, *a):
+                records.append(("warning", msg % a if a else msg))
+
+        watch._log_give_up(cfg(), block(1, T0), T0 - timedelta(minutes=16), _Log())
+        text = records[-1][1]
+        self.assertIn("before the window was due to roll", text)
+        self.assertNotIn("quota coverage has lapsed", text)
+
+        records.clear()
+        watch._log_give_up(cfg(), block(1, T0), T0 + timedelta(minutes=5), _Log())
+        self.assertIn("quota coverage has lapsed", records[-1][1])
+
+    def test_a_resumed_session_ends_verification_without_waiting_for_ccusage(self):
+        # The core fix: ccusage cannot show a rolled window when the resume lands
+        # inside its floored five-hour bucket, so it kept reporting the old block
+        # while the sessions were working. The transcript signal answers directly.
+        T0 = utc(2026, 6, 14, 6)
+        fc = FakeClock(T0 - timedelta(minutes=1))
+        fired = []
+
+        def gb(timeout=30):
+            return block(1, T0)  # ccusage never rolls — the whole point
+
+        def perform(c, dry_run=False):
+            fired.append(fc.now())
+            return ["s"]
+
+        def snapshot():
+            return action_mod.Snapshot(known=True, ready=0, waiting=0, idle=2,
+                                       detail="2 not limited")
+
+        watch.run(cfg(), clock=fc.now, sleep=fc.sleep, get_block=gb, perform=perform,
+                  snapshot=snapshot, stop=lambda: False, use_lock=False, max_fires=1)
+        self.assertEqual(len(fired), 1)  # no re-fire storm
+
+    def test_still_limited_re_arms_on_the_stated_reset_instead_of_retrying(self):
+        """Re-firing at a session Claude is still refusing is pure noise. But the
+        re-arm has to actually HAPPEN: by this point ccusage reports no active
+        window (its estimate ended while the paused session made no activity) and an
+        idle poll never fires in resume mode, so a dropped re-arm leaves the session
+        parked indefinitely. Assert both halves: no retry storm, AND a fire at the
+        session's own stated reset.
+        """
+        T0 = utc(2026, 6, 14, 6)
+        ready_at = T0 + timedelta(minutes=40)
+        fc = FakeClock(T0 - timedelta(minutes=1))
+        fired = []
+        st = {"limited": True}
+
+        def gb(timeout=30):
+            # after the estimate passes, ccusage sees nothing active — the paused
+            # session generates no usage, so there is no window to report
+            return block(1, T0) if fc.now() < T0 else None
+
+        def perform(c, dry_run=False):
+            fired.append(fc.now())
+            if fc.now() >= ready_at:
+                st["limited"] = False
+            return ["s"]
+
+        def snapshot():
+            if st["limited"]:
+                return action_mod.Snapshot(known=True, ready=0, waiting=1, idle=0,
+                                           soonest=ready_at, detail="1 waiting")
+            return action_mod.Snapshot(known=True, idle=1, detail="1 not limited")
+
+        watch.run(cfg(), clock=fc.now, sleep=fc.sleep, get_block=gb, perform=perform,
+                  snapshot=snapshot, stop=lambda: fc.now() > ready_at + timedelta(hours=1),
+                  use_lock=False)
+        self.assertEqual(len(fired), 2, "expected one fire, then one re-arm — got %s" % (fired,))
+        self.assertEqual(fired[1], ready_at)  # exactly the session's stated reset
+
+    def test_a_past_rearm_time_is_ignored_rather_than_spun_on(self):
+        # A stale/past reset must not make the loop fire in a tight circle.
+        T0 = utc(2026, 6, 14, 6)
+        fc = FakeClock(T0 - timedelta(minutes=1))
+        fired = []
+
+        def gb(timeout=30):
+            return block(1, T0)
+
+        def perform(c, dry_run=False):
+            fired.append(fc.now())
+            return ["s"]
+
+        def snapshot():
+            return action_mod.Snapshot(known=True, ready=0, waiting=1, idle=0,
+                                       soonest=T0 - timedelta(hours=9), detail="stale")
+
+        watch.run(cfg(), clock=fc.now, sleep=fc.sleep, get_block=gb, perform=perform,
+                  snapshot=snapshot, stop=lambda: fc.now() > T0 + timedelta(hours=3),
+                  use_lock=False)
+        self.assertEqual(len(fired), 1)
+
+    def test_a_late_correction_does_not_earn_an_extra_immediate_fire(self):
+        # The uncorrected-reset second chance exists for a correction that fired
+        # EARLY. With a positive offset the uncorrected reset is already in the past,
+        # so firing it would just be another `continue` carrying no new information.
+        T0 = utc(2026, 6, 14, 6)
+        fc = FakeClock(T0 - timedelta(minutes=1))
+        fired = []
+
+        def gb(timeout=30):
+            return block(1, T0)  # never rolls
+
+        def perform(c, dry_run=False):
+            fired.append(fc.now())
+            return ["s"]
+
+        watch.run(cfg(reset_offset=3600, retry_cap=2), clock=fc.now, sleep=fc.sleep,
+                  get_block=gb, perform=perform,
+                  stop=lambda: fc.now() > T0 + timedelta(hours=4), use_lock=False)
+        self.assertEqual(len(fired), 3)  # initial + 2 bounded retries, then dedupe
+        self.assertTrue(all(f >= T0 + timedelta(hours=1) for f in fired))
+
+    def test_transcript_verification_is_not_tied_to_the_limit_gate(self):
+        """Opting out of the gate must not opt you back into the re-fire storm.
+
+        The gate decides WHO gets typed into; verification decides whether the fire
+        took. ccusage is the broken signal either way, so `--no-require-limit` has
+        to keep the transcript check — otherwise those users still get 30 `continue`s
+        into sessions that are working fine.
+        """
+        self.assertIsNotNone(self._snapshot_used(require_limit=True),
+                             "gate on: transcript verification missing")
+        self.assertIsNotNone(self._snapshot_used(require_limit=False),
+                             "gate off must still verify against transcripts, not ccusage")
+
+    def _snapshot_used(self, *, require_limit):
+        """The snapshot port run() handed its verifier, or None if it built none.
+
+        `perform` is deliberately NOT injected: run() only builds the default
+        snapshot alongside the default performer, so injecting one would hide the
+        very wiring under test.
+        """
+        T0 = utc(2026, 6, 14, 6)
+        fc = FakeClock(T0 - timedelta(minutes=1))
+        captured = {}
+        orig = watch._verify_and_retry
+
+        def spy(cfg_, block_, **kw):
+            captured["snapshot"] = kw.get("snapshot")
+            return orig(cfg_, block_, **kw)
+
+        with mock.patch.object(watch, "_verify_and_retry", spy), \
+             mock.patch.object(watch.action_mod, "perform", return_value=["s"]), \
+             mock.patch.object(watch.action_mod, "snapshot",
+                               return_value=action_mod.Snapshot(known=True, idle=1)):
+            watch.run(cfg(require_limit=require_limit), clock=fc.now, sleep=fc.sleep,
+                      get_block=lambda t: block(1, T0), stop=lambda: False,
+                      use_lock=False, max_fires=1)
+        return captured.get("snapshot")
+
+    def test_unknown_snapshot_falls_back_to_the_ccusage_check(self):
+        # No readable transcript must not disable verification entirely.
+        T0 = utc(2026, 6, 14, 6)
+        fc = FakeClock(T0 - timedelta(minutes=1))
+        fired = []
+
+        def gb(timeout=30):
+            return block(1, T0)  # never rolls
+
+        def perform(c, dry_run=False):
+            fired.append(fc.now())
+            return ["s"]
+
+        watch.run(cfg(retry_cap=3), clock=fc.now, sleep=fc.sleep, get_block=gb, perform=perform,
+                  snapshot=lambda: action_mod.Snapshot(known=False), stop=lambda: False,
+                  use_lock=False, max_fires=1)
+        self.assertEqual(len(fired), 1 + 3)  # initial + retry_cap re-fires
+
+    def test_a_gated_attempt_leaves_the_window_armed(self):
+        # The gate declining is not the same as having fired: the window must stay
+        # available so the next check can act on it once a session is actually ready.
+        T0 = utc(2026, 6, 14, 6)
+        fc = FakeClock(T0 - timedelta(minutes=1))
+        calls = {"n": 0}
+
+        def gb(timeout=30):
+            return block(1, T0)
+
+        def perform(c, dry_run=False):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise action_mod.NothingToResume("1 not limited")
+            return ["s"]
+
+        watch.run(cfg(), clock=fc.now, sleep=fc.sleep, get_block=gb, perform=perform,
+                  snapshot=lambda: action_mod.Snapshot(known=True, idle=1),
+                  stop=lambda: False, use_lock=False, max_fires=2)
+        self.assertEqual(calls["n"], 2)  # retried the same window after the gate closed
+
+    def test_gate_sleeps_until_the_sessions_stated_reset(self):
+        T0 = utc(2026, 6, 14, 6)
+        ready_at = T0 + timedelta(minutes=45)
+        fc = FakeClock(T0 - timedelta(minutes=1))
+        attempts = []
+
+        def gb(timeout=30):
+            return block(1, T0)
+
+        def perform(c, dry_run=False):
+            attempts.append(fc.now())
+            raise action_mod.NothingToResume("1 waiting", retry_at=ready_at)
+
+        watch.run(cfg(poll_interval=6000), clock=fc.now, sleep=fc.sleep, get_block=gb,
+                  perform=perform, stop=lambda: False, use_lock=False, max_fires=2)
+        # second attempt happens at the session's own reset, not a poll interval later
+        self.assertEqual(attempts[1], ready_at)
 
     def test_fire_failure_does_not_crash_daemon(self):
         # perform raising must NOT propagate out of run(); the loop just re-arms

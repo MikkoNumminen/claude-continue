@@ -6,7 +6,7 @@ from unittest import mock
 import _support  # noqa: F401
 from _support import utc
 
-from claude_continue import doctor, osenv
+from claude_continue import doctor, limits, osenv
 from claude_continue.ccusage import CcusageUnavailable
 from claude_continue.config import Config
 from claude_continue.doctor import FAIL, OK, WARN
@@ -16,6 +16,11 @@ from claude_continue.model import Block
 def _block(end):
     return Block(id="b", start=end - timedelta(hours=5), end=end, actual_end=None,
                  is_active=True, is_gap=False)
+
+
+def _limited(reset_at):
+    """A session parked on a limit that reset at ``reset_at`` — ready to resume."""
+    return limits.LimitState(known=True, limited=True, kind="session", reset_at=reset_at)
 
 
 class _ForcePlatform:
@@ -146,6 +151,49 @@ class TestConfigCheck(unittest.TestCase):
         self.assertIn("retry_interval", c.detail)
 
 
+class TestLimitGateCheck(unittest.TestCase):
+    """With the gate on, an unreadable transcript silently resumes nothing. That
+    quiet is deliberate (better silent than typing into working terminals), which
+    makes the doctor the only place it can be surfaced."""
+
+    NOW = utc(2026, 1, 2, 12)
+
+    def _check(self, cfg, states):
+        return doctor._check_limit_gate(cfg, lambda: self.NOW, states=lambda c, n: states)
+
+    def test_ready_session_reports_ok(self):
+        c = self._check(Config(), [("app", _limited(self.NOW - timedelta(minutes=1)))])
+        self.assertEqual(c.status, OK)
+        self.assertIn("ready", c.detail)
+
+    def test_unreadable_transcript_warns_loudly(self):
+        c = self._check(Config(), [("app", limits.UNKNOWN)])
+        self.assertEqual(c.status, WARN)
+        self.assertIn("no readable transcript", c.detail)
+
+    def test_no_sessions_warns(self):
+        self.assertEqual(self._check(Config(), []).status, WARN)
+
+    def test_gate_off_warns_that_everything_gets_typed_into(self):
+        c = self._check(Config(require_limit=False), [])
+        self.assertEqual(c.status, WARN)
+        self.assertIn("gate OFF", c.detail)
+
+    def test_not_applicable_to_actions_that_type_into_nothing(self):
+        for cfg in (Config(exec_cmd="claude -p go"), Config(start_window=True)):
+            c = self._check(cfg, [])
+            self.assertEqual(c.status, OK)
+            self.assertIn("not used", c.detail)
+
+    def test_probe_failure_is_reported_not_raised(self):
+        def boom(cfg, now):
+            raise RuntimeError("wmi exploded")
+
+        c = doctor._check_limit_gate(Config(), lambda: self.NOW, states=boom)
+        self.assertEqual(c.status, FAIL)
+        self.assertIn("wmi exploded", c.detail)
+
+
 class TestActionCheck(unittest.TestCase):
     def _check(self, cfg, **kw):
         kw.setdefault("which", lambda n: "/bin/" + n)
@@ -264,10 +312,21 @@ class TestActionCheck(unittest.TestCase):
         # nothing running to continue right now -> WARN, not a hard FAIL, and the
         # message must NOT cite filter/skip_busy (continue-all ignores them, #8).
         with _ForcePlatform("windows"):
+            c = self._check(Config(keystroke_all=True, require_limit=False),
+                            which=lambda n: "powershell.exe", preview=lambda: [])
+        self.assertEqual(c.status, WARN)
+        self.assertIn("no running Claude sessions", c.detail)
+
+    def test_gated_empty_preview_does_not_claim_the_processes_are_missing(self):
+        # With the gate on, an empty preview usually means sessions ARE running and
+        # simply aren't limited. "no running Claude sessions" would send the user
+        # hunting for a process problem that doesn't exist.
+        with _ForcePlatform("windows"):
             c = self._check(Config(keystroke_all=True), which=lambda n: "powershell.exe",
                             preview=lambda: [])
         self.assertEqual(c.status, WARN)
-        self.assertIn("no running Claude sessions", c.detail)
+        self.assertNotIn("no running Claude sessions", c.detail)
+        self.assertIn("limits check", c.detail)
         self.assertNotIn("filter", c.detail)
         self.assertNotIn("skip_busy", c.detail)
 
@@ -293,10 +352,13 @@ class TestRunChecks(unittest.TestCase):
                 ccusage_probe=lambda t: _block(utc(2026, 1, 2, 13)),
                 scheduler_describe=lambda: ("running", "up"),
                 action_preview=lambda: ["s"],
+                session_states=lambda cfg, now: [("app", _limited(utc(2026, 1, 2, 11)))],
                 now=lambda: utc(2026, 1, 2, 12),
             )
         self.assertEqual(doctor.worst_status(checks), OK)
-        self.assertEqual({c.name for c in checks}, {"python", "platform", "ccusage", "node", "agent", "config", "action"})
+        self.assertEqual({c.name for c in checks},
+                         {"python", "platform", "ccusage", "node", "agent", "config",
+                          "action", "limits"})
 
     def test_threads_window_titles_into_keystroke_check(self):
         with _ForcePlatform("windows"):

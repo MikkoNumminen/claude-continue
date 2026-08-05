@@ -29,6 +29,14 @@ blocks from your local Claude Code transcripts — the only local source for thi
 `~/.claude.json` and the `claude` CLI expose nothing), waits until reset + a
 small buffer, fires the configured action, then re-arms for the next window.
 
+Before it types anything, it checks each session's own transcript for the
+"You've hit your session limit · resets HH:MM" entry Claude Code writes when it
+cuts a session off. Only sessions parked on a limit whose reset has arrived get
+a `continue`; a session that simply finished its work is left alone, and so is one
+whose limit is more than 12 hours stale (that is an abandoned session, not one
+waiting to be nudged). This is the **limit gate**, on by default
+(`--no-require-limit` turns it off).
+
 Runs on **macOS, Windows, and WSL** — the reset detection and scheduling are
 portable; only the "fire" action and the unattended agent differ per platform
 (see [Platform support](#platform-support)).
@@ -346,19 +354,22 @@ Caveats for the Windows resume modes:
   not a single chosen window. Helper processes (Chrome's native-messaging host,
   headless `-p`/`--print` one-shots) are recognized by their command line and
   excluded, so they never receive a `continue`. There is **no skip-busy filter**
-  on this path (unlike the iTerm2/tmux broadcast), so a session that happens to
-  be mid-turn at reset will also receive `continue`. In practice the
-  paused-at-limit sessions are the idle ones, but if you run sessions you don't
-  want nudged, prefer `--exec` or `--keystroke` with a specific `--window-title`
+  on this path (unlike the iTerm2/tmux broadcast) — Windows exposes no per-session
+  "is processing" flag. The limit gate covers most of what skip-busy was for: a
+  session mid-turn is not parked on a spent limit, so it is not typed into. If
+  you run sessions you don't want nudged at all, prefer `--exec` or `--keystroke`
+  with a specific `--window-title`
   — or exclude that session's working directory with `--skip-dir DIR` (repeatable;
   or `skip_dirs` in the config file, `CLAUDE_CONTINUE_SKIP_DIRS` comma-separated
   in the environment). An entry is a full path (excludes that directory and
   anything under it; a bare drive like `D:` deliberately covers the whole
   drive) or a bare folder name matched by basename (e.g. "HRManager") — handy
   for "that terminal is doing its own thing, don't touch it".
-- It re-injects on every fire (and on each bounded retry), so the same console can
-  be sent `continue` more than once across a single reset if the first attempt
-  didn't visibly take.
+- It re-injects on each bounded retry, but only while the transcript still shows
+  the session parked on a spent limit. Once a session resumes, the retries stop:
+  verification reads the sessions themselves, not ccusage's five-hour bucket
+  (which cannot show a rolled window when the resume lands inside it, and used to
+  keep the retry loop firing into sessions that were already working).
 - Both keystroke paths are **best-effort and unverified on a live Windows box in
   this build** — run `claude-continue doctor` first; it lists exactly which
   sessions/windows would be targeted before you arm the watch.
@@ -371,6 +382,9 @@ Caveats for the Windows resume modes:
     so its reset estimate can run early. `reset_offset` (seconds; `--reset-offset`,
     or the GUI's **Fire at** field) is added to the estimate before firing — a
     signed correction reused on every window. Default 0 (trust the estimate).
+    A correction that fires *before* the real reset is safe: the limit gate holds
+    the fire until a session is genuinely resumable, and if the corrected time
+    misses, the window's uncorrected reset is still attempted.
 - **Fixed schedule:** if you pass `--at HH:MM` or `--every H [--anchor HH:MM]`,
   that schedule is used instead of ccusage — useful for anchoring windows to your
   working hours, or when Node/ccusage isn't available.
@@ -393,6 +407,7 @@ Key settings: `buffer` (90s after reset before firing), `reset_offset` (0s;
 signed correction added to ccusage's reset estimate), `verify_delay` (90s),
 `poll_interval` (600s while idle), `retry_interval` (120s) / `retry_cap` (30,
 so retries span ~1h — enough to cover a worst-case-early estimate),
+`require_limit` (true; only resume sessions parked on a spent limit),
 `skip_busy` (true), `filter`, `text`, `exec_cmd`, `session`, `timeout` (30s),
 `tmux` (false) / `tmux_busy_pattern` ("esc to interrupt"), (Windows/WSL)
 `keystroke` (false) / `window_title` ("Windows Terminal"), and (native Windows)
