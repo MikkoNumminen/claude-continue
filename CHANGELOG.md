@@ -4,6 +4,20 @@ All notable changes to `claude-continue`. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **A mangled TLS record no longer fails the whole in-app update.** Reported live
+  on v0.14.0: `download failed: [SSL: DECRYPTION_FAILED_OR_BAD_RECORD_MAC]`. A
+  record failing its MAC check means bytes were altered in transit — a flaky link,
+  or a TLS-intercepting security product rewriting the stream — and a fresh
+  connection normally succeeds. But `ssl.SSLError` is an `OSError` and neither a
+  `URLError` nor a `ConnectionError`, so it fell through every branch of the
+  transient check and got no retry at all, while a plain connection reset got
+  three. A truncated body (`http.client.IncompleteRead`) had the same gap. Both
+  are now retried; a certificate verification failure deliberately still is not,
+  because that is about identity rather than transport.
+
 ## [0.14.0] — 2026-08-06
 
 ### Added

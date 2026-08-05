@@ -14,6 +14,7 @@ pinned key. For a personal tool the trust root is "you trust this GitHub repo".
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import os
 import shlex
@@ -160,9 +161,28 @@ _TRANSIENT_HTTP = {408, 425, 429, 500, 502, 503, 504}  # worth retrying
 
 
 def _is_transient(e) -> bool:
-    """A retryable network blip (GitHub 5xx/429, timeout, connection reset)."""
+    """A retryable network blip (GitHub 5xx/429, timeout, reset, mangled TLS)."""
     if isinstance(e, urllib.error.HTTPError):
         return e.code in _TRANSIENT_HTTP
+    if isinstance(e, ssl.SSLError):
+        # A TLS record that fails its MAC check ("DECRYPTION_FAILED_OR_BAD_RECORD_MAC")
+        # means bytes were mangled in transit — a flaky link, or a TLS-intercepting
+        # security product rewriting the stream. It is per-connection and a fresh
+        # connection normally succeeds, so it belongs with connection resets. The
+        # release assets are ~12 MB, which is plenty of surface for one bad record.
+        #
+        # SSLError is an OSError but NOT a URLError or ConnectionError, so it fell
+        # through every branch here and failed the update outright, with no retry,
+        # while a plain reset was retried. Reported live on v0.14.0.
+        #
+        # Certificate verification is the deliberate exception: that failure is
+        # about identity, not transport. Retrying it only delays the same answer
+        # and would paper over exactly the case the check exists to catch.
+        return not isinstance(e, ssl.SSLCertVerificationError)
+    if isinstance(e, http.client.IncompleteRead):
+        # A body cut short mid-transfer. Same category, and likelier the larger the
+        # asset; not an OSError at all, so it also missed every branch below.
+        return True
     # URLError wraps socket errors (timeout/DNS/reset); TimeoutError/ConnectionError too
     return isinstance(e, (urllib.error.URLError, TimeoutError, ConnectionError))
 

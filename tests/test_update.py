@@ -1,6 +1,8 @@
 import hashlib
 import json
+import http.client
 import os
+import ssl
 import shutil
 import subprocess
 import sys
@@ -877,6 +879,67 @@ class TestDownloadRetry(unittest.TestCase):
         self.assertIs(cm.exception, errs[-1])
         self.assertEqual(uo.call_count, 3)
         self.assertEqual(sleeps, [1.0, 2.0])
+
+    def test_a_mangled_tls_record_mid_download_is_retried(self):
+        """Reported live on v0.14.0:
+
+            update failed: download failed: [SSL: DECRYPTION_FAILED_OR_BAD_RECORD_MAC]
+            decryption failed or bad record mac (_ssl.c:2580)
+
+        A TLS record failing its MAC check means bytes were mangled in transit — a
+        flaky link, or a TLS-intercepting security product rewriting the stream. It
+        is per-connection, so a fresh connection normally succeeds. But ssl.SSLError
+        is an OSError and NOT a URLError or ConnectionError, so it fell through
+        every branch of _is_transient and failed the whole update on the first blip,
+        while a plain connection reset was retried. A ~12 MB asset is plenty of
+        surface for one bad record.
+        """
+        dest = self._dest()
+        bad_mac = ssl.SSLError(
+            1, "[SSL: DECRYPTION_FAILED_OR_BAD_RECORD_MAC] decryption failed or bad record mac")
+        resp = _FakeDownloadResp([b"clean-second-attempt"])
+        sleeps = []
+        with mock.patch("claude_continue.update.urllib.request.urlopen",
+                        side_effect=[bad_mac, resp]) as uo:
+            update._download(_OK_URL, dest, 10.0, sleep=sleeps.append)
+        self.assertEqual(uo.call_count, 2)
+        with open(dest, "rb") as f:
+            self.assertEqual(f.read(), b"clean-second-attempt")
+
+    def test_a_mangled_record_partway_through_the_body_is_retried(self):
+        # the realistic shape: the handshake succeeds, then a record goes bad
+        # somewhere inside 12 MB of payload
+        dest = self._dest()
+        resp1 = _FakeDownloadResp(
+            [b"first-half"], raise_after=ssl.SSLError(1, "[SSL: DECRYPTION_FAILED_OR_BAD_RECORD_MAC] bad"))
+        resp2 = _FakeDownloadResp([b"whole-clean-body"])
+        with mock.patch("claude_continue.update.urllib.request.urlopen",
+                        side_effect=[resp1, resp2]) as uo:
+            update._download(_OK_URL, dest, 10.0, sleep=lambda s: None)
+        self.assertEqual(uo.call_count, 2)
+        with open(dest, "rb") as f:
+            self.assertEqual(f.read(), b"whole-clean-body")
+
+    def test_a_truncated_body_is_retried(self):
+        dest = self._dest()
+        resp1 = _FakeDownloadResp([b"cut"], raise_after=http.client.IncompleteRead(b"cut"))
+        resp2 = _FakeDownloadResp([b"complete"])
+        with mock.patch("claude_continue.update.urllib.request.urlopen",
+                        side_effect=[resp1, resp2]) as uo:
+            update._download(_OK_URL, dest, 10.0, sleep=lambda s: None)
+        self.assertEqual(uo.call_count, 2)
+
+    def test_a_certificate_failure_is_never_retried(self):
+        # identity, not transport: retrying only delays the same answer, and would
+        # paper over exactly the case the verification exists to catch
+        dest = self._dest()
+        sleeps = []
+        with mock.patch("claude_continue.update.urllib.request.urlopen",
+                        side_effect=[ssl.SSLCertVerificationError("self-signed certificate")]) as uo:
+            with self.assertRaises(ssl.SSLCertVerificationError):
+                update._download(_OK_URL, dest, 10.0, sleep=sleeps.append)
+        self.assertEqual(uo.call_count, 1)
+        self.assertEqual(sleeps, [])
 
     def test_partial_body_does_not_survive_a_failed_attempt(self):
         dest = self._dest()
