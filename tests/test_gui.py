@@ -565,12 +565,23 @@ class TestLimitModeSwitch(unittest.TestCase):
 
     def test_switch_is_locked_while_watching(self):
         # settings apply at start — same rule as the "Fire at" field
-        self.assertFalse(limit_mode_enabled(watching=True, quota=False))
-        self.assertTrue(limit_mode_enabled(watching=False, quota=False))
+        self.assertFalse(limit_mode_enabled(watching=True))
+        self.assertTrue(limit_mode_enabled(watching=False))
 
-    def test_switch_is_meaningless_in_quota_mode(self):
-        # quota opens a window headlessly and never types into a session
-        self.assertFalse(limit_mode_enabled(watching=False, quota=True))
+    def test_switch_stays_usable_after_a_quota_run(self):
+        # It was also gated on watch_mode["quota"], which is set when a watch starts
+        # and never cleared when it stops — so one quota run left the switch dead
+        # for the life of the window. While idle, both buttons are available and the
+        # setting is live.
+        self.assertTrue(limit_mode_enabled(watching=False))
+
+    def test_a_failed_save_is_reported_in_the_hint_not_the_shared_note(self):
+        # refresh() rewrites the shared note line every second, so a warning put
+        # there would be gone before it could be read.
+        self.assertIn("couldn", limit_mode_hint(True, save_failed=True))
+        self.assertNotIn("couldn", limit_mode_hint(True))
+        # the mode is still described alongside the failure
+        self.assertIn("left alone", limit_mode_hint(True, save_failed=True))
 
     def test_explanation_tracks_the_switch(self):
         with _ForcePlatform("windows"):

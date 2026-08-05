@@ -234,3 +234,14 @@ class TestSaveSetting(unittest.TestCase):
         config.save_setting("skip_dirs", [r"D:\koodaamista\Ääni"], config_path=self.path)
         self.assertEqual(config.resolve(config_path=self.path).skip_dirs,
                          [r"D:\koodaamista\Ääni"])
+
+    def test_a_legacy_encoded_file_degrades_instead_of_crashing(self):
+        # The explicit utf-8-sig replaced the platform default, which on Windows was
+        # cp1252 and decoded ANY byte sequence. A config saved in a legacy encoding
+        # therefore used to load; raising UnicodeDecodeError out of resolve() would
+        # be a hard crash at startup — strictly worse than the silent default this
+        # encoding change exists to fix.
+        self.path.parent.mkdir(parents=True)
+        self.path.write_bytes(r'{"skip_dirs": ["D:\Ääni"]}'.encode("cp1252"))
+        cfg = config.resolve(config_path=self.path)  # must not raise
+        self.assertEqual(cfg.skip_dirs, [])  # unreadable -> defaults, not a crash

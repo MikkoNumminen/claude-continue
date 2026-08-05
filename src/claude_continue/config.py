@@ -113,7 +113,12 @@ def _load_file(path: Path = CONFIG_PATH) -> dict:
             data = json.load(f)
     except FileNotFoundError:
         return {}
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+        # UnicodeDecodeError matters because of the explicit encoding above: the
+        # platform default this replaced was cp1252 on Windows, which decodes any
+        # byte sequence, so a config saved in a legacy encoding used to load (or at
+        # worst mojibake) and now raises. Uncaught that is a hard crash at startup —
+        # strictly worse than the silent-default behaviour being fixed here.
         return {}
     return data if isinstance(data, dict) else {}
 

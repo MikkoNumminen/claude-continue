@@ -333,28 +333,39 @@ def format_instances(instances, note, *, watching=False, skip_dirs=(),
 LIMIT_MODE_LABEL = "Only continue sessions that hit the limit"
 
 
-def limit_mode_hint(require_limit: bool, text: str = "continue") -> str:
+def limit_mode_hint(require_limit: bool, text: str = "continue",
+                    save_failed: bool = False) -> str:
     """Plain-language consequence of the limit-mode switch. Pure.
 
     Both modes are legitimate, so neither is described as the wrong one. What the
     hint must make unmissable is which sessions get typed into, because that is the
     whole difference and it is invisible until a reset lands hours later.
+
+    ``save_failed`` is carried HERE rather than in the shared note line because
+    ``refresh`` rewrites that line every second — a warning put there would flash
+    for under a second and be gone before it could be read.
     """
     if require_limit:
-        return ("only a session Claude has actually cut off gets “%s”. One that "
+        hint = ("only a session Claude has actually cut off gets “%s”. One that "
                 "finished its work, or is mid-turn, is left alone." % text)
-    return ("every running Claude session gets “%s” at each reset, whether it hit "
-            "the limit or not." % text)
+    else:
+        hint = ("every running Claude session gets “%s” at each reset, whether it hit "
+                "the limit or not." % text)
+    if save_failed:
+        hint += "  (couldn’t be saved — applies to this session only)"
+    return hint
 
 
-def limit_mode_enabled(*, watching: bool, quota: bool) -> bool:
+def limit_mode_enabled(*, watching: bool) -> bool:
     """Whether the limit-mode switch is usable right now. Pure.
 
-    Locked while a watch runs (settings apply at start, same rule as "Fire at"),
-    and meaningless in quota mode, which opens a window headlessly and never types
-    into a session at all.
+    Locked only while a watch runs, because settings apply at start — the same rule
+    as "Fire at". Deliberately NOT also gated on quota mode: ``watch_mode["quota"]``
+    is set when a watch starts and never cleared when it stops, so keying off it
+    left the switch permanently dead after the first quota run. While idle both
+    buttons are available, so the setting is live either way.
     """
-    return not watching and not quota
+    return not watching
 
 
 def update_decision(info, *, frozen):
@@ -887,21 +898,28 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
                            justify="center", anchor="center")
     limit_hint.pack(fill="x", pady=(4, 0))
 
+    # Mirror of limit_var readable off the UI thread. Tk variables are backed by the
+    # Tcl interpreter and are NOT thread-safe: the session poller runs in a worker
+    # thread and needs to know the mode, and calling limit_var.get() there can raise
+    # "main thread is not in main loop" or corrupt interpreter state.
+    limit_state: dict[str, Any] = {"on": bool(app_cfg.require_limit), "save_failed": False}
+
     def on_limit_toggle():
         # Persist immediately: the toggle IS the decision, and there is no separate
         # save step in this window.
-        if not config_mod.save_setting("require_limit", bool(limit_var.get())):
-            note.configure(text="couldn't save that setting — it applies to this session only",
-                           foreground=_NOTE_WARN)
+        limit_state["on"] = bool(limit_var.get())
+        limit_state["save_failed"] = not config_mod.save_setting(
+            "require_limit", limit_state["on"])
         render_limit_mode()
 
     limit_check.config(command=on_limit_toggle)
 
     def render_limit_mode():
-        limit_hint.config(text=limit_mode_hint(bool(limit_var.get()), app_cfg.text))
+        limit_hint.config(text=limit_mode_hint(limit_state["on"], app_cfg.text,
+                                               save_failed=limit_state["save_failed"]))
         watching = controller.is_watching() or controller.is_stopping()
-        limit_check.config(state="normal" if limit_mode_enabled(
-            watching=watching, quota=watch_mode["quota"]) else "disabled")
+        limit_check.config(
+            state="normal" if limit_mode_enabled(watching=watching) else "disabled")
 
     # Primary action carries the accent weight; quota is the quieter secondary.
     button = ttk.Button(outer, text="▶  Continue terminals", style="Primary.TButton")
@@ -961,7 +979,7 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
                     # rows with a stale answer.
                     poll["states"] = ({inst[2]: limits.state_for_cwd(inst[2])
                                        for inst in found if len(inst) > 2 and inst[2]}
-                                      if limit_var.get() else None)
+                                      if limit_state["on"] else None)
                     poll["sessions"] = found
                     poll["sessions_note"] = ""
                 else:
@@ -1146,7 +1164,7 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
         cfg = (replace(app_cfg, start_window=True, exec_cmd=None, reset_offset=override["offset"])
                if quota else
                replace(app_cfg, start_window=False, reset_offset=override["offset"],
-                       require_limit=bool(limit_var.get())))
+                       require_limit=limit_state["on"]))
         try:
             from . import action
             action.perform(cfg, dry_run=True)  # validate up front; fail clearly
