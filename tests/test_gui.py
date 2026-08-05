@@ -15,6 +15,8 @@ from claude_continue.gui import (
     effective_cfg,
     format_instances,
     format_reset_field,
+    limit_mode_enabled,
+    limit_mode_hint,
     format_sessions,
     offset_from_clock,
     parse_reset_input,
@@ -320,8 +322,10 @@ class TestWatchExplanation(unittest.TestCase):
         self.assertNotIn("Busy sessions", out)   # keystroke has no skip-busy concept
 
     def test_keystroke_all_on_windows_describes_every_session(self):
+        # require_limit=False is the mode this sentence describes; with the gate on
+        # the wording tracks the switch instead (see TestLimitModeSwitch).
         with _ForcePlatform("windows"):
-            out = watch_explanation(Config(keystroke_all=True))
+            out = watch_explanation(Config(keystroke_all=True, require_limit=False))
         self.assertIn("every running Claude session", out)
         self.assertNotIn("iTerm2", out)
 
@@ -382,7 +386,7 @@ class TestEffectiveCfg(unittest.TestCase):
         # The GUI applies effective_cfg before explaining, so a zero-config Windows
         # user sees the continue-all wording, never "iTerm2".
         with _ForcePlatform("windows"):
-            out = watch_explanation(effective_cfg(Config()))
+            out = watch_explanation(effective_cfg(Config(require_limit=False)))
         self.assertNotIn("iTerm2", out)
         self.assertIn("every running Claude session", out)  # continues all, not one window
 
@@ -541,6 +545,51 @@ class TestInstancePanelWithLimitGate(unittest.TestCase):
                                skip_dirs=["HRManager"], states=states, now=self.NOW)
         self.assertIn("skipped", out)
         self.assertNotIn("will continue", out)
+
+
+class TestLimitModeSwitch(unittest.TestCase):
+    """The mode switch has to be reachable from the GUI, which is the only
+    interface most people use. Built as a CLI flag alone it was, in practice, not
+    a switch at all: there is no config file on a default install, so the window
+    was hard-wired to the gated mode."""
+
+    def test_hint_names_who_gets_typed_into_in_each_mode(self):
+        gated = limit_mode_hint(True)
+        every = limit_mode_hint(False)
+        self.assertIn("left alone", gated)
+        self.assertIn("every running Claude session", every)
+        self.assertNotEqual(gated, every)
+
+    def test_hint_uses_the_configured_text(self):
+        self.assertIn("resume", limit_mode_hint(False, "resume"))
+
+    def test_switch_is_locked_while_watching(self):
+        # settings apply at start — same rule as the "Fire at" field
+        self.assertFalse(limit_mode_enabled(watching=True))
+        self.assertTrue(limit_mode_enabled(watching=False))
+
+    def test_switch_stays_usable_after_a_quota_run(self):
+        # It was also gated on watch_mode["quota"], which is set when a watch starts
+        # and never cleared when it stops — so one quota run left the switch dead
+        # for the life of the window. While idle, both buttons are available and the
+        # setting is live.
+        self.assertTrue(limit_mode_enabled(watching=False))
+
+    def test_a_failed_save_is_reported_in_the_hint_not_the_shared_note(self):
+        # refresh() rewrites the shared note line every second, so a warning put
+        # there would be gone before it could be read.
+        self.assertIn("couldn", limit_mode_hint(True, save_failed=True))
+        self.assertNotIn("couldn", limit_mode_hint(True))
+        # the mode is still described alongside the failure
+        self.assertIn("left alone", limit_mode_hint(True, save_failed=True))
+
+    def test_explanation_tracks_the_switch(self):
+        with _ForcePlatform("windows"):
+            every = watch_explanation(Config(keystroke_all=True, require_limit=False))
+            gated = watch_explanation(Config(keystroke_all=True, require_limit=True))
+        self.assertIn("every running Claude session", every)
+        self.assertIn("actually hit their limit", gated)
+        self.assertNotIn("every running Claude session", gated)
 
 
 class TestWatchingNote(unittest.TestCase):

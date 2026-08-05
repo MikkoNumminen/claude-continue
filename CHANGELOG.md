@@ -16,6 +16,13 @@ All notable changes to `claude-continue`. Format follows
   alone instead of being told to `continue` something nobody asked for. It also
   yields the **real** reset time, straight from the server, rather than
   ccusage's floor-to-the-hour estimate.
+- **A mode switch in the GUI: "Only continue sessions that hit the limit".** The
+  gate above shipped as a CLI flag and a config key, which on a default install is
+  not a switch at all — there is no config file, so the window was hard-wired to
+  the gated mode. The checkbox sits under "Fire at", says in plain language which
+  sessions each mode types into, locks while a watch runs, and is persisted on
+  toggle (a mode that silently reverted every restart would be worse than none).
+  The instances panel and the "when you start watching…" sentence both follow it.
 - A limit more than 12 hours past its reset is treated as abandoned, not as
   something to nudge. A project's newest transcript is the *previous* session's
   file until a freshly opened `claude` writes its first turn, so without this a
@@ -70,6 +77,11 @@ All notable changes to `claude-continue`. Format follows
   decides who gets typed into; verification decides whether the fire took, and
   ccusage is the broken signal either way — so `--no-require-limit` users were
   still getting the re-fire storm this release exists to remove.
+- **A UTF-8 BOM no longer discards the whole config file.** `~/.config/claude-continue/config.json`
+  is meant to be hand-edited, and on Windows the obvious editors (Notepad,
+  PowerShell `Out-File`, VS Code's "UTF-8 with BOM") prepend one. Read with the
+  platform default those three bytes broke `json.load` and every setting in the
+  file silently reverted to its default.
 - **`fire` and `once` report a closed limit gate instead of crashing.**
   `NothingToResume` is not an `ActionError`, so it escaped both commands' handlers
   and surfaced as an uncaught traceback whenever no session was parked on a limit.

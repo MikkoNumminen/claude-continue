@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from . import __version__, ccusage, iterm, limits, osenv, schedule, tmux, update, watch, winterm
+from . import config as config_mod
 from .action import ActionError
 from .config import CONFIG_PATH, resolve
 from .lock import AlreadyRunning
@@ -329,6 +330,44 @@ def format_instances(instances, note, *, watching=False, skip_dirs=(),
     return "\n".join(lines)
 
 
+LIMIT_MODE_LABEL = "Only continue sessions that hit the limit"
+
+
+def limit_mode_hint(require_limit: bool, text: str = "continue",
+                    save_failed: bool = False) -> str:
+    """Plain-language consequence of the limit-mode switch. Pure.
+
+    Both modes are legitimate, so neither is described as the wrong one. What the
+    hint must make unmissable is which sessions get typed into, because that is the
+    whole difference and it is invisible until a reset lands hours later.
+
+    ``save_failed`` is carried HERE rather than in the shared note line because
+    ``refresh`` rewrites that line every second — a warning put there would flash
+    for under a second and be gone before it could be read.
+    """
+    if require_limit:
+        hint = ("only a session Claude has actually cut off gets “%s”. One that "
+                "finished its work, or is mid-turn, is left alone." % text)
+    else:
+        hint = ("every running Claude session gets “%s” at each reset, whether it hit "
+                "the limit or not." % text)
+    if save_failed:
+        hint += "  (couldn’t be saved — applies to this session only)"
+    return hint
+
+
+def limit_mode_enabled(*, watching: bool) -> bool:
+    """Whether the limit-mode switch is usable right now. Pure.
+
+    Locked only while a watch runs, because settings apply at start — the same rule
+    as "Fire at". Deliberately NOT also gated on quota mode: ``watch_mode["quota"]``
+    is set when a watch starts and never cleared when it stops, so keying off it
+    left the switch permanently dead after the first quota run. While idle both
+    buttons are available, so the setting is live either way.
+    """
+    return not watching
+
+
 def update_decision(info, *, frozen):
     """Pure decision for the 'checked' phase. Returns (kind, message) where kind
     is 'prompt' (offer to download+restart) or 'none' (just show the message).
@@ -453,6 +492,14 @@ def _build_style(root, fonts, p):  # pragma: no cover - needs a display
     style.configure("Hint.TLabel", background=p["bg"], foreground=p["faint"], font=fonts["small"])
     style.configure("Note.TLabel", background=p["bg"], foreground=p["muted"], font=fonts["body"])
     style.configure("Mono.TLabel", background=p["surface"], foreground=p["text"], font=fonts["mono"])
+    # checkbutton — the limit-mode switch. Explicit background/foreground because a
+    # bare ttk.Checkbutton keeps the OS default panel colour and reads as a foreign
+    # element dropped on the app's surface.
+    style.configure("Body.TCheckbutton", background=p["bg"], foreground=p["text"],
+                    font=fonts["body"], focuscolor=p["bg"])
+    style.map("Body.TCheckbutton",
+              background=[("active", p["bg"])],
+              foreground=[("disabled", p["faint"])])
     # entry — flat field with an accent focus ring
     style.configure("TEntry", fieldbackground=p["field"], foreground=p["text"],
                     bordercolor=p["border"], lightcolor=p["border"], darkcolor=p["border"],
@@ -677,9 +724,14 @@ def watch_explanation(cfg) -> str:
     # Windows "continue all": writes `continue` straight into each Claude process's
     # console input (no focus, any tab/pane/window). tmux wins over it (action._resume).
     if cfg.keystroke_all and not cfg.tmux and osenv.is_windows():
-        return when + ('sends “%s” to every running Claude session — it writes it straight into '
+        # "every running Claude session" is only true with the limit switch off, and
+        # it is the sentence people read before clicking — so it has to track the
+        # switch rather than describe one mode for both.
+        who = ("every running Claude session" if not cfg.require_limit
+               else "the Claude sessions that have actually hit their limit")
+        return when + ('sends “%s” to %s — it writes it straight into '
                        'each one’s input, so it works whether they’re separate windows, tabs, or '
-                       'split panes, without stealing focus.' % cfg.text)
+                       'split panes, without stealing focus.' % (cfg.text, who))
     # --keystroke is the Windows/WSL path: it types into a single titled window
     # (no session/skip-busy concept). tmux wins over it (matches action._resume),
     # and on macOS keystroke is a no-op that falls through to the iTerm2 broadcast.
@@ -829,6 +881,46 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
                            justify="center", anchor="center")
     reset_hint.pack(fill="x", pady=(6, 0))
 
+    # Limit-mode switch: continue ONLY the sessions Claude cut off, or every
+    # terminal. This is the difference between resuming paused work and telling a
+    # session that already finished to go do something else, and it is invisible
+    # until a reset lands hours later — so it belongs here, next to the fire time,
+    # not only behind a CLI flag. Persisted on toggle (config.save_setting): the
+    # GUI is the only interface most people use, and a mode that silently reverted
+    # every restart would be worse than no switch.
+    limit_var = tk.BooleanVar(value=bool(app_cfg.require_limit))
+    limit_frame = ttk.Frame(outer, style="App.TFrame")
+    limit_frame.pack(fill="x", pady=(14, 0))
+    limit_check = ttk.Checkbutton(limit_frame, text=LIMIT_MODE_LABEL, variable=limit_var,
+                                  style="Body.TCheckbutton")
+    limit_check.pack(anchor="center")
+    limit_hint = ttk.Label(outer, text="", style="Hint.TLabel", wraplength=400,
+                           justify="center", anchor="center")
+    limit_hint.pack(fill="x", pady=(4, 0))
+
+    # Mirror of limit_var readable off the UI thread. Tk variables are backed by the
+    # Tcl interpreter and are NOT thread-safe: the session poller runs in a worker
+    # thread and needs to know the mode, and calling limit_var.get() there can raise
+    # "main thread is not in main loop" or corrupt interpreter state.
+    limit_state: dict[str, Any] = {"on": bool(app_cfg.require_limit), "save_failed": False}
+
+    def on_limit_toggle():
+        # Persist immediately: the toggle IS the decision, and there is no separate
+        # save step in this window.
+        limit_state["on"] = bool(limit_var.get())
+        limit_state["save_failed"] = not config_mod.save_setting(
+            "require_limit", limit_state["on"])
+        render_limit_mode()
+
+    limit_check.config(command=on_limit_toggle)
+
+    def render_limit_mode():
+        limit_hint.config(text=limit_mode_hint(limit_state["on"], app_cfg.text,
+                                               save_failed=limit_state["save_failed"]))
+        watching = controller.is_watching() or controller.is_stopping()
+        limit_check.config(
+            state="normal" if limit_mode_enabled(watching=watching) else "disabled")
+
     # Primary action carries the accent weight; quota is the quieter secondary.
     button = ttk.Button(outer, text="▶  Continue terminals", style="Primary.TButton")
     button.pack(fill="x", pady=(16, 0))
@@ -887,7 +979,7 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
                     # rows with a stale answer.
                     poll["states"] = ({inst[2]: limits.state_for_cwd(inst[2])
                                        for inst in found if len(inst) > 2 and inst[2]}
-                                      if app_cfg.require_limit else None)
+                                      if limit_state["on"] else None)
                     poll["sessions"] = found
                     poll["sessions_note"] = ""
                 else:
@@ -1050,6 +1142,7 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
             layout["fitted"] = True  # first real instance list — size to fit it once
             fit_to_content()
         render_reset_field()
+        render_limit_mode()
         root.after(1000, refresh)
 
     def start_watch(quota):
@@ -1065,10 +1158,13 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
             return  # invalid time typed — the red hint is up; don't start on a stale value
         # "Start quota" must open a window even if exec_cmd is configured (exec
         # otherwise wins in action.perform); "Continue terminals" keeps exec_cmd.
-        # reset_offset applies the user's reset-time correction to both buttons.
+        # reset_offset applies the user's reset-time correction to both buttons, and
+        # require_limit carries the live switch (not app_cfg's start-up value, which
+        # would ignore a toggle made since the window opened).
         cfg = (replace(app_cfg, start_window=True, exec_cmd=None, reset_offset=override["offset"])
                if quota else
-               replace(app_cfg, start_window=False, reset_offset=override["offset"]))
+               replace(app_cfg, start_window=False, reset_offset=override["offset"],
+                       require_limit=limit_state["on"]))
         try:
             from . import action
             action.perform(cfg, dry_run=True)  # validate up front; fail clearly

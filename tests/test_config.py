@@ -6,6 +6,8 @@ from pathlib import Path
 
 import _support  # noqa: F401
 
+from claude_continue import config
+
 from claude_continue.config import (
     DEFAULT_FILTER,
     MIN_TIMING_SECONDS,
@@ -157,3 +159,89 @@ class TestTimingClamp(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSaveSetting(unittest.TestCase):
+    """The GUI could only ever READ config, so a mode chosen there was forgotten at
+    every restart — silently reverting to the default. Fine for a fire time you
+    retype anyway; not fine for a switch that decides which sessions get typed
+    into."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self._tmp.name) / "sub" / "config.json"
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_round_trips_through_resolve(self):
+        self.assertTrue(config.save_setting("require_limit", False, config_path=self.path))
+        self.assertFalse(config.resolve(config_path=self.path).require_limit)
+
+    def test_creates_a_missing_config_dir(self):
+        self.assertFalse(self.path.parent.exists())
+        self.assertTrue(config.save_setting("require_limit", False, config_path=self.path))
+        self.assertTrue(self.path.exists())
+
+    def test_merges_instead_of_overwriting_hand_edited_keys(self):
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text(json.dumps({"buffer": 120, "skip_dirs": ["HRManager"]}),
+                             encoding="utf-8")
+        config.save_setting("require_limit", False, config_path=self.path)
+        cfg = config.resolve(config_path=self.path)
+        self.assertEqual(cfg.buffer, 120)
+        self.assertEqual(cfg.skip_dirs, ["HRManager"])
+        self.assertFalse(cfg.require_limit)
+
+    def test_leaves_no_temp_file_behind(self):
+        config.save_setting("require_limit", True, config_path=self.path)
+        self.assertEqual([p.name for p in self.path.parent.iterdir()], ["config.json"])
+
+    def test_unwritable_location_reports_failure_rather_than_raising(self):
+        # a read-only config dir must not take the app down; the choice just lasts
+        # for this session only, which the GUI says out loud
+        bad = Path(self._tmp.name) / "config.json" / "nested.json"  # parent is a file
+        Path(self._tmp.name, "config.json").write_text("{}", encoding="utf-8")
+        self.assertFalse(config.save_setting("require_limit", False, config_path=bad))
+
+    def test_an_unknown_setting_is_a_programming_error(self):
+        with self.assertRaises(KeyError):
+            config.save_setting("not_a_real_field", 1, config_path=self.path)
+
+    def test_a_corrupt_existing_file_is_replaced_not_appended_to(self):
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text("{ this is not json", encoding="utf-8")
+        self.assertTrue(config.save_setting("require_limit", False, config_path=self.path))
+        self.assertFalse(config.resolve(config_path=self.path).require_limit)
+
+    def test_a_bom_does_not_silently_discard_the_whole_file(self):
+        # The config file is documented as hand-editable, and on Windows the obvious
+        # editors (Notepad, PowerShell Out-File, VS Code "UTF-8 with BOM") prepend
+        # one. Read with the platform default those bytes break json.load and EVERY
+        # setting reverts to its default with nothing said.
+        self.path.parent.mkdir(parents=True)
+        self.path.write_bytes(b'\xef\xbb\xbf{"require_limit": false, "buffer": 120}')
+        cfg = config.resolve(config_path=self.path)
+        self.assertFalse(cfg.require_limit)
+        self.assertEqual(cfg.buffer, 120)
+
+    def test_a_plain_utf8_file_still_reads(self):
+        self.path.parent.mkdir(parents=True)
+        self.path.write_bytes(b'{"require_limit": false}')
+        self.assertFalse(config.resolve(config_path=self.path).require_limit)
+
+    def test_non_ascii_values_survive_a_round_trip(self):
+        # skip_dirs can hold a path with non-ASCII characters; writing utf-8 and
+        # reading the platform default would mangle it
+        config.save_setting("skip_dirs", [r"D:\koodaamista\Ääni"], config_path=self.path)
+        self.assertEqual(config.resolve(config_path=self.path).skip_dirs,
+                         [r"D:\koodaamista\Ääni"])
+
+    def test_a_legacy_encoded_file_degrades_instead_of_crashing(self):
+        # The explicit utf-8-sig replaced the platform default, which on Windows was
+        # cp1252 and decoded ANY byte sequence. A config saved in a legacy encoding
+        # therefore used to load; raising UnicodeDecodeError out of resolve() would
+        # be a hard crash at startup — strictly worse than the silent default this
+        # encoding change exists to fix.
+        self.path.parent.mkdir(parents=True)
+        self.path.write_bytes(r'{"skip_dirs": ["D:\Ääni"]}'.encode("cp1252"))
+        cfg = config.resolve(config_path=self.path)  # must not raise
+        self.assertEqual(cfg.skip_dirs, [])  # unreadable -> defaults, not a crash
