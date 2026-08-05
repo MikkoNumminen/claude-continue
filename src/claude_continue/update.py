@@ -14,6 +14,7 @@ pinned key. For a personal tool the trust root is "you trust this GitHub repo".
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import os
 import shlex
@@ -160,9 +161,28 @@ _TRANSIENT_HTTP = {408, 425, 429, 500, 502, 503, 504}  # worth retrying
 
 
 def _is_transient(e) -> bool:
-    """A retryable network blip (GitHub 5xx/429, timeout, connection reset)."""
+    """A retryable network blip (GitHub 5xx/429, timeout, reset, mangled TLS)."""
     if isinstance(e, urllib.error.HTTPError):
         return e.code in _TRANSIENT_HTTP
+    if isinstance(e, ssl.SSLError):
+        # A TLS record that fails its MAC check ("DECRYPTION_FAILED_OR_BAD_RECORD_MAC")
+        # means bytes were mangled in transit — a flaky link, or a TLS-intercepting
+        # security product rewriting the stream. It is per-connection and a fresh
+        # connection normally succeeds, so it belongs with connection resets. The
+        # release assets are ~12 MB, which is plenty of surface for one bad record.
+        #
+        # SSLError is an OSError but NOT a URLError or ConnectionError, so it fell
+        # through every branch here and failed the update outright, with no retry,
+        # while a plain reset was retried. Reported live on v0.14.0.
+        #
+        # Certificate verification is the deliberate exception: that failure is
+        # about identity, not transport. Retrying it only delays the same answer
+        # and would paper over exactly the case the check exists to catch.
+        return not isinstance(e, ssl.SSLCertVerificationError)
+    if isinstance(e, http.client.IncompleteRead):
+        # A body cut short mid-transfer. Same category, and likelier the larger the
+        # asset; not an OSError at all, so it also missed every branch below.
+        return True
     # URLError wraps socket errors (timeout/DNS/reset); TimeoutError/ConnectionError too
     return isinstance(e, (urllib.error.URLError, TimeoutError, ConnectionError))
 
@@ -250,14 +270,24 @@ def _verify_digest(path: str, digest: str | None) -> None:
         raise UpdateError("checksum mismatch (expected %s…, got %s…)" % (expected[:12], actual[:12]))
 
 
-def _download(url: str, dest: str, timeout: float, *, attempts: int = 3, sleep=time.sleep) -> None:
+def _download(url: str, dest: str, timeout: float, *, attempts: int = 3, sleep=time.sleep,
+              digest: str | None = None) -> None:
     """Fetch ``url`` to ``dest``, retrying transient failures (GitHub 5xx/429,
     timeouts) with the same short backoff as ``check()``. The release CDN can
     504 for a moment right after an asset is published (observed live on
     v0.13.0: an instant 504, then a clean 200 seconds later), and check()
     retrying while the actual download didn't meant one blip still failed the
     whole update. Each attempt reopens ``dest`` with "wb", so a partial body
-    from a failed try never survives into the checksum step."""
+    from a failed try never survives into the checksum step.
+
+    ``digest`` is verified INSIDE the loop. A body that arrives complete but wrong
+    is the same corrupted-transfer failure as one that dies mid-stream — it just
+    announces itself one layer later — so it earns the same retry. Checking it
+    outside meant a single mangled byte failed the whole update while a dropped
+    connection got three tries. This cannot weaken the integrity guarantee: the
+    file is still only accepted when a hash matches, and a mismatch that persists
+    across every attempt still raises.
+    """
     _check_url(url)
     req = urllib.request.Request(url, headers={"User-Agent": _UA["User-Agent"]})
     for attempt in range(attempts):
@@ -265,12 +295,36 @@ def _download(url: str, dest: str, timeout: float, *, attempts: int = 3, sleep=t
             with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as resp, \
                     open(dest, "wb") as out:
                 shutil.copyfileobj(resp, out)
+            if digest is not None:
+                _verify_digest(dest, digest)
             return
         except Exception as e:  # noqa: BLE001 - non-transient (or final) failures re-raise
-            if attempt < attempts - 1 and _is_transient(e):
+            if attempt < attempts - 1 and (_is_transient(e) or _is_corrupt_body(e)):
                 sleep(1.0 * (attempt + 1))  # 1s, 2s — matches check()
                 continue
             raise
+
+
+def _is_corrupt_body(e) -> bool:
+    """A downloaded file that failed its checksum — worth one more fetch."""
+    return isinstance(e, UpdateError) and str(e).startswith("checksum mismatch")
+
+
+def tls_transport_hint(e) -> str:
+    """Extra guidance for a TLS failure that survived every retry, '' otherwise.
+
+    A bad record MAC that repeats is almost never the network — it is something
+    re-encrypting the stream, i.e. an antivirus or VPN doing TLS inspection (this
+    project has already been bitten by IPVanish Threat Protection on the Windows
+    build). Without this the user is left with `_ssl.c:2580` and no idea what to
+    do, in the one component they cannot fix by updating. Pure, so the wording is
+    testable.
+    """
+    if not isinstance(e, ssl.SSLError) or isinstance(e, ssl.SSLCertVerificationError):
+        return ""
+    return ("the download kept arriving corrupted — this is usually antivirus or a "
+            "VPN inspecting HTTPS traffic. Pause that and try again, or download "
+            "the release manually from " + RELEASES_PAGE)
 
 
 # --- apply ------------------------------------------------------------------
@@ -300,14 +354,23 @@ def apply_update(info: UpdateInfo, *, timeout: float = 180.0, relaunch: bool = T
     # platforms now ship a .zip (macOS .app / Windows one-dir folder).
     dest = os.path.join(tmp, "claude-continue-update.zip")
     try:
-        _download(info.asset_url, dest, timeout)
+        # The digest goes IN so a body that arrives complete but corrupted is
+        # retried like any other bad transfer instead of failing outright...
+        _download(info.asset_url, dest, timeout, digest=info.asset_digest)
+        # ...and is re-checked HERE, which is the authoritative gate. _download
+        # treats digest=None as "no verification requested", which is right for a
+        # direct caller and catastrophic as the only check: a release whose API
+        # entry carries no digest would install unverified instead of being
+        # refused. This line is what makes "never install what we could not verify"
+        # true regardless of what _download was asked to do.
         _verify_digest(dest, info.asset_digest)
     except UpdateError:
         shutil.rmtree(tmp, ignore_errors=True)
         raise
     except Exception as e:  # noqa: BLE001
         shutil.rmtree(tmp, ignore_errors=True)
-        raise UpdateError("download failed: %s" % e) from e
+        hint = tls_transport_hint(e)
+        raise UpdateError("download failed: %s%s" % (e, " — " + hint if hint else "")) from e
 
     if plat == osenv.MACOS:
         try:
