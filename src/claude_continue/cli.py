@@ -68,6 +68,12 @@ def add_action_args(p: argparse.ArgumentParser, *, dry_run: bool = False) -> Non
                    help="Windows continue-all: never send the text to a Claude session working "
                         "in DIR — a full path (covers subdirectories) or a bare folder name; "
                         "repeatable")
+    a.add_argument("--require-limit", dest="require_limit", action="store_true", default=None,
+                   help="only resume sessions Claude Code's transcript shows parked on a spent "
+                        "rate limit (default: on)")
+    a.add_argument("--no-require-limit", dest="require_limit", action="store_false", default=None,
+                   help="fire regardless of session state — sessions that already finished "
+                        "their work will also receive the text")
     a.add_argument("--tmux", dest="tmux", action="store_true", default=None,
                    help="resume Claude panes running inside tmux (any terminal, macOS/Linux)")
     a.add_argument("--tmux-busy-pattern", dest="tmux_busy_pattern", default=None, metavar="TEXT",
@@ -112,6 +118,8 @@ def overrides_to_argv(overrides: dict) -> list:
             continue
         if name == "skip_busy":
             argv.append("--skip-busy" if value else "--no-skip-busy")
+        elif name == "require_limit":
+            argv.append("--require-limit" if value else "--no-require-limit")
         elif name == "all_sessions":
             if value:
                 argv.append("--all")
@@ -203,7 +211,46 @@ def cmd_status(args) -> int:
                 _emit("  - %s" % name)  # session names can carry non-cp1252 glyphs (✳)
         except Exception as e:  # noqa: BLE001 - status must never raise
             _emit("Action preview failed: %s" % e)
+        _print_limit_gate(cfg)
     return 0
+
+
+def _print_limit_gate(cfg: Config) -> None:
+    """Show which sessions the limit gate would actually let through.
+
+    The preview above lists what a fire *could* reach; this says what it *would*
+    touch, which is the number that matters once require_limit is on. Without it,
+    "send 'continue' to 2 sessions" reads as a promise the gate then declines to
+    keep — the panel-vs-action gap that made the old behaviour so hard to debug.
+    """
+    if not cfg.require_limit:
+        _emit("Limit gate: OFF — every listed session gets the text, limited or not.")
+        return
+    now = _utc_now()
+    try:
+        states = action.session_states(cfg, now)
+    except Exception as e:  # noqa: BLE001 - status must never raise
+        _emit("Limit gate: on (state unreadable: %s)" % e)
+        return
+    if not states:
+        _emit("Limit gate: on — no Claude sessions found.")
+        return
+    _emit("Limit gate: on — only sessions parked on a spent limit are resumed.")
+    for label, state in states:
+        if state.resumable(now):
+            mark = "READY   (limit spent — will resume)"
+        elif state.waiting(now):
+            mark = "waiting (until %s)" % _fmt(state.reset_at)
+        elif not state.known:
+            mark = "unknown (no readable transcript — held back)"
+        elif state.limited and state.stale(now):
+            mark = "stale   (limit from %s — too old to act on)" % _fmt(
+                state.reset_at or state.recorded_at)
+        elif state.limited:
+            mark = "held    (%s limit; continue won't clear it)" % (state.kind or "unknown")
+        else:
+            mark = "idle    (not limited — left alone)"
+        _emit("  - %-24s %s" % (label, mark))
 
 
 def cmd_doctor(args) -> int:
@@ -277,6 +324,13 @@ def cmd_once(args) -> int:
         logger.info("waiting until %s ...", _fmt(target))
         watch._sleep_until(target, clock=_utc_now, sleep=time.sleep, stop=lambda: False)
         fired = action.perform(cfg, dry_run=False)
+    except action.NothingToResume as e:
+        # The limit gate declining is a real outcome, not a crash. Without this the
+        # whole command dies on an uncaught exception the moment no session happens
+        # to be parked on a spent limit — which is most of the time.
+        logger.info("nothing to resume: %s", e.detail or e)
+        logger.info("(pass --no-require-limit to send it regardless)")
+        return 0
     except action.ActionError as e:
         logger.error("%s", e)
         return 1
@@ -290,6 +344,10 @@ def cmd_fire(args) -> int:
     dry = bool(getattr(args, "dry_run", False))
     try:
         fired = action.perform(cfg, dry_run=dry)
+    except action.NothingToResume as e:
+        logger.info("nothing to resume: %s", e.detail or e)
+        logger.info("(pass --no-require-limit to send it regardless)")
+        return 0
     except action.ActionError as e:
         logger.error("%s", e)
         return 1

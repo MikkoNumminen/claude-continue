@@ -18,7 +18,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from . import __version__, ccusage, iterm, osenv, schedule, tmux, update, watch, winterm
+from . import __version__, ccusage, iterm, limits, osenv, schedule, tmux, update, watch, winterm
 from .action import ActionError
 from .config import CONFIG_PATH, resolve
 from .lock import AlreadyRunning
@@ -251,7 +251,32 @@ def win_instances_mode(cfg) -> bool:
     return osenv.is_windows() and not cfg.tmux
 
 
-def format_instances(instances, note, *, watching=False, skip_dirs=()) -> str:
+def instance_mark(state, *, now, watching, gated) -> str:
+    """The status column for one instance row. Pure.
+
+    With the limit gate on, "-> will continue" is a promise only for a session the
+    transcript shows parked on a spent limit. Saying it for every row was the old
+    behaviour, and it was a lie the action then had to break — the panel claiming
+    five sessions would resume while the gate quietly resumed none is exactly the
+    kind of gap that makes a silent watcher impossible to debug.
+    """
+    if not gated:
+        return "-> will continue" if watching else ""
+    if state is None or not state.known:
+        return "state unknown"
+    if state.resumable(now):
+        return "-> will continue" if watching else "limit spent"
+    if state.waiting(now) and state.reset_at is not None:
+        return "waits for %s" % state.reset_at.astimezone().strftime("%H:%M")
+    if state.limited and state.stale(now):
+        return "old limit"
+    if state.limited:
+        return "%s limit" % (state.kind or "unknown")
+    return "not limited"
+
+
+def format_instances(instances, note, *, watching=False, skip_dirs=(),
+                     states=None, now=None) -> str:
     """Render the Windows 'Claude instances' panel — the running Claude Code
     terminal sessions (``claude.exe`` / node CLI; helper processes like Chrome's
     native host are already classified away by the lister). Windows has no
@@ -268,7 +293,11 @@ def format_instances(instances, note, *, watching=False, skip_dirs=()) -> str:
     watcher ignored them. A row matching ``skip_dirs`` is annotated "skipped"
     instead (always, not just while watching — it's standing config), rendered
     from the SAME ``winterm.dir_skipped`` match the action uses, so what the
-    panel claims and what continue-all does can't drift apart."""
+    panel claims and what continue-all does can't drift apart.
+
+    ``states`` maps a working directory to its ``limits.LimitState``; when given,
+    each row reports what the limit gate will actually do with it (see
+    ``instance_mark``) rather than promising a resume the gate would decline."""
     if instances is None:
         return "Claude instances: " + (note or "checking…")
     if not instances:
@@ -287,8 +316,12 @@ def format_instances(instances, note, *, watching=False, skip_dirs=()) -> str:
             label = label[:23] + "…"  # too, so no row outgrows the card's wraplength
         if winterm.dir_skipped(cwd, skip_dirs):
             lines.append("  ○ %-24s %-16s (pid %s)" % (label, "skipped", pid))
-        elif watching:
-            lines.append("  ● %-24s %-16s (pid %s)" % (label, "-> will continue", pid))
+            continue
+        mark = instance_mark((states or {}).get(cwd),
+                             now=now or datetime.now(timezone.utc),
+                             watching=watching, gated=states is not None)
+        if mark:
+            lines.append("  ● %-24s %-16s (pid %s)" % (label, mark, pid))
         else:
             lines.append("  ● %-24s (pid %s)" % (label, pid))
     if len(instances) > _MAX_SESSIONS_SHOWN:
@@ -689,7 +722,10 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
     app_cfg = effective_cfg(resolve())
     # heterogeneous UI state bags mutated by worker threads, read on the main thread
     poll: dict[str, Any] = {"reset_at": None, "note": "", "busy": False,
-                            "sessions": None, "sessions_note": "", "sessions_busy": False}
+                            "sessions": None, "sessions_note": "", "sessions_busy": False,
+                            # cwd -> limits.LimitState for the listed instances; None
+                            # when the gate is off (nothing to report per session).
+                            "states": None}
     # self-update state machine: idle -> checking -> checked -> [applying -> done] / error
     # `auto` marks a background (startup) check that colours the button without prompting.
     upd: dict[str, Any] = {"phase": "idle", "info": None, "msg": "", "error": None, "auto": False}
@@ -841,7 +877,18 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
                     )
                     poll["sessions_note"] = ""
                 elif win_instances_mode(app_cfg):  # native Windows: list Claude processes
-                    poll["sessions"] = winterm.list_claude_instances(timeout=float(app_cfg.timeout))
+                    found = winterm.list_claude_instances(timeout=float(app_cfg.timeout))
+                    # Read each session's limit state in the SAME poll, so the panel
+                    # reports what the gate will actually do rather than promising a
+                    # resume it would decline. Bounded tail reads; no subprocess.
+                    # Published BEFORE the instances (the UI thread reads both between
+                    # these two assignments): states-then-sessions can only leave a
+                    # row briefly unmatched, whereas the other order would pair new
+                    # rows with a stale answer.
+                    poll["states"] = ({inst[2]: limits.state_for_cwd(inst[2])
+                                       for inst in found if len(inst) > 2 and inst[2]}
+                                      if app_cfg.require_limit else None)
+                    poll["sessions"] = found
                     poll["sessions_note"] = ""
                 else:
                     poll["sessions"] = None
@@ -992,8 +1039,9 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
             set_buttons(None)
         if win_instances_mode(app_cfg):
             live = should_annotate_continue(watching, watch_mode["quota"], app_cfg.keystroke_all)
-            sessions_label.config(text=format_instances(poll["sessions"], poll["sessions_note"],
-                                                        watching=live, skip_dirs=app_cfg.skip_dirs))
+            sessions_label.config(text=format_instances(
+                poll["sessions"], poll["sessions_note"], watching=live,
+                skip_dirs=app_cfg.skip_dirs, states=poll["states"]))
         else:
             live = watching and not watch_mode["quota"]
             sessions_label.config(text=format_sessions(

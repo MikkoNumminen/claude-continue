@@ -17,7 +17,8 @@ CONFIG_PATH = Path.home() / ".config" / "claude-continue" / "config.json"
 # Default session name-substrings to target (matches the original script).
 DEFAULT_FILTER = ["claude", "✳"]
 
-_BOOL_FIELDS = {"skip_busy", "all_sessions", "force", "keystroke", "keystroke_all", "tmux", "start_window"}
+_BOOL_FIELDS = {"skip_busy", "all_sessions", "force", "keystroke", "keystroke_all", "tmux",
+                "start_window", "require_limit"}
 _INT_FIELDS = {
     "buffer",
     "reset_offset",
@@ -65,6 +66,12 @@ class Config:
     # are full paths (match the dir and everything under it) or bare folder names
     # (match by basename, e.g. "HRManager"); see winterm.dir_skipped.
     skip_dirs: list = field(default_factory=list)
+    # Only ever type into a session that Claude Code's own transcript shows parked on
+    # a spent rate limit (see limits.py). ON by default because the opposite is
+    # actively harmful: a blind fire lands `continue` in sessions that finished their
+    # work, and Claude then goes off and does something nobody asked for. Turn it off
+    # (--no-require-limit) to get the pre-0.14 fire-regardless behaviour.
+    require_limit: bool = True
     tmux: bool = False  # resume via `tmux send-keys` — terminal-agnostic (any terminal, macOS/Linux)
     tmux_busy_pattern: str = "esc to interrupt"  # pane content marking a mid-turn (busy) session
     start_window: bool = False  # "quota mode": open a fresh window headlessly instead of resuming terminals

@@ -5,8 +5,9 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 import _support  # noqa: F401
+from _support import utc
 
-from claude_continue import osenv
+from claude_continue import limits, osenv
 from claude_continue.action import ActionError
 from claude_continue.config import Config
 from claude_continue.gui import (
@@ -478,6 +479,68 @@ class TestFormatInstances(unittest.TestCase):
         out = format_instances([("claude", "1", "D:\\x\\HRManager")], "",
                                watching=False, skip_dirs=["HRManager"])
         self.assertIn("skipped", out)
+
+
+class TestInstancePanelWithLimitGate(unittest.TestCase):
+    """The panel must promise only what the limit gate will actually do.
+
+    "-> will continue" on every row was true before the gate existed and became a
+    lie the moment it did: the gate resumes only sessions parked on a spent limit,
+    so a panel claiming five resumes while none happen is the same panel-vs-action
+    gap that made a silent watcher impossible to debug.
+    """
+
+    NOW = utc(2026, 8, 5, 6)
+
+    def _state(self, **kw):
+        return limits.LimitState(**kw)
+
+    def test_only_the_spent_limit_row_promises_a_continue(self):
+        states = {
+            "D:\\a": self._state(known=True, limited=True, kind="session",
+                                 reset_at=self.NOW - timedelta(minutes=1)),
+            "D:\\b": self._state(known=True, limited=True, kind="session",
+                                 reset_at=self.NOW + timedelta(hours=1)),
+            "D:\\c": limits.NOT_LIMITED,
+        }
+        out = format_instances(
+            [("claude", "1", "D:\\a"), ("claude", "2", "D:\\b"), ("claude", "3", "D:\\c")],
+            "", watching=True, states=states, now=self.NOW)
+        self.assertEqual(out.count("-> will continue"), 1)
+        self.assertIn("waits for", out)
+        self.assertIn("not limited", out)
+
+    def test_idle_panel_reports_state_without_promising_action(self):
+        states = {"D:\\a": self._state(known=True, limited=True, kind="session",
+                                       reset_at=self.NOW - timedelta(minutes=1))}
+        out = format_instances([("claude", "1", "D:\\a")], "", watching=False,
+                               states=states, now=self.NOW)
+        self.assertIn("limit spent", out)
+        self.assertNotIn("will continue", out)
+
+    def test_unreadable_state_says_so_rather_than_going_blank(self):
+        out = format_instances([("claude", "1", "D:\\a")], "", watching=True,
+                               states={}, now=self.NOW)
+        self.assertIn("state unknown", out)
+
+    def test_model_cap_row_is_not_promised_a_continue(self):
+        states = {"D:\\a": self._state(known=True, limited=True, kind="model")}
+        out = format_instances([("claude", "1", "D:\\a")], "", watching=True,
+                               states=states, now=self.NOW)
+        self.assertIn("model limit", out)
+        self.assertNotIn("will continue", out)
+
+    def test_gate_off_keeps_the_old_annotation(self):
+        out = format_instances([("claude", "1", "D:\\a")], "", watching=True,
+                               states=None, now=self.NOW)
+        self.assertIn("-> will continue", out)
+
+    def test_skip_dirs_still_wins_over_limit_state(self):
+        states = {"D:\\x\\HRManager": self._state(known=True, limited=True, kind="session")}
+        out = format_instances([("claude", "1", "D:\\x\\HRManager")], "", watching=True,
+                               skip_dirs=["HRManager"], states=states, now=self.NOW)
+        self.assertIn("skipped", out)
+        self.assertNotIn("will continue", out)
 
 
 class TestWatchingNote(unittest.TestCase):

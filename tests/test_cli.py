@@ -5,7 +5,7 @@ from unittest import mock
 
 import _support  # noqa: F401
 
-from claude_continue import cli, doctor
+from claude_continue import action, cli, doctor
 
 
 class _Cp1252Stream:
@@ -369,6 +369,36 @@ class TestFireCommand(unittest.TestCase):
             cli.cmd_fire(args)
         _, kwargs = m.call_args
         self.assertFalse(kwargs.get("dry_run"))
+
+    def test_fire_reports_a_closed_limit_gate_instead_of_crashing(self):
+        # NothingToResume is not an ActionError, so without its own handler the
+        # command dies on an uncaught exception the moment no session happens to be
+        # parked on a spent limit — which is most of the time.
+        p = cli.build_parser()
+        args = p.parse_args(["fire"])
+        with mock.patch("claude_continue.cli.action.perform",
+                        side_effect=action.NothingToResume("2 not limited")):
+            rc = cli.cmd_fire(args)
+        self.assertEqual(rc, 0)
+
+    def test_once_reports_a_closed_limit_gate_instead_of_crashing(self):
+        p = cli.build_parser()
+        args = p.parse_args(["once", "--at", "09:00"])
+        with mock.patch("claude_continue.cli.action.perform",
+                        side_effect=action.NothingToResume("2 not limited")), \
+             mock.patch("claude_continue.cli.watch._sleep_until", return_value="reached"):
+            rc = cli.cmd_once(args)
+        self.assertEqual(rc, 0)
+
+    def test_require_limit_flags_round_trip_into_the_installed_agent(self):
+        # `install` bakes the resolved flags into the plist / scheduled task; an
+        # unrepresented flag would silently revert to the default there.
+        p = cli.build_parser()
+        for flag, expected in (("--no-require-limit", "--no-require-limit"),
+                               ("--require-limit", "--require-limit")):
+            args = p.parse_args(["install", flag])
+            argv = cli.overrides_to_argv(cli.build_overrides(args))
+            self.assertIn(expected, argv)
 
 
 if __name__ == "__main__":
