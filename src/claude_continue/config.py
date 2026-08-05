@@ -102,8 +102,14 @@ class Config:
 
 
 def _load_file(path: Path = CONFIG_PATH) -> dict:
+    # utf-8-sig, not the platform default: this file is meant to be hand-edited, and
+    # on Windows the obvious editors (Notepad, `Out-File`, VS Code's "UTF-8 with
+    # BOM") prepend a BOM. Read as cp1252 those three bytes become "ï»¿", json.load
+    # raises, and the whole file is discarded — every setting in it silently reverts
+    # to its default with nothing said. The sig variant strips a BOM when present
+    # and is a plain utf-8 read when it isn't.
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8-sig") as f:
             data = json.load(f)
     except FileNotFoundError:
         return {}
@@ -183,6 +189,40 @@ def resolve(overrides: dict | None = None, *, config_path: Path = CONFIG_PATH) -
         cfg.window_cmd = Config.window_cmd
 
     return cfg
+
+
+def save_setting(name: str, value, *, config_path: Path = CONFIG_PATH) -> bool:
+    """Persist one setting into the JSON config file. Returns True on success.
+
+    The GUI is the only interface most people use, and until now it could only
+    *read* config — so a mode chosen there was forgotten at every restart, silently
+    reverting to the default. That is fine for a fire time you retype anyway, and
+    not fine for a switch that decides which sessions get typed into.
+
+    Merges rather than rewrites, so hand-edited keys survive, and writes through a
+    temporary file in the same directory so an interrupted write cannot leave a
+    truncated config that ``_load_file`` would then discard wholesale. Best-effort
+    by contract: a read-only config dir must not stop the app, it just means the
+    choice lasts for this session only.
+    """
+    if name not in {f.name for f in fields(Config)}:
+        raise KeyError("unknown setting %r" % name)
+    data = _load_file(config_path)
+    data[name] = value
+    tmp = config_path.with_name(config_path.name + ".tmp")
+    try:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, sort_keys=True)
+            f.write("\n")
+        os.replace(tmp, config_path)  # atomic on POSIX and on Windows
+        return True
+    except (OSError, TypeError, ValueError):
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return False
 
 
 def timing_issues(cfg: Config) -> list:

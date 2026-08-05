@@ -81,6 +81,24 @@ All notable changes to `claude-continue`. Format follows
   short backoff, rewriting the file from scratch on each attempt so a partial
   body never reaches the checksum step.
 
+## [Unreleased]
+
+### Added
+- **A mode switch in the GUI: "Only continue sessions that hit the limit".** The
+  limit gate shipped as a CLI flag and a config key, which on a default install is
+  not a switch at all — there is no config file, so the window was hard-wired to
+  the gated mode. The checkbox sits under "Fire at", says in plain language which
+  sessions each mode types into, locks while a watch runs, and is persisted on
+  toggle (a mode that silently reverted every restart would be worse than none).
+  The instances panel and the "when you start watching…" sentence both follow it.
+
+### Fixed
+- **A UTF-8 BOM no longer discards the whole config file.** `~/.config/
+  claude-continue/config.json` is meant to be hand-edited, and on Windows the
+  obvious editors (Notepad, PowerShell `Out-File`, VS Code's "UTF-8 with BOM")
+  prepend one. Read with the platform default those three bytes broke `json.load`
+  and every setting in the file silently reverted to its default.
+
 ## [0.13.0] — 2026-07-24
 
 ### Fixed
