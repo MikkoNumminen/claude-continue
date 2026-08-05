@@ -4,7 +4,7 @@ All notable changes to `claude-continue`. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.14.1] — 2026-08-06
 
 ### Fixed
 - **A mangled TLS record no longer fails the whole in-app update.** Reported live
