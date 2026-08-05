@@ -941,6 +941,54 @@ class TestDownloadRetry(unittest.TestCase):
         self.assertEqual(uo.call_count, 1)
         self.assertEqual(sleeps, [])
 
+    def test_a_corrupted_body_is_re_fetched_not_failed_outright(self):
+        # A body that arrives COMPLETE but wrong is the same corrupted-transfer
+        # failure as one that dies mid-stream; it just announces itself one layer
+        # later. Verifying outside the retry loop meant a single mangled byte
+        # failed the whole update while a dropped connection got three tries.
+        dest = self._dest()
+        good = b"the real asset bytes"
+        digest = "sha256:" + hashlib.sha256(good).hexdigest()
+        bad = _FakeDownloadResp([b"corrupted-by-a-tls-proxy"])
+        ok = _FakeDownloadResp([good])
+        with mock.patch("claude_continue.update.urllib.request.urlopen",
+                        side_effect=[bad, ok]) as uo:
+            update._download(_OK_URL, dest, 10.0, sleep=lambda s: None, digest=digest)
+        self.assertEqual(uo.call_count, 2)
+        with open(dest, "rb") as f:
+            self.assertEqual(f.read(), good)
+
+    def test_a_checksum_that_never_matches_still_raises(self):
+        # retrying must not weaken the integrity guarantee — a persistent mismatch
+        # is still a hard failure, never an install
+        dest = self._dest()
+        digest = "sha256:" + hashlib.sha256(b"expected").hexdigest()
+        resps = [_FakeDownloadResp([b"wrong"]) for _ in range(3)]
+        with mock.patch("claude_continue.update.urllib.request.urlopen", side_effect=resps) as uo:
+            with self.assertRaises(update.UpdateError) as cm:
+                update._download(_OK_URL, dest, 10.0, sleep=lambda s: None, digest=digest)
+        self.assertIn("checksum mismatch", str(cm.exception))
+        self.assertEqual(uo.call_count, 3)
+
+    def test_only_a_checksum_mismatch_earns_a_re_fetch(self):
+        # Narrowly a mismatch, not "any UpdateError": a release with no checksum to
+        # verify against will never gain one by asking again, so retrying it just
+        # burns three downloads before reporting the same thing.
+        dest = self._dest()
+        resps = [_FakeDownloadResp([b"body"]) for _ in range(3)]
+        with mock.patch("claude_continue.update.urllib.request.urlopen", side_effect=resps) as uo:
+            with self.assertRaises(update.UpdateError) as cm:
+                update._download(_OK_URL, dest, 10.0, sleep=lambda s: None, digest="")
+        self.assertIn("no checksum", str(cm.exception))
+        self.assertEqual(uo.call_count, 1)  # not retried
+
+    def test_no_digest_given_skips_verification(self):
+        dest = self._dest()
+        with mock.patch("claude_continue.update.urllib.request.urlopen",
+                        side_effect=[_FakeDownloadResp([b"anything"])]) as uo:
+            update._download(_OK_URL, dest, 10.0, sleep=lambda s: None)
+        self.assertEqual(uo.call_count, 1)
+
     def test_partial_body_does_not_survive_a_failed_attempt(self):
         dest = self._dest()
         # attempt 1: writes some bytes, then the connection drops mid-copy (transient).
@@ -1102,3 +1150,72 @@ class TestMacosRollbackFailure(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTlsTransportHint(unittest.TestCase):
+    """After every retry is spent, a bad record MAC is almost never the network —
+    it is something re-encrypting the stream. Without a hint the user is left with
+    `_ssl.c:2580` in the one component they cannot fix by updating."""
+
+    def test_names_the_likely_cause_and_a_way_out(self):
+        hint = update.tls_transport_hint(
+            ssl.SSLError(1, "[SSL: DECRYPTION_FAILED_OR_BAD_RECORD_MAC] bad record mac"))
+        self.assertIn("antivirus", hint)
+        self.assertIn("VPN", hint)
+        self.assertIn(update.RELEASES_PAGE, hint)
+
+    def test_silent_for_a_certificate_failure(self):
+        # that is an identity problem; blaming antivirus would misdirect
+        self.assertEqual(update.tls_transport_hint(ssl.SSLCertVerificationError()), "")
+
+    def test_silent_for_non_tls_errors(self):
+        self.assertEqual(update.tls_transport_hint(urllib.error.URLError("reset")), "")
+        self.assertEqual(update.tls_transport_hint(OSError("disk full")), "")
+
+    def test_apply_update_surfaces_the_hint(self):
+        info = update.UpdateInfo(current="0.14.0", latest="v0.14.1", newer=True,
+                                 asset_name="claude-continue-windows-x64.zip",
+                                 asset_url=_OK_URL, asset_digest="sha256:" + "0" * 64)
+        bad = ssl.SSLError(1, "[SSL: DECRYPTION_FAILED_OR_BAD_RECORD_MAC] bad record mac")
+        with mock.patch("claude_continue.update.is_frozen", return_value=True),              mock.patch("claude_continue.update.urllib.request.urlopen", side_effect=bad),              mock.patch("claude_continue.update.time.sleep"):
+            with self.assertRaises(update.UpdateError) as cm:
+                update.apply_update(info, relaunch=False)
+        self.assertIn("antivirus", str(cm.exception))
+
+
+class TestUnverifiableAssetIsRefused(unittest.TestCase):
+    """The invariant: never install what could not be verified.
+
+    Moving the checksum inside _download's retry loop quietly broke this — that
+    function treats digest=None as "no verification requested", which is right for
+    a direct caller and catastrophic as the only gate. A release whose API entry
+    carries no digest went from refused to installed-unverified.
+    """
+
+    def _info(self, digest):
+        return update.UpdateInfo(current="0.14.0", latest="v0.14.1", newer=True,
+                                 asset_name="claude-continue-windows-x64.zip",
+                                 asset_url=_OK_URL, asset_digest=digest)
+
+    def _run(self, info):
+        with mock.patch("claude_continue.update.is_frozen", return_value=True),              mock.patch("claude_continue.update.urllib.request.urlopen",
+                        side_effect=lambda *a, **k: _FakeDownloadResp([b"payload"])),              mock.patch("claude_continue.update._apply_windows_dir", return_value="INSTALLED"),              mock.patch("claude_continue.update._apply_macos", return_value="INSTALLED"),              mock.patch("claude_continue.update.osenv.detect", return_value="windows"),              mock.patch("claude_continue.update.time.sleep"):
+            return update.apply_update(info, relaunch=False)
+
+    def test_no_digest_is_refused_not_installed(self):
+        with self.assertRaises(update.UpdateError) as cm:
+            self._run(self._info(None))
+        self.assertIn("no checksum", str(cm.exception))
+
+    def test_empty_digest_is_refused(self):
+        with self.assertRaises(update.UpdateError):
+            self._run(self._info(""))
+
+    def test_a_matching_digest_installs(self):
+        good = "sha256:" + hashlib.sha256(b"payload").hexdigest()
+        self.assertEqual(self._run(self._info(good)), "INSTALLED")
+
+    def test_a_mismatched_digest_is_refused(self):
+        with self.assertRaises(update.UpdateError) as cm:
+            self._run(self._info("sha256:" + "0" * 64))
+        self.assertIn("checksum mismatch", str(cm.exception))

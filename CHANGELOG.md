@@ -17,6 +17,15 @@ All notable changes to `claude-continue`. Format follows
   three. A truncated body (`http.client.IncompleteRead`) had the same gap. Both
   are now retried; a certificate verification failure deliberately still is not,
   because that is about identity rather than transport.
+- **A download that arrives complete but corrupted is re-fetched.** The checksum
+  was verified outside the retry loop, so a single mangled byte failed the whole
+  update while a dropped connection got three tries — the same corrupted transfer,
+  just announcing itself one layer later. The install gate is unchanged: a
+  mismatch that persists across every attempt still refuses.
+- **A repeated TLS failure now says what it usually means.** Three spent retries
+  on a bad record MAC is almost never the network; it is antivirus or a VPN
+  inspecting HTTPS. The error now says so and points at the releases page, rather
+  than leaving `_ssl.c:2580` in the one component you cannot fix by updating.
 
 ## [0.14.0] — 2026-08-06
 
