@@ -27,8 +27,15 @@ CONTRACT
 --------
 Everything degrades to ``UNKNOWN`` rather than raising. A missing transcript root,
 a renamed field, a half-written last line, a permission error: all of it must leave
-the watch daemon running. Callers distinguish ``known=False`` ("no signal, decide
-for yourself") from ``limited=False`` ("looked, and this session is not blocked").
+the watch daemon running.
+
+There are three answers, and callers must not collapse them:
+
+- ``known=False`` (UNKNOWN)  — no signal; decide for yourself. Held back, never fired at.
+- ``limited=False``          — looked, and this session is not blocked.
+- ``kind="fresh"`` (FRESH)   — looked, and this session has no work in it at all:
+  cleared with ``/clear``, or newly started. Not blocked and nothing to resume,
+  but reported apart from plain "not limited" so the UI can say which it is.
 """
 
 from __future__ import annotations
@@ -254,11 +261,6 @@ def read_tail(path: Path, max_bytes: int = TAIL_BYTES):
     if start and lines:
         lines = lines[1:]
     return (lines, start == 0)
-
-
-def tail_lines(path: Path, max_bytes: int = TAIL_BYTES) -> list:
-    """Just the lines from ``read_tail``, for callers that don't need completeness."""
-    return read_tail(path, max_bytes)[0]
 
 
 def _entry_text(entry: dict) -> str:

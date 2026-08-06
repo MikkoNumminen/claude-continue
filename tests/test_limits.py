@@ -217,6 +217,20 @@ class TestClearedSession(unittest.TestCase):
         self.assertEqual(st.kind, "")
         self.assertFalse(st.limited)
 
+    def test_an_empty_transcript_is_fresh(self):
+        # a 0-byte file is a complete read of nothing: the session exists but has
+        # written no turn yet. Same practical outcome as UNKNOWN (never resumed),
+        # but it stops the doctor warning about an unreadable transcript that is
+        # in fact perfectly readable and simply empty.
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "D--x-proj").mkdir()
+            (root / "D--x-proj" / "s.jsonl").write_bytes(b"")
+            st = limits.state_for_cwd(r"D:\x\proj", root=root)
+        self.assertTrue(st.known)
+        self.assertEqual(st.kind, "fresh")
+        self.assertFalse(st.resumable(utc(2026, 8, 5, 12)))
+
     def test_a_limit_still_wins_over_freshness(self):
         st = limits.state_from_lines(self._cleared() + [limit_entry()], complete=True)
         self.assertTrue(st.limited)
@@ -313,12 +327,12 @@ class TestStaleLimits(unittest.TestCase):
         self.assertTrue(st.waiting(self.NOW))
 
 
-class TestTailLines(unittest.TestCase):
+class TestReadTail(unittest.TestCase):
     def test_reads_only_the_tail_and_drops_the_partial_first_line(self):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "t.jsonl"
             path.write_text("\n".join("line%03d" % i for i in range(500)) + "\n", encoding="utf-8")
-            lines = limits.tail_lines(path, max_bytes=100)
+            lines, _complete = limits.read_tail(path, max_bytes=100)
             self.assertLess(len(lines), 500)
             self.assertEqual(lines[-1], "line499")
             # the first line read was mid-record and was dropped
@@ -328,10 +342,10 @@ class TestTailLines(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "t.jsonl"
             path.write_text("a\nb\nc\n", encoding="utf-8")
-            self.assertEqual(limits.tail_lines(path), ["a", "b", "c"])
+            self.assertEqual(limits.read_tail(path)[0], ["a", "b", "c"])
 
     def test_missing_file_is_empty_not_an_error(self):
-        self.assertEqual(limits.tail_lines(Path("nope-does-not-exist.jsonl")), [])
+        self.assertEqual(limits.read_tail(Path("nope-does-not-exist.jsonl"))[0], [])
 
 
 class TestOversizedEntries(unittest.TestCase):

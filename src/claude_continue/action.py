@@ -159,6 +159,8 @@ def _held_note(held, now) -> str:
         where = winterm.dir_label(inst[2] if len(inst) > 2 else "") or str(inst[1])
         if not state.known:
             notes.append("%s: no readable transcript" % where)
+        elif state.kind == "fresh":
+            notes.append("%s: cleared/new — no work to resume" % where)
         elif not state.limited:
             notes.append("%s: not limited" % where)
         elif state.kind == "model":
