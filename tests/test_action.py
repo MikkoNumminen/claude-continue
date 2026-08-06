@@ -293,6 +293,15 @@ class TestLimitGate(unittest.TestCase):
             snap = action.snapshot(Config(keystroke_all=True, skip_dirs=["HRManager"]), self.NOW)
         self.assertEqual(snap.ready, 0)
 
+    def test_a_cleared_session_is_named_as_such_in_the_hold_note(self):
+        # the panel, `status` and summarise all call it "cleared/new"; the gate's own
+        # log line said "not limited", which is true but tells the user less and
+        # disagrees with every other surface
+        inst = self._inst("claude", "1", r"D:\x\proj")
+        note = action._held_note([(inst, limits.FRESH)], self.NOW)
+        self.assertIn("cleared", note)
+        self.assertNotIn("not limited", note)
+
     def test_snapshot_counts_each_bucket(self):
         ready = limits.LimitState(known=True, limited=True, kind="session",
                                   reset_at=self.NOW - timedelta(minutes=1))

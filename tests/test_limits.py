@@ -172,6 +172,93 @@ class TestStateFromLines(unittest.TestCase):
         self.assertFalse(limits.state_from_lines([]).known)
 
 
+class TestClearedSession(unittest.TestCase):
+    """`/clear` opens a FRESH transcript in the same terminal, so the project's
+    newest file can legitimately hold no assistant turn at all.
+
+    Observed live: a /clear at 23:47:53, 43 seconds after the previous session's
+    last entry. Read as UNKNOWN it made the whole project unreadable and the gate
+    held the terminal back. The tempting repair — fall back to the previous
+    transcript — is worse: that one is the PRE-clear session, and acting on its
+    spent limit would type `continue` into a freshly cleared terminal, the exact
+    harm the gate exists to prevent. The right answer is that a session with no
+    work in it has nothing to resume.
+    """
+
+    def _cleared(self):
+        # the real shape: session-start markers, a meta user entry, the /clear
+        # local-command echo, and nothing else
+        return [entry(type="mode", timestamp=None),
+                entry(type="file-history-snapshot", timestamp=None),
+                entry(type="user", isMeta=True, timestamp="2026-08-05T20:47:53Z"),
+                entry(type="user", timestamp="2026-08-05T20:47:53Z",
+                      message={"role": "user", "content": "<local-command-caveat>…"}),
+                entry(type="system", subtype="local_command", timestamp="2026-08-05T20:47:53Z")]
+
+    def test_a_complete_read_with_no_assistant_turn_is_fresh_not_unknown(self):
+        st = limits.state_from_lines(self._cleared(), complete=True)
+        self.assertTrue(st.known, "a cleared session is an answer, not a blank")
+        self.assertFalse(st.limited)
+        self.assertEqual(st.kind, "fresh")
+
+    def test_fresh_is_never_resumed(self):
+        st = limits.state_from_lines(self._cleared(), complete=True)
+        self.assertFalse(st.resumable(utc(2026, 8, 5, 23)))
+
+    def test_a_truncated_read_stays_unknown(self):
+        # not having reached the file start is the OTHER reason to find nothing;
+        # calling that "fresh" would wave through a session we never really read
+        st = limits.state_from_lines(self._cleared(), complete=False)
+        self.assertFalse(st.known)
+        self.assertEqual(st.kind, "")
+
+    def test_an_assistant_turn_still_wins_over_freshness(self):
+        st = limits.state_from_lines(self._cleared() + [assistant_entry()], complete=True)
+        self.assertEqual(st.kind, "")
+        self.assertFalse(st.limited)
+
+    def test_an_empty_transcript_is_fresh(self):
+        # a 0-byte file is a complete read of nothing: the session exists but has
+        # written no turn yet. Same practical outcome as UNKNOWN (never resumed),
+        # but it stops the doctor warning about an unreadable transcript that is
+        # in fact perfectly readable and simply empty.
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "D--x-proj").mkdir()
+            (root / "D--x-proj" / "s.jsonl").write_bytes(b"")
+            st = limits.state_for_cwd(r"D:\x\proj", root=root)
+        self.assertTrue(st.known)
+        self.assertEqual(st.kind, "fresh")
+        self.assertFalse(st.resumable(utc(2026, 8, 5, 12)))
+
+    def test_a_limit_still_wins_over_freshness(self):
+        st = limits.state_from_lines(self._cleared() + [limit_entry()], complete=True)
+        self.assertTrue(st.limited)
+
+
+class TestReadTailCompleteness(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.path = Path(self._tmp.name) / "t.jsonl"
+
+    def test_a_whole_small_file_reads_complete(self):
+        self.path.write_text("a\nb\n", encoding="utf-8")
+        lines, complete = limits.read_tail(self.path)
+        self.assertEqual(lines, ["a", "b"])
+        self.assertTrue(complete)
+
+    def test_a_windowed_read_reports_incomplete(self):
+        body = "\n".join("line%04d" % i for i in range(400)) + "\n"
+        self.path.write_text(body, encoding="utf-8")
+        _lines, complete = limits.read_tail(self.path, max_bytes=100)
+        self.assertFalse(complete)
+
+    def test_an_unreadable_file_is_not_complete(self):
+        _lines, complete = limits.read_tail(Path("nope.jsonl"))
+        self.assertFalse(complete)
+
+
 class TestResumable(unittest.TestCase):
     def test_ready_once_the_reset_has_passed(self):
         st = limits.LimitState(known=True, limited=True, kind="session",
@@ -240,12 +327,12 @@ class TestStaleLimits(unittest.TestCase):
         self.assertTrue(st.waiting(self.NOW))
 
 
-class TestTailLines(unittest.TestCase):
+class TestReadTail(unittest.TestCase):
     def test_reads_only_the_tail_and_drops_the_partial_first_line(self):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "t.jsonl"
             path.write_text("\n".join("line%03d" % i for i in range(500)) + "\n", encoding="utf-8")
-            lines = limits.tail_lines(path, max_bytes=100)
+            lines, _complete = limits.read_tail(path, max_bytes=100)
             self.assertLess(len(lines), 500)
             self.assertEqual(lines[-1], "line499")
             # the first line read was mid-record and was dropped
@@ -255,10 +342,10 @@ class TestTailLines(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "t.jsonl"
             path.write_text("a\nb\nc\n", encoding="utf-8")
-            self.assertEqual(limits.tail_lines(path), ["a", "b", "c"])
+            self.assertEqual(limits.read_tail(path)[0], ["a", "b", "c"])
 
     def test_missing_file_is_empty_not_an_error(self):
-        self.assertEqual(limits.tail_lines(Path("nope-does-not-exist.jsonl")), [])
+        self.assertEqual(limits.read_tail(Path("nope-does-not-exist.jsonl"))[0], [])
 
 
 class TestOversizedEntries(unittest.TestCase):
@@ -300,22 +387,31 @@ class TestOversizedEntries(unittest.TestCase):
         self.assertTrue(st.limited)
         self.assertIsNotNone(st.reset_at)
 
-    def test_the_widened_read_is_still_bounded(self):
-        # a file with nothing decisive anywhere must not tempt us into reading it
-        # whole; it stays UNKNOWN rather than growing the read without limit
+    def test_a_small_decision_less_file_is_fresh_not_unknown(self):
+        # read whole, no assistant turn anywhere: that IS the answer (cleared or
+        # newly started), not a failure to read
         self._write(*[user_entry(ts="2026-08-05T06:00:00Z") for _ in range(3)])
-        self.assertFalse(limits.state_for_cwd("D:\\koodaamista\\app", root=self.root).known)
+        st = limits.state_for_cwd("D:\\koodaamista\\app", root=self.root)
+        self.assertTrue(st.known)
+        self.assertEqual(st.kind, "fresh")
+
+    def test_a_huge_decision_less_file_stays_unknown(self):
+        # the widened read is still bounded: past WIDE_TAIL_BYTES we never reach the
+        # file start, so we cannot claim the session is fresh
+        self._write(self._big(limits.WIDE_TAIL_BYTES + 1024), self._system())
+        st = limits.state_for_cwd("D:\\koodaamista\\app", root=self.root)
+        self.assertFalse(st.known)
 
     def test_a_small_file_never_triggers_the_wide_read(self):
         reads = []
-        real = limits.tail_lines
+        real = limits.read_tail
 
         def spy(path, max_bytes=limits.TAIL_BYTES):
             reads.append(max_bytes)
             return real(path, max_bytes)
 
         self._write(assistant_entry())
-        with mock.patch.object(limits, "tail_lines", spy):
+        with mock.patch.object(limits, "read_tail", spy):
             limits.state_for_cwd("D:\\koodaamista\\app", root=self.root)
         self.assertEqual(reads, [limits.TAIL_BYTES])
 
@@ -341,7 +437,7 @@ class TestStateCache(unittest.TestCase):
 
     def test_unchanged_file_is_read_once(self):
         self._write(limit_entry(), mtime=1000)
-        with mock.patch.object(limits, "tail_lines", wraps=limits.tail_lines) as spy:
+        with mock.patch.object(limits, "read_tail", wraps=limits.read_tail) as spy:
             for _ in range(5):
                 limits.state_for_cwd("D:\\koodaamista\\app", root=self.root)
         self.assertEqual(spy.call_count, 1)
