@@ -715,7 +715,9 @@ class TestCleanupStaleUpdate(unittest.TestCase):
         self.assertTrue(os.path.exists(inflight))    # fresh in-flight dir preserved
 
     def test_noop_when_no_old_present(self):
-        exe = os.path.join(tempfile.mkdtemp(), "claude-continue.exe")
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        exe = os.path.join(d, "claude-continue.exe")
         open(exe, "w").close()
         with mock.patch("claude_continue.update.is_frozen", return_value=True), \
              mock.patch("claude_continue.update.sys.executable", exe), \
@@ -1198,7 +1200,16 @@ class TestUnverifiableAssetIsRefused(unittest.TestCase):
                                  asset_url=_OK_URL, asset_digest=digest)
 
     def _run(self, info):
-        with mock.patch("claude_continue.update.is_frozen", return_value=True),              mock.patch("claude_continue.update.urllib.request.urlopen",
+        # apply_update mkdtemps internally and, on Windows, hands that dir to the
+        # detached swap helper rather than removing it — so mocking the helper out
+        # leaves it behind. Point mkdtemp at a directory this test owns.
+        owned = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, owned, True)
+        # bind the REAL mkdtemp before patching: update.tempfile IS the tempfile
+        # module, so a lambda calling tempfile.mkdtemp would call the patch itself
+        real_mkdtemp = tempfile.mkdtemp
+        with mock.patch("claude_continue.update.tempfile.mkdtemp",
+                        side_effect=lambda **kw: real_mkdtemp(dir=owned)),              mock.patch("claude_continue.update.is_frozen", return_value=True),              mock.patch("claude_continue.update.urllib.request.urlopen",
                         side_effect=lambda *a, **k: _FakeDownloadResp([b"payload"])),              mock.patch("claude_continue.update._apply_windows_dir", return_value="INSTALLED"),              mock.patch("claude_continue.update._apply_macos", return_value="INSTALLED"),              mock.patch("claude_continue.update.osenv.detect", return_value="windows"),              mock.patch("claude_continue.update.time.sleep"):
             return update.apply_update(info, relaunch=False)
 
