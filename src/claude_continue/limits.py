@@ -150,6 +150,11 @@ class LimitState:
 
 UNKNOWN = LimitState()
 NOT_LIMITED = LimitState(known=True)
+# A session with no assistant turn anywhere in it: cleared with /clear, or newly
+# started. Known and not limited — there is no paused work to resume — but kept
+# distinct from NOT_LIMITED so the UI can say WHY there is nothing to do instead
+# of implying the session is mid-flight.
+FRESH = LimitState(known=True, kind="fresh")
 
 
 # --- transcript discovery ----------------------------------------------------
@@ -222,13 +227,19 @@ def newest_transcript(directory: Path) -> Optional[Path]:
 
 # --- transcript reading ------------------------------------------------------
 
-def tail_lines(path: Path, max_bytes: int = TAIL_BYTES) -> list:
-    """Last lines of a JSONL file, read from a bounded tail.
+def read_tail(path: Path, max_bytes: int = TAIL_BYTES):
+    """``(lines, complete)`` from a bounded tail read of a JSONL file.
 
-    A transcript grows without limit, so we never read the whole thing. The first
-    line of a mid-file read is almost certainly a fragment, so it is dropped.
-    Returns [] for anything unreadable — this is a diagnostic path, not a place to
-    raise.
+    ``complete`` is True when the read reached byte 0 — i.e. these lines ARE the
+    whole file. That distinction carries the difference between the two reasons a
+    scan can find no assistant turn: the window never reached one (say nothing), or
+    there has never been one (a session with no work in it yet). Only the second is
+    an answer, and without knowing which we had, both looked like "unreadable".
+
+    A transcript grows without limit, so we never read the whole thing by default.
+    The first line of a mid-file read is almost certainly a fragment, so it is
+    dropped. Returns ``([], False)`` for anything unreadable — this is a diagnostic
+    path, not a place to raise.
     """
     try:
         with open(path, "rb") as f:
@@ -238,11 +249,16 @@ def tail_lines(path: Path, max_bytes: int = TAIL_BYTES) -> list:
             f.seek(start)
             data = f.read()
     except OSError:
-        return []
+        return ([], False)
     lines = data.decode("utf-8", "replace").splitlines()
     if start and lines:
         lines = lines[1:]
-    return lines
+    return (lines, start == 0)
+
+
+def tail_lines(path: Path, max_bytes: int = TAIL_BYTES) -> list:
+    """Just the lines from ``read_tail``, for callers that don't need completeness."""
+    return read_tail(path, max_bytes)[0]
 
 
 def _entry_text(entry: dict) -> str:
@@ -306,7 +322,7 @@ def resolve_reset(clock: Sequence, recorded_at: datetime) -> datetime:
     return recorded_at
 
 
-def state_from_lines(lines: Iterable) -> LimitState:
+def state_from_lines(lines: Iterable, *, complete: bool = False) -> LimitState:
     """Decide a session's limit state from its transcript lines. Pure.
 
     Scans BACKWARDS for the first entry that settles the question:
@@ -320,6 +336,19 @@ def state_from_lines(lines: Iterable) -> LimitState:
     instant we typed, before Claude had a chance to accept or refuse it. Sidechain
     (sub-agent) and meta entries are skipped for the same reason — they describe a
     child of the session, not the session's own state.
+
+    Finding nothing decisive means one of two things, and ``complete`` tells them
+    apart. If these lines are the WHOLE file, the session has simply never produced
+    an assistant turn — it was cleared with ``/clear`` (which opens a fresh
+    transcript in the same terminal) or has only just started. That is an answer,
+    not a blank: there is no paused work in it, so nothing to resume. Reported as
+    FRESH. Without ``complete`` it is UNKNOWN, and the caller widens the read.
+
+    Getting that wrong is not cosmetic. Treated as UNKNOWN, a cleared session made
+    its whole project unreadable and the gate held it back; the tempting "fall back
+    to the previous transcript" repair is worse still, because the previous one is
+    the PRE-CLEAR session, and acting on its spent limit would type ``continue``
+    into a freshly cleared terminal — the exact harm the gate exists to prevent.
     """
     for raw in reversed(list(lines)):
         raw = raw.strip()
@@ -347,7 +376,7 @@ def state_from_lines(lines: Iterable) -> LimitState:
                               reset_at=reset_at, recorded_at=recorded_at)
         if entry.get("type") == "assistant":
             return NOT_LIMITED
-    return UNKNOWN
+    return FRESH if complete else UNKNOWN
 
 
 def _timestamp(entry: dict) -> Optional[datetime]:
@@ -391,13 +420,14 @@ def _read_state(path: Path):
     if hit is not None:
         return hit
 
-    lines = tail_lines(path, TAIL_BYTES)
-    state = state_from_lines(lines)
+    lines, complete = read_tail(path, TAIL_BYTES)
+    state = state_from_lines(lines, complete=complete)
     # An unreadable answer from a window that did NOT reach the start of the file
-    # may just be a decisive entry sliced in half (see WIDE_TAIL_BYTES).
-    if not state.known and stat.st_size > TAIL_BYTES:
-        lines = tail_lines(path, WIDE_TAIL_BYTES)
-        state = state_from_lines(lines)
+    # may just be a decisive entry sliced in half (see WIDE_TAIL_BYTES). A FRESH
+    # answer is already final — it can only come from a complete read.
+    if not state.known and not complete:
+        lines, complete = read_tail(path, WIDE_TAIL_BYTES)
+        state = state_from_lines(lines, complete=complete)
 
     result = (replace(state, path=str(path)), _cwd_from_lines(lines))
     if len(_CACHE) >= _CACHE_LIMIT:
@@ -477,6 +507,7 @@ def summarise(states: Sequence, now: datetime) -> str:
     # it out, which is a different thing to explain than a session that is working.
     stale = [lbl for lbl, st in states
              if st.limited and st.stale(now) and not st.waiting(now)]
+    fresh = [lbl for lbl, st in states if st.kind == "fresh"]
     parts = []
     if ready:
         parts.append("%d ready (%s)" % (len(ready), ", ".join(sorted(ready))))
@@ -486,7 +517,9 @@ def summarise(states: Sequence, now: datetime) -> str:
                      % (len(waiting), soonest.astimezone().strftime("%H:%M")))
     if stale:
         parts.append("%d stale (%s)" % (len(stale), ", ".join(sorted(stale))))
-    idle = len(states) - len(ready) - len(waiting) - len(stale)
+    if fresh:
+        parts.append("%d cleared/new" % len(fresh))
+    idle = len(states) - len(ready) - len(waiting) - len(stale) - len(fresh)
     if idle:
         parts.append("%d not limited" % idle)
     return "; ".join(parts)

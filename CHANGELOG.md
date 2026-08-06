@@ -4,6 +4,24 @@ All notable changes to `claude-continue`. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **A session cleared with `/clear` is recognised, not reported as unreadable.**
+  `/clear` opens a fresh transcript in the same terminal, so a project's newest
+  file can legitimately contain no assistant turn at all. That read as "state
+  unknown", which the limit gate holds back — so the terminal would not have been
+  resumed. A session with no work in it is now an answer of its own
+  (`cleared/new`): known, not limited, nothing to resume.
+
+  The distinction that makes this safe is whether the read reached the start of
+  the file. Finding no assistant turn in a *complete* read means there has never
+  been one; finding none in a windowed read means the window fell short, which
+  stays unknown. The tempting repair — fall back to the project's previous
+  transcript — would have been actively harmful: that file is the PRE-clear
+  session, and acting on its spent limit would type `continue` into a freshly
+  cleared terminal, the exact harm the gate exists to prevent.
+
 ## [0.14.1] — 2026-08-06
 
 ### Fixed

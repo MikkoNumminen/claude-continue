@@ -241,6 +241,8 @@ def _print_limit_gate(cfg: Config) -> None:
             mark = "READY   (limit spent — will resume)"
         elif state.waiting(now):
             mark = "waiting (until %s)" % _fmt(state.reset_at)
+        elif state.kind == "fresh":
+            mark = "cleared  (cleared with /clear or newly started — no work to resume)"
         elif not state.known:
             mark = "unknown (no readable transcript — held back)"
         elif state.limited and state.stale(now):

@@ -265,6 +265,9 @@ def instance_mark(state, *, now, watching, gated) -> str:
         return "-> will continue" if watching else ""
     if state is None or not state.known:
         return "state unknown"
+    if state.kind == "fresh":
+        # cleared with /clear, or newly started: no paused work in it to resume
+        return "cleared/new"
     if state.resumable(now):
         return "-> will continue" if watching else "limit spent"
     if state.waiting(now) and state.reset_at is not None:
