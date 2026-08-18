@@ -591,14 +591,41 @@ def offset_from_clock(raw_reset, hh: int, mm: int) -> int:
     return int(round((best - raw_reset).total_seconds()))
 
 
+def format_countdown(seconds: int) -> str:
+    """How long is left, as a phrase that can follow a clock time: ``in 4h 27m``,
+    ``in 27m``, ``in under a minute``, or ``due now``.
+
+    The hour is dropped under an hour ("in 27m", not "in 0h 27m") so the short waits
+    that matter most read at a glance. ``due now`` covers a fire time that has already
+    passed — the ccusage estimate regularly sits a few minutes early, and the window it
+    describes hasn't rolled over yet, so the honest reading is "any moment", not a
+    negative or a frozen "0h 00m". Truncates rather than rounds, like any countdown
+    (4h 27m 59s is still 4h 27m). Pure and testable."""
+    if seconds <= 0:
+        return "due now"
+    if seconds < 60:
+        return "in under a minute"
+    hours, mins = divmod(seconds // 60, 60)
+    if hours:
+        return "in %dh %02dm" % (hours, mins)
+    return "in %dm" % mins
+
+
 def format_reset_field(raw_reset, offset_seconds: int, *, watching: bool = False,
-                       quota: bool = False):
+                       quota: bool = False, now: datetime | None = None):
     """Render the GUI "Fire at" control as ``(entry_text, hint_text)``.
 
     ``entry_text`` is the time the watcher will actually fire (the ccusage estimate
     plus any manual correction) as local HH:MM — i.e. the time that's "locked in".
     ``hint_text`` says, in plain terms, what that time means. ``('', 'waiting…')``
     when there's no estimate yet (idle / ccusage down). Pure and testable.
+
+    Whenever there IS a fire time, the hint carries a live countdown to it
+    ("fires at 17:42 every reset · in 4h 27m"). A bare wall-clock time makes the
+    reader do the subtraction against a reset that is hours away, which is the one
+    thing they actually want to know: whether to wait for it or go do something else.
+    ``now`` (tz-aware UTC) is injectable purely so the countdown is testable; it
+    defaults to the real clock.
 
     ``watching`` reflects the on/off toggle: watching is the ONLY state that actually
     fires, so the hint uses the present tense ("fires at …") only then. While idle
@@ -628,15 +655,20 @@ def format_reset_field(raw_reset, offset_seconds: int, *, watching: bool = False
     # the wrong wall-clock across a DST transition (the inverse asymmetry).
     corrected = (raw_reset + timedelta(seconds=offset_seconds)).astimezone()
     entry = corrected.strftime("%H:%M")
+    if now is None:
+        now = datetime.now(timezone.utc)
+    left = format_countdown(int((corrected - now).total_seconds()))
     if watching:
         # toggle ON: it IS firing at this (locked) time on every reset.
-        return (entry, "fires at %s every reset" % entry)
+        return (entry, "fires at %s every reset · %s" % (entry, left))
     # toggle OFF (idle): describe the queued setting, never active firing.
     mins = int(round(offset_seconds / 60.0))
     if mins == 0:
-        # on the raw ccusage guess (no manual correction) — invite an override.
-        return (entry, "auto-estimated — set the real time above if it fires early or late")
-    return (entry, "will fire at %s every reset when started" % entry)
+        # on the raw ccusage guess (no manual correction) — invite an override. The
+        # countdown goes early in the line so it survives a wrap on the longest hint.
+        return (entry, "auto-estimated · %s — set the real time above if it fires early or late"
+                % left)
+    return (entry, "will fire at %s every reset when started · %s" % (entry, left))
 
 
 def parse_reset_input(raw_reset, text: str):
@@ -1016,11 +1048,13 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
         # watch_mode["offset"], a snapshot, not the live field), so the countdown always
         # matches when the worker will actually fire even if the field is edited.
         corrected = reset_at + timedelta(seconds=watch_mode["offset"])
-        secs = max(0, int((corrected - datetime.now(timezone.utc)).total_seconds()))
-        hours, mins = divmod(secs // 60, 60)
+        secs = int((corrected - datetime.now(timezone.utc)).total_seconds())
         # Lead with the locked-in fire time — no "(corrected)" tag implying a hidden,
-        # different (and likely wrong) estimate; this IS when it fires.
-        return "fires %s · in %dh %02dm" % (corrected.astimezone().strftime("%H:%M"), hours, mins)
+        # different (and likely wrong) estimate; this IS when it fires. The countdown
+        # comes from the same helper as the "Fire at" hint, so the two lines can't
+        # disagree about how long is left.
+        return "fires %s · %s" % (corrected.astimezone().strftime("%H:%M"),
+                                  format_countdown(secs))
 
     def set_buttons(active, stopping=False):
         # active: None (idle/error), "continue", or "quota". The active mode's

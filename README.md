@@ -131,7 +131,8 @@ Ready, with warnings.
 ## GUI
 
 `claude-continue gui` opens a tiny Tkinter window: one button toggles watching
-on/off, with a live "next reset · in 2h13m" countdown and a last-fired indicator.
+on/off, with a live "fires 19:42 · in 2h 13m" countdown and a last-fired
+indicator.
 It watches **only while the window is open** — closing it stops the watch (no
 agent is installed). Tkinter ships with Python, so there are no extra
 dependencies; for an unattended, survives-reboot setup use `install` instead.
@@ -139,12 +140,12 @@ dependencies; for an unattended, survives-reboot setup use `install` instead.
 ```
 ┌──────── claude-continue ────────────┐
 │            ●  WATCHING               │
-│   next reset 19:42 (corrected) · …   │
+│   fires 19:42 · in 2h 13m            │
 │   Claude instances (2):              │
 │     ● working  -- skipped (busy)  …  │
 │     ○ idle     -> will resume     …  │
 │   Fire at: [ 19:42 ]  use estimate   │
-│   estimate 19:00, +42m correction    │
+│   fires at 19:42 every reset · in 2… │
 │      [  ⏹  Stop  ]                   │
 │      [  ＋ Start quota  ]            │
 │   [ 🟢 Update ]                      │
@@ -178,6 +179,11 @@ without you re-typing. *use estimate* clears the correction. The correction last
 for the session (it's derived from a live estimate, so it isn't persisted across
 restarts); set `reset_offset` in the config file, or `--reset-offset SECONDS` on
 the CLI, to bake a fixed correction into an unattended `watch`/`install`.
+
+The hint under the field always says both *when* it fires and *how long* that is
+from now ("fires at 19:42 every reset · in 2h 13m"), so you can tell at a glance
+whether the next continue is minutes or hours away. It counts down live, and
+reads "due now" once the moment arrives.
 
 It also shows a live **Claude instances** panel. On macOS it reads iTerm2 (each
 session's status — working/idle — and, while watching, whether it'll be resumed
