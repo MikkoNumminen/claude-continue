@@ -761,10 +761,14 @@ class TestFormatCountdown(unittest.TestCase):
     def test_hours_and_minutes(self):
         self.assertEqual(format_countdown(4 * 3600 + 27 * 60), "in 4h 27m")
 
-    def test_minutes_are_zero_padded_so_the_line_does_not_jitter(self):
-        # "in 4h 05m", not "in 4h 5m" — the hint repaints every second, and a field
-        # that changes width each minute reads as flicker.
+    def test_minutes_are_padded_inside_the_hour_form(self):
+        # "in 4h 05m", not "in 4h 5m": next to an hour the minutes read as a clock
+        # component, and an unpadded one looks like a broken clock.
         self.assertEqual(format_countdown(4 * 3600 + 5 * 60), "in 4h 05m")
+
+    def test_bare_minutes_are_not_padded(self):
+        # no hour to line up with, so no padding — "in 9m" is how anyone says it.
+        self.assertEqual(format_countdown(9 * 60), "in 9m")
 
     def test_under_an_hour_drops_the_hour(self):
         # "in 27m" beats "in 0h 27m" for the short waits people actually watch.

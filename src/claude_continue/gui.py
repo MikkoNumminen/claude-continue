@@ -596,11 +596,15 @@ def format_countdown(seconds: int) -> str:
     ``in 27m``, ``in under a minute``, or ``due now``.
 
     The hour is dropped under an hour ("in 27m", not "in 0h 27m") so the short waits
-    that matter most read at a glance. ``due now`` covers a fire time that has already
-    passed — the ccusage estimate regularly sits a few minutes early, and the window it
-    describes hasn't rolled over yet, so the honest reading is "any moment", not a
-    negative or a frozen "0h 00m". Truncates rather than rounds, like any countdown
-    (4h 27m 59s is still 4h 27m). Pure and testable."""
+    that matter most read at a glance. Minutes are zero-padded only in the hour form —
+    there they read as a clock component, and "in 4h 5m" looks like a broken clock,
+    while a bare minute count has nothing to line up with ("in 9m").
+
+    ``due now`` covers a fire time that has already passed: the ccusage estimate
+    regularly sits a few minutes early, and the window it describes hasn't rolled over
+    yet, so the honest reading is "any moment", not a negative or a frozen "0h 00m".
+    Truncates rather than rounds, like any countdown (4h 27m 59s is still 4h 27m).
+    Pure and testable."""
     if seconds <= 0:
         return "due now"
     if seconds < 60:
