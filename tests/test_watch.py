@@ -497,6 +497,38 @@ class TestWatchLoop(unittest.TestCase):
         self.assertEqual(len(fired), 2, "expected one fire, then one re-arm — got %s" % (fired,))
         self.assertEqual(fired[1], ready_at)  # exactly the session's stated reset
 
+    def test_a_model_cap_does_not_make_a_successful_resume_look_failed(self):
+        """Two sessions, one session-capped and one on an Opus cap until much later.
+
+        The fire resumes the session-capped one, which is all this fire could ever do
+        — no `continue` clears a model cap. While Snapshot counted the cap as a
+        session it was waiting on, `blocked` never reached 0, so the verify read the
+        successful resume as a failure and re-armed on the cap's reset: a wake-up for
+        a session it cannot help, and the real resume never confirmed.
+        """
+        T0 = utc(2026, 6, 14, 6)
+        cap_reset = T0 + timedelta(hours=4)
+        fc = FakeClock(T0 - timedelta(minutes=1))
+        fired = []
+
+        def gb(timeout=30):
+            return block(1, T0)  # ccusage never rolls; the transcripts decide
+
+        def perform(c, dry_run=False):
+            fired.append(fc.now())
+            return ["s"]
+
+        def snapshot():
+            # after the fire: the session cap is gone, the model cap is still there
+            return action_mod.Snapshot(known=True, ready=0, waiting=0, capped=1, idle=1,
+                                       soonest=None,
+                                       detail="1 model-capped (opus); 1 not limited")
+
+        watch.run(cfg(), clock=fc.now, sleep=fc.sleep, get_block=gb, perform=perform,
+                  snapshot=snapshot, stop=lambda: fc.now() > cap_reset + timedelta(hours=1),
+                  use_lock=False, max_fires=1)
+        self.assertEqual(len(fired), 1)  # confirmed on the spot, no re-arm on the cap
+
     def test_a_past_rearm_time_is_ignored_rather_than_spun_on(self):
         # A stale/past reset must not make the loop fire in a tight circle.
         T0 = utc(2026, 6, 14, 6)

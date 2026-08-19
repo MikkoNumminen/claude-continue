@@ -7,6 +7,21 @@ All notable changes to `claude-continue`. Format follows
 ## [Unreleased]
 
 ### Fixed
+- **A model cap no longer blocks a successful resume from confirming.** With an
+  Opus-capped session in the list beside a session-capped one, the fire would resume
+  the session that could be resumed, and then read its own success as a failure: the
+  post-fire check counts sessions still on a limit, the model cap was one, so the
+  count never reached zero. The loop logged "still limited" and re-armed on the cap's
+  reset — a wake-up for a session no `continue` can help, while the resume that had
+  actually worked went unconfirmed.
+
+  A cap is now its own bucket (`LimitState.capped`) everywhere the loop counts:
+  excluded from the sessions being waited on, from the reset the watcher re-arms on,
+  and from "blocked", and named in its own right in the log line and the doctor's
+  summary ("1 model-capped (app)") rather than folded into "1 waiting until 19:00".
+  `waiting()` itself stays kind-blind, because it answers a question about the clock;
+  the callers that schedule around it are the ones that had to learn the difference.
+
 - **A model cap no longer reads like a session the watcher will resume.** With the
   reset still ahead, the instances panel put "waits for 19:00" on a model-capped
   session, the same words it puts on a session cap the watch really does resume.

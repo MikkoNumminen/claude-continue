@@ -204,7 +204,11 @@ def _verify_and_retry(cfg: Config, old_block: Optional[Block], *, clock: Clock, 
             snap = snapshot()
             if snap.known:
                 if not snap.blocked:
-                    logger.info("resumed: no session is on a limit any more (%s)", snap.detail)
+                    # "nothing we can clear" rather than "nothing is limited": a
+                    # model-capped session may still be sitting there, and it is not
+                    # this fire's failure — no fire clears one. snap.detail names it.
+                    logger.info("resumed: nothing left on a limit a continue can clear (%s)",
+                                snap.detail)
                     return _Verdict(confirmed=True)
                 if not snap.ready:
                     # Still limited, but the reset hasn't arrived. Re-firing now is

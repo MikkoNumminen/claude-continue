@@ -73,13 +73,21 @@ class Snapshot:
 
     known: bool = False  # at least one transcript was readable
     ready: int = 0  # parked on a limit whose reset has passed
-    waiting: int = 0  # limited, reset still ahead
+    waiting: int = 0  # limited, reset still ahead, and ours to act on
+    capped: int = 0  # limited on something `continue` can't clear (a model cap)
     idle: int = 0  # running, not limited
     soonest: Optional[datetime] = None  # earliest future reset among `waiting`
     detail: str = ""
 
     @property
     def blocked(self) -> int:
+        """Sessions still stopped on something this tool can move.
+
+        A capped session is deliberately NOT counted. It is stopped, but no fire will
+        ever change that, so counting it would mean a post-fire check could never
+        report success while one existed — the resume it just did would read as a
+        failure, and the loop would re-arm on a reset that means nothing to it.
+        """
         return self.ready + self.waiting
 
 
@@ -114,13 +122,18 @@ def snapshot(cfg: Config, now: Optional[datetime] = None) -> Snapshot:
     now = now or _utc_now()
     states = session_states(cfg, now)
     ready = [s for _l, s in states if s.resumable(now)]
-    waiting = [s for _l, s in states if s.waiting(now)]
+    # `capped` first: a model cap is limited with a reset ahead, so the kind-blind
+    # waiting() claims it, and the loop would then schedule around a reset it has no
+    # business acting on.
+    capped = [s for _l, s in states if s.capped]
+    waiting = [s for _l, s in states if s.waiting(now) and not s.capped]
     resets = [s.reset_at for s in waiting if s.reset_at is not None]
     return Snapshot(
         known=any(s.known for _l, s in states),
         ready=len(ready),
         waiting=len(waiting),
-        idle=len(states) - len(ready) - len(waiting),
+        capped=len(capped),
+        idle=len(states) - len(ready) - len(waiting) - len(capped),
         soonest=min(resets) if resets else None,
         detail=limits.summarise(states, now),
     )
@@ -176,8 +189,13 @@ def _held_note(held, now) -> str:
 
 
 def _soonest_reset(held, now):
-    """Earliest future reset among held sessions, or None."""
-    times = [st.reset_at for _inst, st in held if st.waiting(now)]
+    """Earliest future reset among held sessions we would actually act on, or None.
+
+    A capped session is skipped: its reset is when the model comes back, not a time
+    this tool does anything at, and re-arming on it would wake the watcher for a
+    session it cannot help.
+    """
+    times = [st.reset_at for _inst, st in held if st.waiting(now) and not st.capped]
     return min(times) if times else None
 
 

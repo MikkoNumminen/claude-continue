@@ -319,6 +319,51 @@ class TestLimitGate(unittest.TestCase):
         self.assertEqual(snap.soonest, self.NOW + timedelta(hours=2))
         self.assertTrue(snap.known)
 
+    def test_a_model_cap_is_not_counted_as_a_session_we_are_waiting_on(self):
+        # The bug this fixes: with an Opus cap in the list, `blocked` never reached 0,
+        # so a fire that really did resume the session-capped terminal was read as a
+        # failure, and the loop re-armed on the cap's reset — a wake-up for a session
+        # no continue can help.
+        cap = limits.LimitState(known=True, limited=True, kind="model",
+                                reset_at=self.NOW + timedelta(hours=2))
+        states = {"D:\\a": cap, "D:\\b": limits.NOT_LIMITED}
+        with _ForcePlatform("windows"),              mock.patch("claude_continue.action.winterm.list_claude_instances",
+                        return_value=[self._inst("claude", str(n), cwd)
+                                      for n, cwd in enumerate(states)]),              mock.patch("claude_continue.action.limits.state_for_cwd",
+                        side_effect=self._states(states)):
+            snap = action.snapshot(Config(keystroke_all=True), self.NOW)
+        self.assertEqual((snap.ready, snap.waiting, snap.capped), (0, 0, 1))
+        self.assertEqual(snap.blocked, 0)      # nothing here a fire can move
+        self.assertIsNone(snap.soonest)        # and no reset worth re-arming on
+        self.assertEqual(snap.idle, 1)         # the cap is not folded in here either
+
+    def test_a_real_wait_beside_a_cap_still_drives_the_re_arm(self):
+        # the other half: excluding caps must not swallow the reset we DO act on.
+        cap = limits.LimitState(known=True, limited=True, kind="model",
+                                reset_at=self.NOW + timedelta(hours=1))
+        wait = limits.LimitState(known=True, limited=True, kind="session",
+                                 reset_at=self.NOW + timedelta(hours=3))
+        states = {"D:\\a": cap, "D:\\b": wait}
+        with _ForcePlatform("windows"),              mock.patch("claude_continue.action.winterm.list_claude_instances",
+                        return_value=[self._inst("claude", str(n), cwd)
+                                      for n, cwd in enumerate(states)]),              mock.patch("claude_continue.action.limits.state_for_cwd",
+                        side_effect=self._states(states)):
+            snap = action.snapshot(Config(keystroke_all=True), self.NOW)
+        self.assertEqual((snap.waiting, snap.capped), (1, 1))
+        self.assertEqual(snap.blocked, 1)
+        self.assertEqual(snap.soonest, self.NOW + timedelta(hours=3))  # not the cap's
+
+    def test_soonest_reset_skips_a_capped_session(self):
+        cap = limits.LimitState(known=True, limited=True, kind="model",
+                                reset_at=self.NOW + timedelta(hours=1))
+        wait = limits.LimitState(known=True, limited=True, kind="session",
+                                 reset_at=self.NOW + timedelta(hours=3))
+        held = [(self._inst("claude", "1", "D:\\a"), cap),
+                (self._inst("claude", "2", "D:\\b"), wait)]
+        self.assertEqual(action._soonest_reset(held, self.NOW),
+                         self.NOW + timedelta(hours=3))
+        self.assertIsNone(action._soonest_reset([held[0]], self.NOW))
+
 
 if __name__ == "__main__":
     unittest.main()
