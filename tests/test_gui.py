@@ -18,6 +18,7 @@ from claude_continue.gui import (
     format_countdown,
     format_instances,
     format_reset_field,
+    instance_mark,
     instance_rows,
     instance_tone,
     limit_mode_enabled,
@@ -37,7 +38,7 @@ from claude_continue.gui import (
     win_instances_mode,
 )
 from claude_continue.gui import (_BTN_UPDATE_AVAILABLE, _BTN_UP_TO_DATE,
-                                 _MAX_SESSIONS_SHOWN, _pick_family)
+                                 _MAX_SESSIONS_SHOWN, _PALETTE, _pick_family)
 from claude_continue.lock import AlreadyRunning
 from claude_continue.update import UpdateInfo
 
@@ -540,6 +541,31 @@ class TestInstancePanelWithLimitGate(unittest.TestCase):
         self.assertIn("model limit", out)
         self.assertNotIn("will continue", out)
 
+    def test_model_cap_waiting_on_a_reset_still_reads_as_a_model_cap(self):
+        # The reset time is real, but nothing acts on it — `continue` cannot clear a
+        # model cap. Reporting it through the kind-blind "waits for HH:MM" branch made
+        # this row read word for word like the session row beside it, which the watch
+        # really does resume, leaving only the colour to tell them apart.
+        states = {"D:\\a": self._state(known=True, limited=True, kind="model",
+                                       reset_at=self.NOW + timedelta(hours=2)),
+                  "D:\\b": self._state(known=True, limited=True, kind="session",
+                                       reset_at=self.NOW + timedelta(hours=2))}
+        out = format_instances([("claude", "1", "D:\\a"), ("claude", "2", "D:\\b")],
+                               "", watching=True, states=states, now=self.NOW)
+        self.assertIn("model limit", out)
+        self.assertEqual(out.count("waits for"), 1)  # the session row, and only it
+
+    def test_an_abandoned_model_cap_still_ages_out(self):
+        # past the resume window it is an abandoned session like any other, and the
+        # kind stops being the interesting part of the row.
+        states = {"D:\\a": self._state(
+            known=True, limited=True, kind="model",
+            reset_at=self.NOW - limits.RESUME_WINDOW - timedelta(hours=1))}
+        out = format_instances([("claude", "1", "D:\\a")], "", watching=True,
+                               states=states, now=self.NOW)
+        self.assertIn("old limit", out)
+        self.assertNotIn("model limit", out)
+
     def test_gate_off_keeps_the_old_annotation(self):
         out = format_instances([("claude", "1", "D:\\a")], "", watching=True,
                                states=None, now=self.NOW)
@@ -551,6 +577,90 @@ class TestInstancePanelWithLimitGate(unittest.TestCase):
                                skip_dirs=["HRManager"], states=states, now=self.NOW)
         self.assertIn("skipped", out)
         self.assertNotIn("will continue", out)
+
+
+def _relative_luminance(colour):
+    """WCAG 2.x relative luminance of a "#rrggbb" string."""
+    channels = [int(colour[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+    linear = [c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+
+def _contrast(fg, bg):
+    lighter, darker = sorted((_relative_luminance(fg), _relative_luminance(bg)), reverse=True)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+class TestRowTintContrast(unittest.TestCase):
+    """The row tints carry meaning, so they have to be readable, not just visible.
+
+    They are small monospace text on the white card — the size class WCAG holds to
+    4.5:1 — and the obvious shades (the watching dot's green, a friendly amber) both
+    land just under it. Pinning the ratio keeps the next round of colour tuning from
+    walking back over that line, which is the kind of regression nobody sees in a
+    screenshot.
+    """
+
+    def test_both_tints_clear_wcag_aa_on_the_card(self):
+        for key in ("row_limited", "row_covered"):
+            ratio = _contrast(_PALETTE[key], _PALETTE["surface"])
+            self.assertGreaterEqual(round(ratio, 2), 4.5,
+                                    "%s is %.2f:1 on the card" % (key, ratio))
+
+    def test_the_helper_agrees_with_known_values(self):
+        # guards the maths itself: black on white is 21:1, white on white is 1:1.
+        self.assertEqual(round(_contrast("#000000", "#ffffff")), 21)
+        self.assertEqual(round(_contrast("#ffffff", "#ffffff")), 1)
+
+
+class TestMarkAndToneAgree(unittest.TestCase):
+    """A row's text and its colour are two views of one decision, so they can never
+    disagree. Identical text under identical conditions has to carry identical colour;
+    the moment it doesn't, the panel is asking the user to read a meaning into hue
+    alone — which is how a model cap came to look exactly like a session the watch
+    resumes, one amber and one green, with no legend anywhere in the window.
+
+    Only the gated mode is swept: with the gate off the panel makes no limit claim and
+    colours nothing, so there is no pairing to keep honest."""
+
+    NOW = utc(2026, 8, 5, 6)
+
+    def _states(self):
+        resets = (self.NOW + timedelta(hours=2),              # reset still ahead
+                  self.NOW - timedelta(minutes=1),            # reset just arrived
+                  self.NOW - limits.RESUME_WINDOW - timedelta(hours=1),  # aged out
+                  None)                                       # no time in the text
+        out = [limits.UNKNOWN, limits.NOT_LIMITED, limits.FRESH]
+        for kind in ("session", "weekly", "model", "limit"):
+            for reset in resets:
+                out.append(limits.LimitState(known=True, limited=True, kind=kind,
+                                             reset_at=reset))
+        return out
+
+    def test_identical_marks_never_carry_different_colours(self):
+        seen = {}
+        for state in self._states():
+            for watching in (False, True):
+                mark = instance_mark(state, now=self.NOW, watching=watching, gated=True)
+                tone = instance_tone(state, now=self.NOW, watching=watching, gated=True)
+                first = seen.setdefault((mark, watching), tone)
+                self.assertEqual(
+                    first, tone,
+                    "%r is painted %r on one row and %r on another" % (mark, first, tone))
+
+    def test_every_coloured_row_says_something_about_a_limit(self):
+        # the other half of the pairing: a colour with a mark that doesn't mention a
+        # limit would be a tint the user cannot account for.
+        for state in self._states():
+            for watching in (False, True):
+                tone = instance_tone(state, now=self.NOW, watching=watching, gated=True)
+                if tone is None:
+                    continue
+                mark = instance_mark(state, now=self.NOW, watching=watching, gated=True)
+                self.assertTrue(
+                    "limit" in mark or "continue" in mark or "waits for" in mark,
+                    "row painted %r reads %r, which says nothing about a limit"
+                    % (tone, mark))
 
 
 class TestInstanceTone(unittest.TestCase):

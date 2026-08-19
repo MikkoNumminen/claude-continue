@@ -4,6 +4,26 @@ All notable changes to `claude-continue`. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **A model cap no longer reads like a session the watcher will resume.** With the
+  reset still ahead, the instances panel put "waits for 19:00" on a model-capped
+  session, the same words it puts on a session cap the watch really does resume.
+  Only the row colour differed (amber against green), with no legend for it anywhere
+  in the window, and the promise itself was empty: `continue` cannot buy credits or
+  switch models, so nothing happens for that row at 19:00 or ever. It now reads
+  "model limit" at every stage, matching the amber it was already painted and what
+  the row already said once the reset had passed. A limit old enough to age out still
+  reads "old limit", model cap or not.
+
+  The row text and the row colour are two views of one decision, so a test now sweeps
+  every limit kind, reset position and watch state and fails if any two rows can show
+  identical text in different colours. The row tints also got a test pinning them
+  above WCAG AA on the card (both are 5.1:1): they were darkened for exactly that
+  reason, and nothing recorded it, so the next round of colour tuning could have
+  walked back over the line unnoticed.
+
 ## [0.15.0] — 2026-08-20
 
 ### Added
