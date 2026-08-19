@@ -478,10 +478,11 @@ _PALETTE = {
     "idle": "#bdb8b0",      # dot: idle
     "watching": "#2f8a3e",  # dot: watching
     # instances panel row tints (see instance_tone). Amber = stopped on a limit and
-    # nothing is watching; green = the same row with a watch that will resume it,
-    # deliberately the SAME green as the watching dot so "green" reads as one idea.
-    "row_limited": "#b26a00",
-    "row_covered": "#2f8a3e",
+    # nothing is watching; green = the same row with a watch that will resume it —
+    # the watching dot's green, a shade darker because this one is small mono TEXT
+    # on the white card and the lighter dot colour lands under 4.5:1 there.
+    "row_limited": "#a05f00",
+    "row_covered": "#2a7d38",
     "stopping": "#cf8a1c",  # dot: stopping
     "error": "#c0392b",     # dot: stopped on error
     "disabled_bg": "#dcd9d3",
@@ -1025,6 +1026,12 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
         limit_state["on"] = bool(limit_var.get())
         limit_state["save_failed"] = not config_mod.save_setting(
             "require_limit", limit_state["on"])
+        if not limit_state["on"]:
+            # Drop the limit answers with the mode that produced them. They are only
+            # refreshed on the session poll (up to 15s away), and a row left amber or
+            # green after the gate is off claims a limit the panel no longer reads.
+            poll["states"] = None
+        poll_sessions()  # repaint against the new mode now, not on the next tick
         render_limit_mode()
 
     limit_check.config(command=on_limit_toggle)
@@ -1290,6 +1297,14 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
         commit_reset_time()
         if override["bad"]:
             return  # invalid time typed — the red hint is up; don't start on a stale value
+        # Then take focus OFF the field. A ttk.Entry keeps keyboard focus even after
+        # being disabled, so a click into the field followed by a click on Start left
+        # the cursor there for the whole watch: the entry never repainted (the hint
+        # above it would say 21:15 while the box still read 17:42), and the eventual
+        # FocusOut long after would commit that stale text against a NEW estimate,
+        # installing a correction of hours the user never chose. (Left where it is on
+        # the invalid path above, so the cursor stays in the field that needs fixing.)
+        root.focus_set()
         # "Start quota" must open a window even if exec_cmd is configured (exec
         # otherwise wins in action.perform); "Continue terminals" keeps exec_cmd.
         # reset_offset applies the user's reset-time correction to both buttons, and

@@ -219,7 +219,9 @@ an idle one:
 
 A model cap stays amber even while watching. `continue` cannot buy credits or
 switch models, so that session is not taken care of and is not painted as if it
-were.
+were. Same for a headless `--exec` watch: it runs your command instead of typing
+into the listed terminals, so those rows stay amber too — green is only for rows
+that are actually getting a `continue`.
 
 The **⟳ Update** button checks the latest GitHub release and, if a newer one
 exists, downloads it and restarts the app in place (the standalone macOS `.app`
