@@ -6,6 +6,26 @@ All notable changes to `claude-continue`. Format follows
 
 ## [Unreleased]
 
+### Added
+- **Sessions stopped by the limit are marked with colour in the instances panel,
+  and the mark changes when they are covered.** The panel listed every running
+  session in the same near-black mono row, so the one session Claude had actually
+  cut off looked exactly like the ones that were simply idle: the fact the window
+  exists to show was the fact hardest to see in it. A row parked on a limit is now
+  amber, and turns green once a watch is running that will resume it, so pressing
+  "Continue terminals" visibly answers "are my paused sessions taken care of?"
+
+  Two rows deliberately do not turn green. A model cap stays amber, because
+  `continue` cannot buy credits or switch models and that session is genuinely not
+  handled; a limit older than the resume window gets no colour at all, because
+  that is an abandoned session rather than a paused one and the watcher leaves it
+  alone. Colour only appears with the limit gate on, which is the mode that reads
+  limit state at all.
+
+  The panel is now one label per row rather than one multi-line label (a Tk label
+  carries a single colour), with the row/colour decision split into the pure
+  `instance_rows` / `instance_tone` so it stays testable without a display.
+
 ### Changed
 - **The "Fire at" hint says how long until the next continue, not just the clock
   time.** It read "fires at 17:42 every reset", which leaves the reader subtracting

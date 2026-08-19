@@ -13,9 +13,13 @@ from claude_continue.config import Config
 from claude_continue.gui import (
     WatchController,
     effective_cfg,
+    ROW_COVERED,
+    ROW_LIMITED,
     format_countdown,
     format_instances,
     format_reset_field,
+    instance_rows,
+    instance_tone,
     limit_mode_enabled,
     limit_mode_hint,
     format_sessions,
@@ -32,7 +36,8 @@ from claude_continue.gui import (
     watching_note,
     win_instances_mode,
 )
-from claude_continue.gui import _BTN_UPDATE_AVAILABLE, _BTN_UP_TO_DATE, _pick_family
+from claude_continue.gui import (_BTN_UPDATE_AVAILABLE, _BTN_UP_TO_DATE,
+                                 _MAX_SESSIONS_SHOWN, _pick_family)
 from claude_continue.lock import AlreadyRunning
 from claude_continue.update import UpdateInfo
 
@@ -546,6 +551,122 @@ class TestInstancePanelWithLimitGate(unittest.TestCase):
                                skip_dirs=["HRManager"], states=states, now=self.NOW)
         self.assertIn("skipped", out)
         self.assertNotIn("will continue", out)
+
+
+class TestInstanceTone(unittest.TestCase):
+    """Which rows the panel paints, and what the colour promises.
+
+    A session Claude cut off is the only row in the list that means work is
+    STOPPED, and among identical mono rows it read exactly like an idle one. The
+    colour is the signal, so it has to be wrong in neither direction: silent about
+    a paused session, or claiming one is handled when nothing will resume it.
+    """
+
+    NOW = utc(2026, 8, 5, 6)
+
+    def _limited(self, **kw):
+        kw.setdefault("kind", "session")
+        kw.setdefault("reset_at", self.NOW - timedelta(minutes=1))
+        return limits.LimitState(known=True, limited=True, **kw)
+
+    def _tone(self, state, *, watching, gated=True):
+        return instance_tone(state, now=self.NOW, watching=watching, gated=gated)
+
+    def test_a_paused_session_is_marked_while_nothing_is_watching(self):
+        self.assertEqual(self._tone(self._limited(), watching=False), ROW_LIMITED)
+
+    def test_the_same_row_reads_as_handled_once_watching(self):
+        # the reinforcement pressing the button has to produce: same rows, covered.
+        self.assertEqual(self._tone(self._limited(), watching=True), ROW_COVERED)
+
+    def test_a_session_still_waiting_for_its_reset_is_marked_too(self):
+        # its work is stopped now, whatever its reset clock says — that is what the
+        # colour reports, and the watch will resume it when that reset lands.
+        waiting = self._limited(reset_at=self.NOW + timedelta(hours=2))
+        self.assertEqual(self._tone(waiting, watching=False), ROW_LIMITED)
+        self.assertEqual(self._tone(waiting, watching=True), ROW_COVERED)
+
+    def test_a_model_cap_is_never_painted_as_handled(self):
+        # `continue` cannot buy credits or switch models, so watching changes nothing
+        # for this row — painting it like the covered ones would be a lie.
+        cap = self._limited(kind="model")
+        self.assertEqual(self._tone(cap, watching=False), ROW_LIMITED)
+        self.assertEqual(self._tone(cap, watching=True), ROW_LIMITED)
+
+    def test_an_abandoned_limit_is_not_marked_at_all(self):
+        # older than the resume window: an abandoned session rather than a paused
+        # one, and the watcher leaves it alone — the colour must not claim otherwise.
+        stale = self._limited(reset_at=self.NOW - limits.RESUME_WINDOW - timedelta(hours=1))
+        self.assertIsNone(self._tone(stale, watching=False))
+        self.assertIsNone(self._tone(stale, watching=True))
+
+    def test_running_sessions_are_left_plain(self):
+        for state in (limits.NOT_LIMITED, limits.FRESH, limits.UNKNOWN, None):
+            self.assertIsNone(self._tone(state, watching=True), state)
+
+    def test_nothing_is_coloured_with_the_gate_off(self):
+        # the gate is what reads limit state; with it off the panel makes no limit
+        # claim about any row, so it must not colour one either.
+        self.assertIsNone(self._tone(self._limited(), watching=True, gated=False))
+        self.assertIsNone(self._tone(None, watching=True, gated=False))
+
+
+class TestInstanceRows(unittest.TestCase):
+    """The panel as (text, tone) rows — the form the per-row labels render."""
+
+    NOW = utc(2026, 8, 5, 6)
+    A = "D:\\a"
+    B = "D:\\b"
+
+    def _states(self):
+        return {self.A: limits.LimitState(known=True, limited=True, kind="session",
+                                          reset_at=self.NOW - timedelta(minutes=1)),
+                self.B: limits.NOT_LIMITED}
+
+    def _instances(self):
+        return [("claude", "1", self.A), ("claude", "2", self.B)]
+
+    def test_only_the_limited_row_carries_a_tone(self):
+        rows = instance_rows(self._instances(), "", watching=False,
+                             states=self._states(), now=self.NOW)
+        self.assertEqual([tone for _, tone in rows], [None, ROW_LIMITED, None])
+
+    def test_watching_turns_that_row_covered_and_leaves_the_rest(self):
+        rows = instance_rows(self._instances(), "", watching=True,
+                             states=self._states(), now=self.NOW)
+        self.assertEqual([tone for _, tone in rows], [None, ROW_COVERED, None])
+
+    def test_the_header_and_overflow_rows_stay_plain(self):
+        many = [("claude", str(i), self.A) for i in range(_MAX_SESSIONS_SHOWN + 3)]
+        rows = instance_rows(many, "", states=None, now=self.NOW)
+        self.assertIsNone(rows[0][1])
+        self.assertIn("...and 3 more", rows[-1][0])
+        self.assertIsNone(rows[-1][1])
+
+    def test_a_skipped_row_is_never_coloured(self):
+        # skip_dirs is standing config: that session is deliberately not taken care
+        # of, and the colour is reserved for the ones that are.
+        cwd = "D:\\x\\HRManager"
+        rows = instance_rows([("claude", "1", cwd)], "", watching=True,
+                             skip_dirs=["HRManager"],
+                             states={cwd: limits.LimitState(known=True, limited=True,
+                                                            kind="session")},
+                             now=self.NOW)
+        self.assertIn("skipped", rows[1][0])
+        self.assertIsNone(rows[1][1])
+
+    def test_text_matches_the_plain_string_form(self):
+        # format_instances is the join of these rows: one row layout, not two that
+        # can drift apart.
+        rows = instance_rows(self._instances(), "", watching=True,
+                             states=self._states(), now=self.NOW)
+        self.assertEqual("\n".join(text for text, _ in rows),
+                         format_instances(self._instances(), "", watching=True,
+                                          states=self._states(), now=self.NOW))
+
+    def test_the_unavailable_and_empty_panels_are_single_plain_rows(self):
+        self.assertEqual(instance_rows(None, ""), [("Claude instances: checking\u2026", None)])
+        self.assertEqual(instance_rows([], ""), [("Claude instances: none running", None)])
 
 
 class TestLimitModeSwitch(unittest.TestCase):

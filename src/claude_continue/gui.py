@@ -279,6 +279,79 @@ def instance_mark(state, *, now, watching, gated) -> str:
     return "not limited"
 
 
+ROW_LIMITED = "limited"   # parked on a spent limit, nothing watching yet
+ROW_COVERED = "covered"   # same session, with a watch running that will resume it
+
+
+def instance_tone(state, *, now, watching, gated):
+    """Which colour an instances row is painted: ``ROW_LIMITED``, ``ROW_COVERED``,
+    or None for the plain body colour. Pure.
+
+    A session Claude cut off is the one row in the panel that means something is
+    stopped, and among otherwise identical mono rows it read exactly like a session
+    that is merely idle. It is painted amber while nothing is watching, and green
+    once a watch is running that will actually resume it — the same rows moving from
+    "needs attention" to "handled", which is the whole point of pressing the button.
+
+    A model cap stays amber even while watching: ``continue`` cannot buy credits or
+    switch models, so that session is NOT taken care of and must not be painted as
+    if it were. A limit too old to act on (``stale``) gets no colour at all — that is
+    an abandoned session rather than a paused one, and the watcher leaves it alone.
+
+    Only the gated mode reads limit state, so only it can colour rows; with the gate
+    off the panel makes no limit claim about any row and none is coloured."""
+    if not gated or state is None or not state.known:
+        return None
+    if not state.limited or state.stale(now):
+        return None
+    if state.kind == "model":
+        return ROW_LIMITED
+    return ROW_COVERED if watching else ROW_LIMITED
+
+
+def instance_rows(instances, note, *, watching=False, skip_dirs=(),
+                  states=None, now=None):
+    """The instances panel as ``(text, tone)`` rows — the colour-carrying form of
+    ``format_instances`` (which is this, joined). Pure.
+
+    Split out because a Tk label can only paint one colour: the panel needs a widget
+    per row for the limited sessions to stand out, and the row/colour decision has to
+    stay testable without a display. ``tone`` is a ``ROW_*`` constant or None; see
+    ``instance_tone`` for what the colours mean and ``format_instances`` for the row
+    text itself."""
+    if instances is None:
+        return [("Claude instances: " + (note or "checking…"), None)]
+    if not instances:
+        return [("Claude instances: none running", None)]
+    now = now or datetime.now(timezone.utc)
+    gated = states is not None
+    rows = [("Claude instances (%d):" % len(instances), None)]
+    for inst in instances[:_MAX_SESSIONS_SHOWN]:
+        name, pid = inst[0], inst[1]
+        cwd = inst[2] if len(inst) > 2 else ""
+        # native install lists as "claude"; an npm node CLI lists as "claude (node)"
+        # so it still reads as a Claude instance, not a stray node process.
+        label = name if name == "claude" else "claude (%s)" % name
+        folder = winterm.dir_label(cwd)
+        if folder:
+            label = "%s · %s" % (label, folder)
+        if len(label) > 24:  # cap the WHOLE label — "claude (node) · <folder>" rows
+            label = label[:23] + "…"  # too, so no row outgrows the card's wraplength
+        if winterm.dir_skipped(cwd, skip_dirs):
+            rows.append(("  ○ %-24s %-16s (pid %s)" % (label, "skipped", pid), None))
+            continue
+        state = (states or {}).get(cwd)
+        mark = instance_mark(state, now=now, watching=watching, gated=gated)
+        tone = instance_tone(state, now=now, watching=watching, gated=gated)
+        if mark:
+            rows.append(("  ● %-24s %-16s (pid %s)" % (label, mark, pid), tone))
+        else:
+            rows.append(("  ● %-24s (pid %s)" % (label, pid), tone))
+    if len(instances) > _MAX_SESSIONS_SHOWN:
+        rows.append(("  ...and %d more" % (len(instances) - _MAX_SESSIONS_SHOWN), None))
+    return rows
+
+
 def format_instances(instances, note, *, watching=False, skip_dirs=(),
                      states=None, now=None) -> str:
     """Render the Windows 'Claude instances' panel — the running Claude Code
@@ -301,36 +374,11 @@ def format_instances(instances, note, *, watching=False, skip_dirs=(),
 
     ``states`` maps a working directory to its ``limits.LimitState``; when given,
     each row reports what the limit gate will actually do with it (see
-    ``instance_mark``) rather than promising a resume the gate would decline."""
-    if instances is None:
-        return "Claude instances: " + (note or "checking…")
-    if not instances:
-        return "Claude instances: none running"
-    lines = ["Claude instances (%d):" % len(instances)]
-    for inst in instances[:_MAX_SESSIONS_SHOWN]:
-        name, pid = inst[0], inst[1]
-        cwd = inst[2] if len(inst) > 2 else ""
-        # native install lists as "claude"; an npm node CLI lists as "claude (node)"
-        # so it still reads as a Claude instance, not a stray node process.
-        label = name if name == "claude" else "claude (%s)" % name
-        folder = winterm.dir_label(cwd)
-        if folder:
-            label = "%s · %s" % (label, folder)
-        if len(label) > 24:  # cap the WHOLE label — "claude (node) · <folder>" rows
-            label = label[:23] + "…"  # too, so no row outgrows the card's wraplength
-        if winterm.dir_skipped(cwd, skip_dirs):
-            lines.append("  ○ %-24s %-16s (pid %s)" % (label, "skipped", pid))
-            continue
-        mark = instance_mark((states or {}).get(cwd),
-                             now=now or datetime.now(timezone.utc),
-                             watching=watching, gated=states is not None)
-        if mark:
-            lines.append("  ● %-24s %-16s (pid %s)" % (label, mark, pid))
-        else:
-            lines.append("  ● %-24s (pid %s)" % (label, pid))
-    if len(instances) > _MAX_SESSIONS_SHOWN:
-        lines.append("  ...and %d more" % (len(instances) - _MAX_SESSIONS_SHOWN))
-    return "\n".join(lines)
+    ``instance_mark``) rather than promising a resume the gate would decline.
+
+    The plain-text form: the same rows ``instance_rows`` builds, minus the colour."""
+    return "\n".join(text for text, _ in instance_rows(
+        instances, note, watching=watching, skip_dirs=skip_dirs, states=states, now=now))
 
 
 LIMIT_MODE_LABEL = "Only continue sessions that hit the limit"
@@ -429,6 +477,11 @@ _PALETTE = {
     "field": "#ffffff",     # entry field background
     "idle": "#bdb8b0",      # dot: idle
     "watching": "#2f8a3e",  # dot: watching
+    # instances panel row tints (see instance_tone). Amber = stopped on a limit and
+    # nothing is watching; green = the same row with a watch that will resume it,
+    # deliberately the SAME green as the watching dot so "green" reads as one idea.
+    "row_limited": "#b26a00",
+    "row_covered": "#2f8a3e",
     "stopping": "#cf8a1c",  # dot: stopping
     "error": "#c0392b",     # dot: stopped on error
     "disabled_bg": "#dcd9d3",
@@ -898,9 +951,32 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
     # "(pid 12345)" 11 ≈ 57 mono chars — format_instances caps the label at 24);
     # fit_to_content() grows the window to match on the first populated poll, so
     # the wider rows don't wrap inside the card.
-    sessions_label = ttk.Label(card, text="Claude instances: checking…", style="Mono.TLabel",
-                               justify="left", anchor="w", wraplength=460)
-    sessions_label.pack(fill="x")
+    # One label PER ROW rather than one multi-line label: a Tk label carries a single
+    # foreground, and the limited rows have to be painted differently from the rest
+    # (instance_tone). The pool grows on demand and unused rows are grid_remove()d,
+    # so the card is exactly as tall as the panel it holds.
+    card.columnconfigure(0, weight=1)
+    session_rows: list[Any] = []
+
+    def session_row(i):
+        while len(session_rows) <= i:
+            row = ttk.Label(card, text="", style="Mono.TLabel",
+                            justify="left", anchor="w", wraplength=460)
+            row.grid(row=len(session_rows), column=0, sticky="w")
+            session_rows.append(row)
+        return session_rows[i]
+
+    _ROW_TINTS = {ROW_LIMITED: palette["row_limited"], ROW_COVERED: palette["row_covered"]}
+
+    def render_panel(rows):
+        for i, (text, tone) in enumerate(rows):
+            row = session_row(i)
+            row.config(text=text, foreground=_ROW_TINTS.get(tone, palette["text"]))
+            row.grid()
+        for row in session_rows[len(rows):]:
+            row.grid_remove()
+
+    render_panel([("Claude instances: checking…", None)])
 
     explain = ttk.Label(outer, text="", style="Detail.TLabel", wraplength=400,
                         justify="center", anchor="center")
@@ -1075,9 +1151,9 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
 
     def render_reset_field():
         # Repaint the "Fire at" entry/hint from the live estimate + current offset.
-        # Skipped while the user is typing (don't stomp the field) or while an invalid
-        # value is pending (leave the red hint up until they fix it or reset).
-        if override["bad"] or root.focus_get() is reset_entry:
+        # Skipped only while an invalid value is pending — the red hint stays up until
+        # the user fixes or clears it.
+        if override["bad"]:
             return
         # The toggle state drives both the hint wording (present tense only while it's
         # actually firing) and the field lock below.
@@ -1085,7 +1161,15 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
         entry_text, hint_text = format_reset_field(
             poll["reset_at"], override["offset"],
             watching=watching, quota=watch_mode["quota"])
-        if reset_entry.get() != entry_text:
+        # Only the ENTRY is off-limits while the cursor is in it (don't stomp a
+        # half-typed time). The hint and the field lock are repainted regardless:
+        # the hint carries a live countdown, so skipping the whole repaint froze it
+        # at whatever it said when the cursor landed — and a cursor merely LEFT in
+        # the field was enough to do it. Worse, clicking a button doesn't reliably
+        # move focus off a ttk.Entry (see start_watch), so a click into the field
+        # then straight on Start left a frozen idle hint, and an unlocked field,
+        # for the whole watch.
+        if root.focus_get() is not reset_entry and reset_entry.get() != entry_text:
             reset_entry.config(state="normal")  # an Entry must be enabled to edit it
             reset_entry.delete(0, "end")
             reset_entry.insert(0, entry_text)
@@ -1172,13 +1256,16 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
             set_buttons(None)
         if win_instances_mode(app_cfg):
             live = should_annotate_continue(watching, watch_mode["quota"], app_cfg.keystroke_all)
-            sessions_label.config(text=format_instances(
+            render_panel(instance_rows(
                 poll["sessions"], poll["sessions_note"], watching=live,
                 skip_dirs=app_cfg.skip_dirs, states=poll["states"]))
         else:
+            # iTerm2 / tmux: same rows, no limit state to colour by (the gate reads
+            # transcripts per working directory, which only the Windows lister reports).
             live = watching and not watch_mode["quota"]
-            sessions_label.config(text=format_sessions(
-                poll["sessions"], poll["sessions_note"], watching=live, cfg=app_cfg))
+            render_panel([(line, None) for line in format_sessions(
+                poll["sessions"], poll["sessions_note"], watching=live,
+                cfg=app_cfg).split("\n")])
         if not layout["fitted"] and poll["sessions"] is not None:
             layout["fitted"] = True  # first real instance list — size to fit it once
             fit_to_content()
