@@ -319,6 +319,115 @@ class TestLimitGate(unittest.TestCase):
         self.assertEqual(snap.soonest, self.NOW + timedelta(hours=2))
         self.assertTrue(snap.known)
 
+    def test_a_model_cap_is_not_counted_as_a_session_we_are_waiting_on(self):
+        # The bug this fixes: with an Opus cap in the list, `blocked` never reached 0,
+        # so a fire that really did resume the session-capped terminal was read as a
+        # failure, and the loop re-armed on the cap's reset — a wake-up for a session
+        # no continue can help.
+        cap = limits.LimitState(known=True, limited=True, kind="model",
+                                reset_at=self.NOW + timedelta(hours=2))
+        states = {"D:\\a": cap, "D:\\b": limits.NOT_LIMITED}
+        with _ForcePlatform("windows"), \
+             mock.patch("claude_continue.action.winterm.list_claude_instances",
+                        return_value=[self._inst("claude", str(n), cwd)
+                                      for n, cwd in enumerate(states)]), \
+             mock.patch("claude_continue.action.limits.state_for_cwd",
+                        side_effect=self._states(states)):
+            snap = action.snapshot(Config(keystroke_all=True), self.NOW)
+        self.assertEqual((snap.ready, snap.waiting, snap.capped), (0, 0, 1))
+        self.assertEqual(snap.blocked, 0)      # nothing here a fire can move
+        self.assertIsNone(snap.soonest)        # and no reset worth re-arming on
+        self.assertEqual(snap.idle, 1)         # the cap is not folded in here either
+
+    def test_a_real_wait_beside_a_cap_still_drives_the_re_arm(self):
+        # the other half: excluding caps must not swallow the reset we DO act on.
+        cap = limits.LimitState(known=True, limited=True, kind="model",
+                                reset_at=self.NOW + timedelta(hours=1))
+        wait = limits.LimitState(known=True, limited=True, kind="session",
+                                 reset_at=self.NOW + timedelta(hours=3))
+        states = {"D:\\a": cap, "D:\\b": wait}
+        with _ForcePlatform("windows"), \
+             mock.patch("claude_continue.action.winterm.list_claude_instances",
+                        return_value=[self._inst("claude", str(n), cwd)
+                                      for n, cwd in enumerate(states)]), \
+             mock.patch("claude_continue.action.limits.state_for_cwd",
+                        side_effect=self._states(states)):
+            snap = action.snapshot(Config(keystroke_all=True), self.NOW)
+        self.assertEqual((snap.waiting, snap.capped), (1, 1))
+        self.assertEqual(snap.blocked, 1)
+        self.assertEqual(snap.soonest, self.NOW + timedelta(hours=3))  # not the cap's
+
+    def test_with_the_gate_off_a_cap_still_drives_the_re_arm(self):
+        # --no-require-limit broadcasts to every session whatever its transcript says,
+        # so the cap's reset IS a moment worth waking for: the text at that time lands
+        # in a session whose model has just come back. Excluding it there would drop a
+        # re-fire that used to work and call the still-stopped session a success.
+        cap = limits.LimitState(known=True, limited=True, kind="model",
+                                reset_at=self.NOW + timedelta(hours=2))
+        with mock.patch("claude_continue.action.session_states",
+                        return_value=[("opus", cap)]):
+            gated = action.snapshot(Config(require_limit=True), self.NOW)
+            blind = action.snapshot(Config(require_limit=False), self.NOW)
+        self.assertEqual((gated.capped, gated.waiting, gated.blocked), (1, 0, 0))
+        self.assertIsNone(gated.soonest)
+        self.assertEqual((blind.capped, blind.waiting, blind.blocked), (0, 1, 1))
+        self.assertEqual(blind.soonest, self.NOW + timedelta(hours=2))
+
+    def test_an_aged_out_cap_is_not_counted_as_capped(self):
+        # past the resume window it is abandoned, not capped — the same call summarise
+        # makes, so a Snapshot can't contradict the detail string it carries.
+        old = limits.LimitState(known=True, limited=True, kind="model",
+                                reset_at=self.NOW - limits.RESUME_WINDOW - timedelta(hours=1))
+        with mock.patch("claude_continue.action.session_states",
+                        return_value=[("opus", old)]):
+            snap = action.snapshot(Config(require_limit=True), self.NOW)
+        self.assertEqual((snap.capped, snap.waiting, snap.ready), (0, 0, 0))
+        self.assertEqual(snap.idle, 1)     # bucketed exactly like an aged-out session cap
+        self.assertIn("stale", snap.detail)
+
+    def test_a_skipped_session_never_drives_the_re_arm(self):
+        # continue_instances drops a skip_dirs match at the end, so it is never typed
+        # into — but it used to land in `held`, where its reset set the wake-up. The
+        # loop woke at it, fired, matched nothing, and marked the window handled: a
+        # spent window for a terminal the user told it never to touch.
+        limited = limits.LimitState(known=True, limited=True, kind="session",
+                                    reset_at=self.NOW + timedelta(hours=2))
+        cfg = Config(keystroke_all=True, skip_dirs=["HRManager"])
+        inst = self._inst("claude", "1", "D:\\x\\HRManager")
+        with mock.patch("claude_continue.action.limits.state_for_cwd", return_value=limited), \
+             mock.patch("claude_continue.action._utc_now", return_value=self.NOW):
+            with self.assertRaises(action.NothingToResume) as caught:
+                action._gate(cfg, [inst], dry_run=False)
+        self.assertIsNone(caught.exception.retry_at)     # pre-fix: the skipped reset
+        self.assertNotIn("HRManager", caught.exception.detail)
+
+    def test_a_long_dead_cap_is_reported_stale_not_live(self):
+        # _held_note was the one surface of four still calling an aged-out cap live;
+        # the panel, `status` and summarise all age it out first.
+        inst = self._inst("claude", "1", "D:\\x\\proj")
+        old = limits.LimitState(known=True, limited=True, kind="model",
+                                reset_at=self.NOW - limits.RESUME_WINDOW - timedelta(hours=1))
+        note = action._held_note([(inst, old)], self.NOW)
+        self.assertIn("too old", note)
+        self.assertNotIn("model cap", note)
+
+    def test_a_live_cap_is_still_named_as_one(self):
+        inst = self._inst("claude", "1", "D:\\x\\proj")
+        cap = limits.LimitState(known=True, limited=True, kind="model",
+                                reset_at=self.NOW + timedelta(hours=2))
+        self.assertIn("model cap", action._held_note([(inst, cap)], self.NOW))
+
+    def test_soonest_reset_skips_a_capped_session(self):
+        cap = limits.LimitState(known=True, limited=True, kind="model",
+                                reset_at=self.NOW + timedelta(hours=1))
+        wait = limits.LimitState(known=True, limited=True, kind="session",
+                                 reset_at=self.NOW + timedelta(hours=3))
+        held = [(self._inst("claude", "1", "D:\\a"), cap),
+                (self._inst("claude", "2", "D:\\b"), wait)]
+        self.assertEqual(action._soonest_reset(held, self.NOW),
+                         self.NOW + timedelta(hours=3))
+        self.assertIsNone(action._soonest_reset([held[0]], self.NOW))
+
 
 if __name__ == "__main__":
     unittest.main()

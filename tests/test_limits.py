@@ -566,6 +566,73 @@ class TestSummarise(unittest.TestCase):
         self.assertNotIn("not limited", text)
 
 
+class TestCappedIsNotAWait(unittest.TestCase):
+    """A model cap is stopped, but not on anything a reset of ours frees.
+
+    `continue` cannot buy credits or switch models, so counting one as a session we
+    are waiting on schedules the watcher around a time that means nothing to it, and
+    keeps a successful fire from ever confirming.
+    """
+
+    NOW = utc(2026, 8, 5, 12)
+
+    def _cap(self, **kw):
+        kw.setdefault("kind", "model")
+        kw.setdefault("reset_at", self.NOW + timedelta(hours=2))
+        return limits.LimitState(known=True, limited=True, **kw)
+
+    def test_a_model_cap_is_capped_and_still_waiting_by_the_clock(self):
+        # waiting() stays kind-blind — it answers "is the reset ahead", nothing more.
+        cap = self._cap()
+        self.assertTrue(cap.capped)
+        self.assertTrue(cap.waiting(self.NOW))
+        self.assertFalse(cap.resumable(self.NOW))
+
+    def test_other_kinds_are_never_capped(self):
+        for kind in ("session", "weekly", "limit", ""):
+            state = limits.LimitState(known=True, limited=True, kind=kind)
+            self.assertFalse(state.capped, kind)
+
+    def test_an_unread_or_unlimited_session_is_not_capped(self):
+        self.assertFalse(limits.UNKNOWN.capped)
+        self.assertFalse(limits.NOT_LIMITED.capped)
+        self.assertFalse(limits.FRESH.capped)
+
+    def test_summarise_names_a_cap_instead_of_folding_it_into_waiting(self):
+        states = [("app", self._cap()),
+                  ("web", limits.LimitState(known=True, limited=True, kind="session",
+                                            reset_at=self.NOW + timedelta(hours=1)))]
+        text = limits.summarise(states, self.NOW)
+        cap_at = self._cap().reset_at.astimezone().strftime("%H:%M")
+        self.assertIn("1 model-capped until %s (app)" % cap_at, text)  # says when it lifts
+        self.assertIn("1 waiting until", text)   # the session cap, and only it
+        self.assertNotIn("2 waiting", text)
+
+    def test_a_capped_session_is_counted_exactly_once(self):
+        states = [("app", self._cap())]
+        text = limits.summarise(states, self.NOW)
+        self.assertIn("1 model-capped", text)
+        self.assertNotIn("waiting", text)
+        self.assertNotIn("not limited", text)
+
+    def test_an_unreadable_session_is_not_reported_as_not_limited(self):
+        # This string is what the post-fire log line offers as evidence the resume
+        # worked. Folding an unreadable transcript into "not limited" let it report
+        # two healthy sessions when one of them could not be read at all and may
+        # still be stopped.
+        text = limits.summarise([("a", limits.UNKNOWN), ("b", limits.NOT_LIMITED)],
+                                self.NOW)
+        self.assertIn("1 unreadable (a)", text)
+        self.assertIn("1 not limited", text)
+        self.assertNotIn("2 not limited", text)
+
+    def test_an_aged_out_cap_reads_as_stale_not_capped(self):
+        old = self._cap(reset_at=self.NOW - limits.RESUME_WINDOW - timedelta(hours=1))
+        text = limits.summarise([("app", old)], self.NOW)
+        self.assertIn("1 stale (app)", text)
+        self.assertNotIn("model-capped", text)
+
+
 class TestStatePreservesEveryField(unittest.TestCase):
     def test_state_for_cwd_keeps_all_fields_when_attaching_the_path(self):
         # Guards against the field-by-field rebuild this replaced: adding a field to

@@ -207,7 +207,10 @@ class TestStatusLimitGate(unittest.TestCase):
         from claude_continue.config import Config
         now = datetime(2026, 8, 5, 6, tzinfo=timezone.utc)
         buf = _io.StringIO()
-        with mock.patch("claude_continue.cli.action.session_states", return_value=states),              mock.patch("claude_continue.cli._utc_now", return_value=now),              contextlib.redirect_stdout(buf):
+        with mock.patch("claude_continue.cli.action.session_states",
+                        return_value=states), \
+             mock.patch("claude_continue.cli._utc_now", return_value=now), \
+             contextlib.redirect_stdout(buf):
             cli._print_limit_gate(Config(require_limit=True))
         return buf.getvalue()
 
@@ -223,6 +226,18 @@ class TestStatusLimitGate(unittest.TestCase):
         self.assertIn("held", out)
         self.assertIn("model limit", out)
         self.assertNotIn("waiting (until", out)
+
+    def test_an_unreadable_transcript_is_not_claimed_as_a_model_cap(self):
+        # The branch tests state.capped (known AND limited AND kind), not a bare kind
+        # check: a state we could not read carries no claim at all, and must reach the
+        # "unknown" arm rather than a definite statement about a limit.
+        from datetime import datetime, timezone
+        from claude_continue import limits
+        now = datetime(2026, 8, 5, 6, tzinfo=timezone.utc)
+        out = self._gate([("HRManager", limits.LimitState(
+            known=False, limited=True, kind="model", reset_at=now))])
+        self.assertIn("unknown", out)
+        self.assertNotIn("model limit", out)
 
     def test_a_session_cap_still_reports_its_reset(self):
         # the branch above must not swallow the kind the gate really does act on.

@@ -607,13 +607,21 @@ class TestRowTintContrast(unittest.TestCase):
     def test_both_tints_clear_wcag_aa_on_the_card(self):
         for key in ("row_limited", "row_covered"):
             ratio = _contrast(_PALETTE[key], _PALETTE["surface"])
-            self.assertGreaterEqual(round(ratio, 2), 4.5,
-                                    "%s is %.2f:1 on the card" % (key, ratio))
+            # the RAW ratio: rounding to 2 places first pulls 4.4952 (a fail) up to
+            # 4.5 (a pass), which is exactly the walk-back over the line this pins.
+            self.assertGreaterEqual(ratio, 4.5,
+                                    "%s is %.4f:1 on the card" % (key, ratio))
 
     def test_the_helper_agrees_with_known_values(self):
-        # guards the maths itself: black on white is 21:1, white on white is 1:1.
+        # Guards the maths itself. Black-on-white (21:1) and white-on-white (1:1) are
+        # not enough on their own — any monotonic luminance passes both, including one
+        # with the sRGB gamma decode dropped, which would then measure the real tints
+        # at half their contrast and send someone darkening a colour that was fine.
+        # #767676 on white is the published borderline AA grey, and it only lands on
+        # 4.54 with the decode in place.
         self.assertEqual(round(_contrast("#000000", "#ffffff")), 21)
         self.assertEqual(round(_contrast("#ffffff", "#ffffff")), 1)
+        self.assertEqual(round(_contrast("#767676", "#ffffff"), 2), 4.54)
 
 
 class TestMarkAndToneAgree(unittest.TestCase):
@@ -634,10 +642,17 @@ class TestMarkAndToneAgree(unittest.TestCase):
                   self.NOW - limits.RESUME_WINDOW - timedelta(hours=1),  # aged out
                   None)                                       # no time in the text
         out = [limits.UNKNOWN, limits.NOT_LIMITED, limits.FRESH]
+        # `limited` and `known` are swept too, not pinned to True. Hardcoding them is
+        # how a mark that tested `kind == "model"` while its tone tested `capped`
+        # (which also requires known and limited) could disagree without this sweep
+        # ever seeing it: an unlimited state carrying kind="model" rendered the row
+        # text "model limit" with no tint, beside a real cap painted amber.
         for kind in ("session", "weekly", "model", "limit"):
             for reset in resets:
-                out.append(limits.LimitState(known=True, limited=True, kind=kind,
-                                             reset_at=reset))
+                for known in (True, False):
+                    for limited in (True, False):
+                        out.append(limits.LimitState(known=known, limited=limited,
+                                                     kind=kind, reset_at=reset))
         return out
 
     def test_identical_marks_never_carry_different_colours(self):
@@ -660,8 +675,13 @@ class TestMarkAndToneAgree(unittest.TestCase):
                 if tone is None:
                     continue
                 mark = instance_mark(state, now=self.NOW, watching=watching, gated=True)
+                # Explicit prefixes, not a substring sweep: "limit" is a substring
+                # of "not limited", so `"limit" in mark` waved through the very row
+                # this exists to catch — the plain one, painted for no stated reason.
+                explains = ("limit spent", "-> will continue", "waits for ",
+                            "model cap ", "model limit")
                 self.assertTrue(
-                    any(w in mark for w in ("limit", "cap", "continue", "waits for")),
+                    mark.startswith(explains),
                     "row painted %r reads %r, which says nothing about a limit"
                     % (tone, mark))
 

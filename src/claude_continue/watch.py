@@ -204,12 +204,22 @@ def _verify_and_retry(cfg: Config, old_block: Optional[Block], *, clock: Clock, 
             snap = snapshot()
             if snap.known:
                 if not snap.blocked:
-                    logger.info("resumed: no session is on a limit any more (%s)", snap.detail)
+                    # "nothing we can clear" rather than "nothing is limited": a
+                    # model-capped session may still be sitting there, and it is not
+                    # this fire's failure — no fire clears one. snap.detail names it.
+                    logger.info("resumed: nothing left on a limit a continue can clear (%s)",
+                                snap.detail)
                     return _Verdict(confirmed=True)
                 if not snap.ready:
                     # Still limited, but the reset hasn't arrived. Re-firing now is
                     # pure noise — Claude will refuse every one. Hand the real reset
                     # time back to the caller, which re-arms on it.
+                    #
+                    # `soonest` is None when every held session is model-capped: there
+                    # is no reset of ours to sleep to, so the caller falls back to the
+                    # ordinary idle poll. That is more wake-ups than the single long
+                    # sleep this used to take, and it is the honest cadence — the old
+                    # sleep was to a time nothing would happen at.
                     logger.info("still limited until %s; re-arming instead of retrying",
                                 _fmt(snap.soonest) if snap.soonest else "an unknown time")
                     return _Verdict(retry_at=snap.soonest)

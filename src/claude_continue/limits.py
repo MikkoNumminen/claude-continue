@@ -140,9 +140,27 @@ class LimitState:
         return self.reset_at is None or now >= self.reset_at
 
     def waiting(self, now: datetime) -> bool:
-        """True when blocked but the reset is still in the future."""
+        """True when blocked but the reset is still in the future.
+
+        Kind-blind on purpose: it answers "is this session's reset ahead of us", not
+        "will we act on it". Callers that schedule around a reset want ``capped``
+        filtered out first — a model cap's reset is a fact about the model coming
+        back, not a time this tool does anything at.
+        """
         return bool(self.known and self.limited and self.reset_at is not None
                     and now < self.reset_at)
+
+    @property
+    def capped(self) -> bool:
+        """True for a limit no ``continue`` can clear — today, a model cap.
+
+        Blocked, but not blocked on anything we can wait out: it needs credits or a
+        different model, both of which are the user's move. Counting one of these as
+        a session we are waiting on makes the watcher re-arm on a reset that changes
+        nothing for it, and (worse) keeps a fire from ever confirming, because there
+        is always still "a session on a limit".
+        """
+        return bool(self.known and self.limited and self.kind == "model")
 
     def stale(self, now: datetime) -> bool:
         """True when this limit is too old to be a session waiting to be nudged.
@@ -503,25 +521,47 @@ def summarise(states: Sequence, now: datetime) -> str:
     """One-line description of a set of ``(label, LimitState)`` pairs, for logs."""
     if not states:
         return "no sessions"
+    # Unreadable first: it is not "not limited", and folding it in there is how a log
+    # line that reports a fire's outcome came to present two sessions as fine when one
+    # of them could not be read at all. The doctor kept its own list of these for
+    # exactly that reason; the bucket belongs here, where the arithmetic is.
+    unread = [lbl for lbl, st in states if not st.known]
     ready = [lbl for lbl, st in states if st.resumable(now)]
-    waiting = [(lbl, st) for lbl, st in states if st.waiting(now)]
+    # A model cap is reported on its own: it is stopped like a waiting session, but
+    # no reset of ours frees it, so folding it into "waiting until 19:00" describes a
+    # queue it is not in — and that line is what the logs and the doctor repeat back.
+    capped = [(lbl, st) for lbl, st in states if st.capped and not st.stale(now)]
+    waiting = [(lbl, st) for lbl, st in states
+               if st.waiting(now) and not st.capped]
     # Counted apart from "not limited": a stale limit means we found one and aged
     # it out, which is a different thing to explain than a session that is working.
     stale = [lbl for lbl, st in states
              if st.limited and st.stale(now) and not st.waiting(now)]
     fresh = [lbl for lbl, st in states if st.kind == "fresh"]
     parts = []
+    if unread:
+        parts.append("%d unreadable (%s)" % (len(unread), ", ".join(sorted(unread))))
     if ready:
         parts.append("%d ready (%s)" % (len(ready), ", ".join(sorted(ready))))
     if waiting:
         soonest = min(st.reset_at for _lbl, st in waiting if st.reset_at is not None)
         parts.append("%d waiting until %s"
                      % (len(waiting), soonest.astimezone().strftime("%H:%M")))
+    if capped:
+        # Say when the model comes back, like the waiting branch does. This line is
+        # what the daemon log and the doctor repeat back, so it is the one place a
+        # user reads with the GUI closed — withholding the time there was the odd one
+        # out among the three surfaces that report a cap.
+        times = [st.reset_at for _lbl, st in capped if st.reset_at is not None]
+        when = (" until %s" % min(times).astimezone().strftime("%H:%M")) if times else ""
+        parts.append("%d model-capped%s (%s)"
+                     % (len(capped), when, ", ".join(sorted(lbl for lbl, _st in capped))))
     if stale:
         parts.append("%d stale (%s)" % (len(stale), ", ".join(sorted(stale))))
     if fresh:
         parts.append("%d cleared/new" % len(fresh))
-    idle = len(states) - len(ready) - len(waiting) - len(stale) - len(fresh)
+    idle = (len(states) - len(unread) - len(ready) - len(waiting) - len(capped)
+            - len(stale) - len(fresh))
     if idle:
         parts.append("%d not limited" % idle)
     return "; ".join(parts)

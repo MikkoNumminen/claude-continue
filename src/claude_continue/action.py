@@ -73,13 +73,21 @@ class Snapshot:
 
     known: bool = False  # at least one transcript was readable
     ready: int = 0  # parked on a limit whose reset has passed
-    waiting: int = 0  # limited, reset still ahead
+    waiting: int = 0  # limited, reset still ahead, and ours to act on
+    capped: int = 0  # limited on something `continue` can't clear (a model cap)
     idle: int = 0  # running, not limited
     soonest: Optional[datetime] = None  # earliest future reset among `waiting`
     detail: str = ""
 
     @property
     def blocked(self) -> int:
+        """Sessions still stopped on something this tool can move.
+
+        A capped session is deliberately NOT counted. It is stopped, but no fire will
+        ever change that, so counting it would mean a post-fire check could never
+        report success while one existed — the resume it just did would read as a
+        failure, and the loop would re-arm on a reset that means nothing to it.
+        """
         return self.ready + self.waiting
 
 
@@ -114,13 +122,26 @@ def snapshot(cfg: Config, now: Optional[datetime] = None) -> Snapshot:
     now = now or _utc_now()
     states = session_states(cfg, now)
     ready = [s for _l, s in states if s.resumable(now)]
-    waiting = [s for _l, s in states if s.waiting(now)]
-    resets = [s.reset_at for s in waiting if s.reset_at is not None]
+    # `capped` first: a model cap is limited with a reset ahead, so the kind-blind
+    # waiting() claims it, and the loop would then schedule around a reset it has no
+    # business acting on.
+    #
+    # Only with the gate ON, though. With `--no-require-limit` every session gets the
+    # text whatever its transcript says, so a cap's reset IS a moment worth coming
+    # back for: the broadcast at that time lands in a session whose model has just
+    # returned. Excluding it there would drop a re-fire that used to work and report
+    # the still-stopped session as a success. An aged-out cap is nobody's business
+    # either way — it matches the `stale` bucket summarise() reports.
+    gate_on = cfg.require_limit
+    capped = [s for _l, s in states if gate_on and s.capped and not s.stale(now)]
+    waiting = [s for _l, s in states if s.waiting(now) and not (gate_on and s.capped)]
+    resets = [s.reset_at for s in waiting]  # waiting() already guarantees a time
     return Snapshot(
         known=any(s.known for _l, s in states),
         ready=len(ready),
         waiting=len(waiting),
-        idle=len(states) - len(ready) - len(waiting),
+        capped=len(capped),
+        idle=len(states) - len(ready) - len(waiting) - len(capped),
         soonest=min(resets) if resets else None,
         detail=limits.summarise(states, now),
     )
@@ -163,10 +184,13 @@ def _held_note(held, now) -> str:
             notes.append("%s: cleared/new — no work to resume" % where)
         elif not state.limited:
             notes.append("%s: not limited" % where)
-        elif state.kind == "model":
-            notes.append("%s: model cap (continue won't clear it)" % where)
         elif state.stale(now):
+            # stale FIRST, so a cap old enough to age out reads the same here as it
+            # does in the panel, in `status` and in summarise — this was the one
+            # surface of the four calling a long-dead cap live.
             notes.append("%s: limit too old to act on" % where)
+        elif state.capped:
+            notes.append("%s: model cap (continue won't clear it)" % where)
         elif state.reset_at is not None:
             notes.append("%s: limited until %s"
                          % (where, state.reset_at.astimezone().strftime("%H:%M")))
@@ -176,8 +200,13 @@ def _held_note(held, now) -> str:
 
 
 def _soonest_reset(held, now):
-    """Earliest future reset among held sessions, or None."""
-    times = [st.reset_at for _inst, st in held if st.waiting(now)]
+    """Earliest future reset among held sessions we would actually act on, or None.
+
+    A capped session is skipped: its reset is when the model comes back, not a time
+    this tool does anything at, and re-arming on it would wake the watcher for a
+    session it cannot help.
+    """
+    times = [st.reset_at for _inst, st in held if st.waiting(now) and not st.capped]
     return min(times) if times else None
 
 
@@ -256,6 +285,14 @@ def _continue_all(cfg: Config, dry_run: bool) -> list:
 def _gate(cfg: Config, instances, dry_run: bool) -> list:
     """Apply the limit gate to a live instance list, logging what it held back."""
     now = _utc_now()
+    # Drop the user's excluded folders BEFORE gating. continue_instances filters them
+    # again at the end, so a skipped session was never typed into — but it still
+    # landed in `held`, where its reset drove the re-arm. The loop then woke at that
+    # reset, fired, matched nothing, and counted the window as handled: a wake-up and
+    # a spent window for a terminal the user told it never to touch.
+    instances = [inst for inst in instances
+                 if not winterm.dir_skipped(inst[2] if len(inst) > 2 else "",
+                                            cfg.skip_dirs)]
     ready, held = gate_instances(instances, now=now)
     if held and not dry_run:
         # INFO, not WARNING: holding a session back is the gate working. The GUI's

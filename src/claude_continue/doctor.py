@@ -279,6 +279,15 @@ def _check_limit_gate(cfg: Config, now, states=None) -> Check:
         return Check("limits", WARN,
                      "%s; no readable transcript for %s — those are held back, so a "
                      "reset would pass unnoticed" % (summary, ", ".join(unreadable)))
+    capped = [label for label, state in found if state.capped and not state.stale(at)]
+    if capped:
+        # Not a failure of anything here — the gate is working exactly as designed —
+        # but a capped session is stopped and no reset of ours frees it, so "all
+        # checks passed" would send the user away from the one session that needs
+        # them. It is the same reason the unreadable case is loud.
+        return Check("limits", WARN,
+                     "%s; %s on a model limit no `continue` clears — that one needs "
+                     "you, not the watcher" % (summary, ", ".join(capped)))
     return Check("limits", OK, summary)
 
 
