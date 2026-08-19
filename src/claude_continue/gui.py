@@ -591,14 +591,45 @@ def offset_from_clock(raw_reset, hh: int, mm: int) -> int:
     return int(round((best - raw_reset).total_seconds()))
 
 
+def format_countdown(seconds: int) -> str:
+    """How long is left, as a phrase that can follow a clock time: ``in 4h 27m``,
+    ``in 27m``, ``in under a minute``, or ``due now``.
+
+    The hour is dropped under an hour ("in 27m", not "in 0h 27m") so the short waits
+    that matter most read at a glance. Minutes are zero-padded only in the hour form —
+    there they read as a clock component, and "in 4h 5m" looks like a broken clock,
+    while a bare minute count has nothing to line up with ("in 9m").
+
+    ``due now`` covers a fire time that has already passed: the ccusage estimate
+    regularly sits a few minutes early, and the window it describes hasn't rolled over
+    yet, so the honest reading is "any moment", not a negative or a frozen "0h 00m".
+    Truncates rather than rounds, like any countdown (4h 27m 59s is still 4h 27m).
+    Pure and testable."""
+    if seconds <= 0:
+        return "due now"
+    if seconds < 60:
+        return "in under a minute"
+    hours, mins = divmod(seconds // 60, 60)
+    if hours:
+        return "in %dh %02dm" % (hours, mins)
+    return "in %dm" % mins
+
+
 def format_reset_field(raw_reset, offset_seconds: int, *, watching: bool = False,
-                       quota: bool = False):
+                       quota: bool = False, now: datetime | None = None):
     """Render the GUI "Fire at" control as ``(entry_text, hint_text)``.
 
     ``entry_text`` is the time the watcher will actually fire (the ccusage estimate
     plus any manual correction) as local HH:MM — i.e. the time that's "locked in".
     ``hint_text`` says, in plain terms, what that time means. ``('', 'waiting…')``
     when there's no estimate yet (idle / ccusage down). Pure and testable.
+
+    Whenever there IS a fire time, the hint carries a live countdown to it
+    ("fires at 17:42 every reset · in 4h 27m"). A bare wall-clock time makes the
+    reader do the subtraction against a reset that is hours away, which is the one
+    thing they actually want to know: whether to wait for it or go do something else.
+    ``now`` (tz-aware UTC) is injectable purely so the countdown is testable; it
+    defaults to the real clock.
 
     ``watching`` reflects the on/off toggle: watching is the ONLY state that actually
     fires, so the hint uses the present tense ("fires at …") only then. While idle
@@ -628,15 +659,20 @@ def format_reset_field(raw_reset, offset_seconds: int, *, watching: bool = False
     # the wrong wall-clock across a DST transition (the inverse asymmetry).
     corrected = (raw_reset + timedelta(seconds=offset_seconds)).astimezone()
     entry = corrected.strftime("%H:%M")
+    if now is None:
+        now = datetime.now(timezone.utc)
+    left = format_countdown(int((corrected - now).total_seconds()))
     if watching:
         # toggle ON: it IS firing at this (locked) time on every reset.
-        return (entry, "fires at %s every reset" % entry)
+        return (entry, "fires at %s every reset · %s" % (entry, left))
     # toggle OFF (idle): describe the queued setting, never active firing.
     mins = int(round(offset_seconds / 60.0))
     if mins == 0:
-        # on the raw ccusage guess (no manual correction) — invite an override.
-        return (entry, "auto-estimated — set the real time above if it fires early or late")
-    return (entry, "will fire at %s every reset when started" % entry)
+        # on the raw ccusage guess (no manual correction) — invite an override. The
+        # countdown goes early in the line so it survives a wrap on the longest hint.
+        return (entry, "auto-estimated · %s — set the real time above if it fires early or late"
+                % left)
+    return (entry, "will fire at %s every reset when started · %s" % (entry, left))
 
 
 def parse_reset_input(raw_reset, text: str):
@@ -1016,11 +1052,13 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
         # watch_mode["offset"], a snapshot, not the live field), so the countdown always
         # matches when the worker will actually fire even if the field is edited.
         corrected = reset_at + timedelta(seconds=watch_mode["offset"])
-        secs = max(0, int((corrected - datetime.now(timezone.utc)).total_seconds()))
-        hours, mins = divmod(secs // 60, 60)
+        secs = int((corrected - datetime.now(timezone.utc)).total_seconds())
         # Lead with the locked-in fire time — no "(corrected)" tag implying a hidden,
-        # different (and likely wrong) estimate; this IS when it fires.
-        return "fires %s · in %dh %02dm" % (corrected.astimezone().strftime("%H:%M"), hours, mins)
+        # different (and likely wrong) estimate; this IS when it fires. The countdown
+        # comes from the same helper as the "Fire at" hint, so the two lines can't
+        # disagree about how long is left.
+        return "fires %s · %s" % (corrected.astimezone().strftime("%H:%M"),
+                                  format_countdown(secs))
 
     def set_buttons(active, stopping=False):
         # active: None (idle/error), "continue", or "quota". The active mode's
@@ -1037,9 +1075,9 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
 
     def render_reset_field():
         # Repaint the "Fire at" entry/hint from the live estimate + current offset.
-        # Skipped while the user is typing (don't stomp the field) or while an invalid
-        # value is pending (leave the red hint up until they fix it or reset).
-        if override["bad"] or root.focus_get() is reset_entry:
+        # Skipped only while an invalid value is pending — the red hint stays up until
+        # the user fixes or clears it.
+        if override["bad"]:
             return
         # The toggle state drives both the hint wording (present tense only while it's
         # actually firing) and the field lock below.
@@ -1047,17 +1085,31 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
         entry_text, hint_text = format_reset_field(
             poll["reset_at"], override["offset"],
             watching=watching, quota=watch_mode["quota"])
-        if reset_entry.get() != entry_text:
+        # The HINT is repainted whatever the cursor is doing. It carries a live
+        # countdown now, so the old "skip the whole repaint while this field has
+        # focus" guard froze it at whatever it said when the cursor landed — a cursor
+        # merely LEFT in the field was enough to stop the clock.
+        focused = root.focus_get() is reset_entry
+        reset_hint.configure(text=hint_text, foreground=palette["faint"])
+        # The entry TEXT is what must not move under the user: retyping it mid-edit
+        # would stomp a half-typed time.
+        if not focused and reset_entry.get() != entry_text:
             reset_entry.config(state="normal")  # an Entry must be enabled to edit it
             reset_entry.delete(0, "end")
             reset_entry.insert(0, entry_text)
-        reset_hint.configure(text=hint_text, foreground=palette["faint"])
         # Lock the field while a watch runs (settings apply at start) or before an
         # estimate exists (nothing to correct against yet) — pure decision in
-        # reset_controls_state so it's unit-tested apart from this Tk glue.
+        # reset_controls_state so it's unit-tested apart from this Tk glue. The lock
+        # still applies with the cursor in the field once a watch is RUNNING, because
+        # clicking a button doesn't reliably move focus off a ttk.Entry (see
+        # start_watch) — skipping it there leaves an editable-looking field for the
+        # whole watch, on a value that is already snapshotted and can't take effect.
+        # An estimate going away mid-edit is the case that must NOT disable it: that
+        # would strand a half-typed time behind a dead field.
         entry_enabled, btn_enabled = reset_controls_state(
             watching=watching, has_estimate=poll["reset_at"] is not None, offset=override["offset"])
-        reset_entry.config(state="normal" if entry_enabled else "disabled")
+        if watching or not focused:
+            reset_entry.config(state="normal" if entry_enabled else "disabled")
         reset_estimate_btn.config(state="normal" if btn_enabled else "disabled")
 
     def commit_reset_time(*_):

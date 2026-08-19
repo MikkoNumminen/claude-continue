@@ -13,6 +13,7 @@ from claude_continue.config import Config
 from claude_continue.gui import (
     WatchController,
     effective_cfg,
+    format_countdown,
     format_instances,
     format_reset_field,
     limit_mode_enabled,
@@ -756,6 +757,38 @@ class TestOffsetFromClock(unittest.TestCase):
         self.assertEqual(offset_from_clock(_local_raw(0, 5), 23, 55), -10 * 60)
 
 
+class TestFormatCountdown(unittest.TestCase):
+    def test_hours_and_minutes(self):
+        self.assertEqual(format_countdown(4 * 3600 + 27 * 60), "in 4h 27m")
+
+    def test_minutes_are_padded_inside_the_hour_form(self):
+        # "in 4h 05m", not "in 4h 5m": next to an hour the minutes read as a clock
+        # component, and an unpadded one looks like a broken clock.
+        self.assertEqual(format_countdown(4 * 3600 + 5 * 60), "in 4h 05m")
+
+    def test_bare_minutes_are_not_padded(self):
+        # no hour to line up with, so no padding — "in 9m" is how anyone says it.
+        self.assertEqual(format_countdown(9 * 60), "in 9m")
+
+    def test_under_an_hour_drops_the_hour(self):
+        # "in 27m" beats "in 0h 27m" for the short waits people actually watch.
+        self.assertEqual(format_countdown(27 * 60), "in 27m")
+
+    def test_truncates_rather_than_rounds(self):
+        # 4h 27m 59s is still 4h 27m — a countdown never shows a minute it hasn't
+        # reached (rounding up would display a fire time one minute in the past).
+        self.assertEqual(format_countdown(4 * 3600 + 27 * 60 + 59), "in 4h 27m")
+
+    def test_last_minute_is_not_in_0m(self):
+        self.assertEqual(format_countdown(59), "in under a minute")
+
+    def test_arrived_and_past_both_read_as_due(self):
+        # the ccusage estimate is often a few minutes early, so a fire time in the
+        # past is normal — it must not render as a negative or a frozen "in 0h 00m".
+        self.assertEqual(format_countdown(0), "due now")
+        self.assertEqual(format_countdown(-90 * 60), "due now")
+
+
 class TestFormatResetField(unittest.TestCase):
     def test_none_waits_for_a_window(self):
         entry, hint = format_reset_field(None, 0)
@@ -856,6 +889,53 @@ class TestFormatResetField(unittest.TestCase):
         # even with no manual correction, while watching the time is locked and firing.
         _, hint = format_reset_field(_local_raw(17, 0), 0, watching=True)
         self.assertIn("fires at 17:00 every reset", hint)
+
+
+    def test_watching_hint_says_how_long_until_it_fires(self):
+        # the whole point: a bare "fires at 17:42" makes the reader subtract against
+        # a reset hours away, which is the one thing they want to know.
+        raw = _local_raw(17, 0)
+        _, hint = format_reset_field(raw, 42 * 60, watching=True,
+                                     now=raw - timedelta(hours=4, minutes=27))
+        self.assertIn("fires at 17:42 every reset", hint)
+        self.assertIn("in 5h 09m", hint)   # 4h27m to the ESTIMATE + the 42m correction
+
+    def test_idle_hint_counts_down_to_the_queued_time(self):
+        raw = _local_raw(17, 0)
+        _, hint = format_reset_field(raw, 42 * 60, watching=False,
+                                     now=raw - timedelta(minutes=18))
+        self.assertIn("will fire at 17:42", hint)
+        self.assertIn("in 1h 00m", hint)
+        self.assertNotIn("fires at 17:42 every", hint)  # still no active-firing claim
+
+    def test_auto_estimate_hint_counts_down_too(self):
+        # the default first-run state — it also has a fire time, so it also says when.
+        raw = _local_raw(17, 0)
+        _, hint = format_reset_field(raw, 0, now=raw - timedelta(hours=2))
+        self.assertIn("auto-estimated", hint)
+        self.assertIn("in 2h 00m", hint)
+        self.assertIn("set the real time", hint)   # the override invite survives
+
+    def test_countdown_tracks_the_corrected_time_not_the_raw_estimate(self):
+        # a NEGATIVE correction fires earlier than ccusage guessed; the countdown has
+        # to shrink with it, or it contradicts the time shown right next to it.
+        raw = _local_raw(17, 30)
+        entry, hint = format_reset_field(raw, -20 * 60, watching=True,
+                                         now=raw - timedelta(hours=1))
+        self.assertEqual(entry, "17:10")
+        self.assertIn("in 40m", hint)
+
+    def test_passed_fire_time_reads_as_due_not_negative(self):
+        raw = _local_raw(17, 0)
+        _, hint = format_reset_field(raw, 0, watching=True, now=raw + timedelta(minutes=5))
+        self.assertIn("due now", hint)
+        self.assertNotIn("-", hint.split("·")[-1])
+
+    def test_no_estimate_has_nothing_to_count_down_to(self):
+        # no window, no fire time — a countdown there would be invented.
+        _, hint = format_reset_field(None, 0, watching=True)
+        self.assertNotIn("in ", hint.split("·")[-1])
+        self.assertNotIn("due now", hint)
 
 
 class TestOffsetFromClockDST(unittest.TestCase):

@@ -4,6 +4,24 @@ All notable changes to `claude-continue`. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+- **The "Fire at" hint says how long until the next continue, not just the clock
+  time.** It read "fires at 17:42 every reset", which leaves the reader subtracting
+  a reset that can be hours away from the current time to answer the only question
+  they have: wait for it, or go do something else. Every state that has a fire time
+  now carries a live countdown next to it ("fires at 17:42 every reset · in 4h 27m"),
+  including the idle ones, where it counts down to the time the watch *would* fire
+  once started.
+
+  The countdown drops the hour under an hour ("in 27m", not "in 0h 27m") and reads
+  "due now" once the moment has passed, which is a normal state rather than an error:
+  the ccusage estimate regularly sits a few minutes early, and until the window
+  actually rolls over the honest answer is "any moment". The status line above the
+  instances panel now formats its countdown through the same helper, so the two lines
+  cannot disagree about how long is left.
+
 ## [0.14.2] — 2026-08-06
 
 ### Fixed
