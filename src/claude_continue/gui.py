@@ -1075,9 +1075,9 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
 
     def render_reset_field():
         # Repaint the "Fire at" entry/hint from the live estimate + current offset.
-        # Skipped while the user is typing (don't stomp the field) or while an invalid
-        # value is pending (leave the red hint up until they fix it or reset).
-        if override["bad"] or root.focus_get() is reset_entry:
+        # Skipped only while an invalid value is pending — the red hint stays up until
+        # the user fixes or clears it.
+        if override["bad"]:
             return
         # The toggle state drives both the hint wording (present tense only while it's
         # actually firing) and the field lock below.
@@ -1085,17 +1085,31 @@ def run(stale_warning: str | None = None) -> None:  # pragma: no cover - exercis
         entry_text, hint_text = format_reset_field(
             poll["reset_at"], override["offset"],
             watching=watching, quota=watch_mode["quota"])
-        if reset_entry.get() != entry_text:
+        # The HINT is repainted whatever the cursor is doing. It carries a live
+        # countdown now, so the old "skip the whole repaint while this field has
+        # focus" guard froze it at whatever it said when the cursor landed — a cursor
+        # merely LEFT in the field was enough to stop the clock.
+        focused = root.focus_get() is reset_entry
+        reset_hint.configure(text=hint_text, foreground=palette["faint"])
+        # The entry TEXT is what must not move under the user: retyping it mid-edit
+        # would stomp a half-typed time.
+        if not focused and reset_entry.get() != entry_text:
             reset_entry.config(state="normal")  # an Entry must be enabled to edit it
             reset_entry.delete(0, "end")
             reset_entry.insert(0, entry_text)
-        reset_hint.configure(text=hint_text, foreground=palette["faint"])
         # Lock the field while a watch runs (settings apply at start) or before an
         # estimate exists (nothing to correct against yet) — pure decision in
-        # reset_controls_state so it's unit-tested apart from this Tk glue.
+        # reset_controls_state so it's unit-tested apart from this Tk glue. The lock
+        # still applies with the cursor in the field once a watch is RUNNING, because
+        # clicking a button doesn't reliably move focus off a ttk.Entry (see
+        # start_watch) — skipping it there leaves an editable-looking field for the
+        # whole watch, on a value that is already snapshotted and can't take effect.
+        # An estimate going away mid-edit is the case that must NOT disable it: that
+        # would strand a half-typed time behind a dead field.
         entry_enabled, btn_enabled = reset_controls_state(
             watching=watching, has_estimate=poll["reset_at"] is not None, offset=override["offset"])
-        reset_entry.config(state="normal" if entry_enabled else "disabled")
+        if watching or not focused:
+            reset_entry.config(state="normal" if entry_enabled else "disabled")
         reset_estimate_btn.config(state="normal" if btn_enabled else "disabled")
 
     def commit_reset_time(*_):
