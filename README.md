@@ -205,6 +205,24 @@ below) shows as "skipped" instead, matching what continue-all actually does.
 (On WSL, where Claude runs as a Linux process the Windows process query can't
 see, the panel notes it has no live view.)
 
+With the limit gate on, the rows are colour-coded, because a session Claude cut
+off is the only row that means work is *stopped* and it used to read exactly like
+an idle one:
+
+- **amber** — parked on a limit, and nothing is watching. This is the row you
+  came to the window about.
+- **green** — the same row once a watch is running: that session is covered and
+  will get its `continue`. Pressing **Continue terminals** turns the amber rows
+  green, which is the confirmation that the button did something for them.
+- **plain** — everything else: sessions that are not limited, freshly cleared
+  ones, and limits too old to act on (the watcher leaves those alone).
+
+A model cap stays amber even while watching. `continue` cannot buy credits or
+switch models, so that session is not taken care of and is not painted as if it
+were. Same for a headless `--exec` watch: it runs your command instead of typing
+into the listed terminals, so those rows stay amber too — green is only for rows
+that are actually getting a `continue`.
+
 The **⟳ Update** button checks the latest GitHub release and, if a newer one
 exists, downloads it and restarts the app in place (the standalone macOS `.app`
 bundle / Windows install folder). It's checked once on launch and tinted green
