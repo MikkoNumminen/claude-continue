@@ -268,6 +268,18 @@ def instance_mark(state, *, now, watching, gated) -> str:
     if state.kind == "fresh":
         # cleared with /clear, or newly started: no paused work in it to resume
         return "cleared/new"
+    if state.kind == "model" and not state.stale(now):
+        # A model cap is never the watcher's to act on: `continue` cannot buy credits
+        # or switch models, so nothing happens for this row when its reset lands, then
+        # or ever. The "waits for HH:MM" branch below is kind-blind (LimitState.waiting
+        # is true for any limited state with a future reset), so it used to render this
+        # row WORD FOR WORD like a session the watch really does resume, leaving
+        # nothing but the colour to tell them apart — and colour alone is not a thing
+        # to hang it on. The reset is still worth showing, since it says when the model
+        # comes back; it just must not read as a place in the queue.
+        if state.waiting(now):
+            return "model cap %s" % state.reset_at.astimezone().strftime("%H:%M")
+        return "model limit"
     if state.resumable(now):
         return "-> will continue" if watching else "limit spent"
     if state.waiting(now) and state.reset_at is not None:
@@ -275,6 +287,9 @@ def instance_mark(state, *, now, watching, gated) -> str:
     if state.limited and state.stale(now):
         return "old limit"
     if state.limited:
+        # No state reaches here today — every limited one is absorbed above. It stays
+        # as the landing spot for a limit kind that doesn't exist yet, so a new one
+        # can't fall through to "not limited", which would be the worst answer of all.
         return "%s limit" % (state.kind or "unknown")
     return "not limited"
 
@@ -480,7 +495,9 @@ _PALETTE = {
     # instances panel row tints (see instance_tone). Amber = stopped on a limit and
     # nothing is watching; green = the same row with a watch that will resume it —
     # the watching dot's green, a shade darker because this one is small mono TEXT
-    # on the white card and the lighter dot colour lands under 4.5:1 there.
+    # on the white card and the lighter dot colour lands under 4.5:1 there. Both clear
+    # WCAG AA against the card (5.1:1); test_gui pins that, so a later "nicer" shade
+    # can't quietly drop back under it.
     "row_limited": "#a05f00",
     "row_covered": "#2a7d38",
     "stopping": "#cf8a1c",  # dot: stopping

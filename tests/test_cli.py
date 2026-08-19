@@ -196,6 +196,44 @@ class TestStatusQuotaMode(unittest.TestCase):
         self.assertNotIn("send", out)  # not the resume/broadcast wording
 
 
+class TestStatusLimitGate(unittest.TestCase):
+    """`status` is the line that says what the gate WOULD touch, so it has to be as
+    honest as the GUI panel about a session nothing will touch."""
+
+    def _gate(self, states):
+        import contextlib
+        import io as _io
+        from datetime import datetime, timezone
+        from claude_continue.config import Config
+        now = datetime(2026, 8, 5, 6, tzinfo=timezone.utc)
+        buf = _io.StringIO()
+        with mock.patch("claude_continue.cli.action.session_states", return_value=states),              mock.patch("claude_continue.cli._utc_now", return_value=now),              contextlib.redirect_stdout(buf):
+            cli._print_limit_gate(Config(require_limit=True))
+        return buf.getvalue()
+
+    def test_a_model_cap_is_not_reported_as_waiting_for_its_reset(self):
+        # `waiting()` is kind-blind, so a model cap with a reset ahead used to print
+        # "waiting (until 19:00)" — a queue position for a session `continue` cannot
+        # move, then or ever.
+        from datetime import datetime, timedelta, timezone
+        from claude_continue import limits
+        now = datetime(2026, 8, 5, 6, tzinfo=timezone.utc)
+        out = self._gate([("HRManager", limits.LimitState(
+            known=True, limited=True, kind="model", reset_at=now + timedelta(hours=2)))])
+        self.assertIn("held", out)
+        self.assertIn("model limit", out)
+        self.assertNotIn("waiting (until", out)
+
+    def test_a_session_cap_still_reports_its_reset(self):
+        # the branch above must not swallow the kind the gate really does act on.
+        from datetime import datetime, timedelta, timezone
+        from claude_continue import limits
+        now = datetime(2026, 8, 5, 6, tzinfo=timezone.utc)
+        out = self._gate([("HRManager", limits.LimitState(
+            known=True, limited=True, kind="session", reset_at=now + timedelta(hours=2)))])
+        self.assertIn("waiting (until", out)
+
+
 class TestUpdateCommand(unittest.TestCase):
     def _run(self, info, apply=False):
         from claude_continue import update
