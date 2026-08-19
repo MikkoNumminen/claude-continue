@@ -101,7 +101,7 @@ args, defaulting to the real implementations) and their contracts:
 | `sleep` | `(seconds: float) -> None` | interruptible sleep (the real one is `Event.wait`). |
 | `get_block` | `(timeout: float) -> Block \| None` | active block or `None` (idle); raises `ccusage.CcusageUnavailable` on failure (treated as "no signal", never fatal). |
 | `perform` | `(cfg, dry_run=False) -> list[str]` | do the action; returns labels acted on; raises `action.ActionError` on failure (the loop logs + degrades) or `action.NothingToResume` when the limit gate declines (not a failure — the loop re-arms). |
-| `snapshot` | `() -> action.Snapshot` | how many sessions are ready / waiting / idle per their transcripts; `known=False` means no signal, and verification falls back to ccusage. |
+| `snapshot` | `() -> action.Snapshot` | how many sessions are ready / waiting / capped / idle per their transcripts; `known=False` means no signal, and verification falls back to ccusage. `capped` is a limit no `continue` clears (a model cap), counted apart so it never keeps `blocked` from reaching zero and never drives the re-arm. |
 | `stop` | `() -> bool` | True when the loop should exit (SIGTERM/SIGINT flips it). |
 
 `perform` and `snapshot` are one port in practice: `snapshot` reads the world

@@ -239,10 +239,14 @@ def _print_limit_gate(cfg: Config) -> None:
     for label, state in states:
         if state.resumable(now):
             mark = "READY   (limit spent — will resume)"
-        elif state.kind == "model" and not state.stale(now):
+        elif state.capped and not state.stale(now):
             # Same trap as the GUI panel had: waiting() is kind-blind, so a model cap
             # with a future reset landed in "waiting (until …)" — on the one line that
-            # exists to say what the gate WOULD touch. It touches this never.
+            # exists to say what the gate WOULD touch. It touches this never. Via the
+            # `capped` property, not a local kind test: that keeps the known/limited
+            # guards (an unreadable transcript must still reach the "unknown" arm
+            # below) and keeps the knowledge of which limits are uncleanable in one
+            # place, so a second such kind doesn't have to be found in three.
             when = " until %s" % _fmt(state.reset_at) if state.waiting(now) else ""
             mark = "held    (model limit%s; continue won't clear it)" % when
         elif state.waiting(now):

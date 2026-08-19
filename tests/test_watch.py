@@ -7,6 +7,7 @@ import _support  # noqa: F401
 from _support import FakeClock, utc
 
 from claude_continue import action as action_mod
+from claude_continue import limits as limits_mod
 from claude_continue import watch
 from claude_continue.ccusage import CcusageUnavailable
 from claude_continue.config import Config
@@ -505,11 +506,16 @@ class TestWatchLoop(unittest.TestCase):
         session it was waiting on, `blocked` never reached 0, so the verify read the
         successful resume as a failure and re-armed on the cap's reset: a wake-up for
         a session it cannot help, and the real resume never confirmed.
+
+        Drives the REAL action.snapshot over mocked session states rather than a
+        hand-built Snapshot — the bucket arithmetic is the thing under test, and a
+        fake carrying `capped=1, soonest=None` would pass whatever the code did.
         """
         T0 = utc(2026, 6, 14, 6)
         cap_reset = T0 + timedelta(hours=4)
         fc = FakeClock(T0 - timedelta(minutes=1))
         fired = []
+        cfg_obj = cfg()
 
         def gb(timeout=30):
             return block(1, T0)  # ccusage never rolls; the transcripts decide
@@ -518,16 +524,19 @@ class TestWatchLoop(unittest.TestCase):
             fired.append(fc.now())
             return ["s"]
 
-        def snapshot():
-            # after the fire: the session cap is gone, the model cap is still there
-            return action_mod.Snapshot(known=True, ready=0, waiting=0, capped=1, idle=1,
-                                       soonest=None,
-                                       detail="1 model-capped (opus); 1 not limited")
+        # after the fire: the session cap is gone, the model cap is still sitting there
+        states = [("opus", limits_mod.LimitState(known=True, limited=True, kind="model",
+                                                 reset_at=cap_reset)),
+                  ("web", limits_mod.NOT_LIMITED)]
 
-        watch.run(cfg(), clock=fc.now, sleep=fc.sleep, get_block=gb, perform=perform,
-                  snapshot=snapshot, stop=lambda: fc.now() > cap_reset + timedelta(hours=1),
-                  use_lock=False, max_fires=1)
-        self.assertEqual(len(fired), 1)  # confirmed on the spot, no re-arm on the cap
+        with mock.patch("claude_continue.action.session_states", return_value=states):
+            watch.run(cfg_obj, clock=fc.now, sleep=fc.sleep, get_block=gb, perform=perform,
+                      snapshot=lambda: action_mod.snapshot(cfg_obj, fc.now()),
+                      stop=lambda: fc.now() > cap_reset + timedelta(hours=1),
+                      use_lock=False)
+        # one fire, and nothing at cap_reset: the resume confirmed on the spot
+        self.assertEqual(len(fired), 1, "expected one fire, got %s" % (fired,))
+        self.assertNotIn(cap_reset, fired)
 
     def test_a_past_rearm_time_is_ignored_rather_than_spun_on(self):
         # A stale/past reset must not make the loop fire in a tight circle.

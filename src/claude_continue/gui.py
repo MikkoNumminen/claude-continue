@@ -268,7 +268,7 @@ def instance_mark(state, *, now, watching, gated) -> str:
     if state.kind == "fresh":
         # cleared with /clear, or newly started: no paused work in it to resume
         return "cleared/new"
-    if state.kind == "model" and not state.stale(now):
+    if state.capped and not state.stale(now):
         # A model cap is never the watcher's to act on: `continue` cannot buy credits
         # or switch models, so nothing happens for this row when its reset lands, then
         # or ever. The "waits for HH:MM" branch below is kind-blind (LimitState.waiting
@@ -276,7 +276,10 @@ def instance_mark(state, *, now, watching, gated) -> str:
         # row WORD FOR WORD like a session the watch really does resume, leaving
         # nothing but the colour to tell them apart — and colour alone is not a thing
         # to hang it on. The reset is still worth showing, since it says when the model
-        # comes back; it just must not read as a place in the queue.
+        # comes back; it just must not read as a place in the queue. Through the
+        # `capped` property so this and instance_tone read the SAME condition: a local
+        # `kind == "model"` test here dropped the limited/known guards the tone keeps,
+        # which is another way back to identical text in two different colours.
         if state.waiting(now):
             return "model cap %s" % state.reset_at.astimezone().strftime("%H:%M")
         return "model limit"

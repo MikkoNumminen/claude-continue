@@ -521,11 +521,16 @@ def summarise(states: Sequence, now: datetime) -> str:
     """One-line description of a set of ``(label, LimitState)`` pairs, for logs."""
     if not states:
         return "no sessions"
+    # Unreadable first: it is not "not limited", and folding it in there is how a log
+    # line that reports a fire's outcome came to present two sessions as fine when one
+    # of them could not be read at all. The doctor kept its own list of these for
+    # exactly that reason; the bucket belongs here, where the arithmetic is.
+    unread = [lbl for lbl, st in states if not st.known]
     ready = [lbl for lbl, st in states if st.resumable(now)]
     # A model cap is reported on its own: it is stopped like a waiting session, but
     # no reset of ours frees it, so folding it into "waiting until 19:00" describes a
     # queue it is not in — and that line is what the logs and the doctor repeat back.
-    capped = [lbl for lbl, st in states if st.capped and not st.stale(now)]
+    capped = [(lbl, st) for lbl, st in states if st.capped and not st.stale(now)]
     waiting = [(lbl, st) for lbl, st in states
                if st.waiting(now) and not st.capped]
     # Counted apart from "not limited": a stale limit means we found one and aged
@@ -534,6 +539,8 @@ def summarise(states: Sequence, now: datetime) -> str:
              if st.limited and st.stale(now) and not st.waiting(now)]
     fresh = [lbl for lbl, st in states if st.kind == "fresh"]
     parts = []
+    if unread:
+        parts.append("%d unreadable (%s)" % (len(unread), ", ".join(sorted(unread))))
     if ready:
         parts.append("%d ready (%s)" % (len(ready), ", ".join(sorted(ready))))
     if waiting:
@@ -541,12 +548,19 @@ def summarise(states: Sequence, now: datetime) -> str:
         parts.append("%d waiting until %s"
                      % (len(waiting), soonest.astimezone().strftime("%H:%M")))
     if capped:
-        parts.append("%d model-capped (%s)" % (len(capped), ", ".join(sorted(capped))))
+        # Say when the model comes back, like the waiting branch does. This line is
+        # what the daemon log and the doctor repeat back, so it is the one place a
+        # user reads with the GUI closed — withholding the time there was the odd one
+        # out among the three surfaces that report a cap.
+        times = [st.reset_at for _lbl, st in capped if st.reset_at is not None]
+        when = (" until %s" % min(times).astimezone().strftime("%H:%M")) if times else ""
+        parts.append("%d model-capped%s (%s)"
+                     % (len(capped), when, ", ".join(sorted(lbl for lbl, _st in capped))))
     if stale:
         parts.append("%d stale (%s)" % (len(stale), ", ".join(sorted(stale))))
     if fresh:
         parts.append("%d cleared/new" % len(fresh))
-    idle = (len(states) - len(ready) - len(waiting) - len(capped)
+    idle = (len(states) - len(unread) - len(ready) - len(waiting) - len(capped)
             - len(stale) - len(fresh))
     if idle:
         parts.append("%d not limited" % idle)

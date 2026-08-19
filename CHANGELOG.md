@@ -18,16 +18,23 @@ All notable changes to `claude-continue`. Format follows
   A cap is now its own bucket (`LimitState.capped`) everywhere the loop counts:
   excluded from the sessions being waited on, from the reset the watcher re-arms on,
   and from "blocked", and named in its own right in the log line and the doctor's
-  summary ("1 model-capped (app)") rather than folded into "1 waiting until 19:00".
-  `waiting()` itself stays kind-blind, because it answers a question about the clock;
-  the callers that schedule around it are the ones that had to learn the difference.
+  summary ("1 model-capped until 19:00 (app)") rather than folded into "1 waiting
+  until 19:00". `waiting()` itself stays kind-blind, because it answers a question
+  about the clock; the callers that schedule around it are the ones that had to learn
+  the difference.
+
+  The exclusion applies only with the gate on. `--no-require-limit` broadcasts to
+  every session whatever its transcript says, so there a cap's reset really is worth
+  waking for: the text at that moment lands in a session whose model has just come
+  back.
 
 - **A model cap no longer reads like a session the watcher will resume.** With the
   reset still ahead, the instances panel put "waits for 19:00" on a model-capped
   session, the same words it puts on a session cap the watch really does resume.
   Only the row colour differed (amber against green), with no legend for it anywhere
   in the window, and the promise itself was empty: `continue` cannot buy credits or
-  switch models, so nothing happens for that row at 19:00 or ever. The row now reads
+  switch models, so this tool will not resume that row at 19:00 or later (a model cap
+  is never resumable by design, see `LimitState.resumable`). The row now reads
   "model cap 19:00" — the reset is worth showing, since it says when the model comes
   back, but it is not a place in a queue. Once the reset has passed it reads
   "model limit", and a limit old enough to age out still reads "old limit".
@@ -44,6 +51,21 @@ All notable changes to `claude-continue`. Format follows
   above WCAG AA on the card (both are 5.1:1): they were darkened for exactly that
   reason, and nothing recorded it, so the next round of colour tuning could have
   walked back over the line unnoticed.
+
+### Changed
+- **`doctor` no longer reports "all checks passed" over a model-capped session.** The
+  gate is working as designed when it holds one back, but that session is stopped and
+  no reset of ours frees it, so a clean bill of health sent the user away from the one
+  session that needed them by hand. It now warns, the same way an unreadable
+  transcript does. An aged-out cap stays quiet — nobody is coming back to it.
+- **A session excluded by `skip_dirs` no longer drives the watcher's wake-up.** It was
+  filtered at the point of typing but not before the limit gate, so its reset still
+  set the re-arm: the loop woke at that time, fired, matched nothing, and counted the
+  window as handled — a spent window for a terminal the user told it never to touch.
+- **`summarise` reports unreadable transcripts as their own count** instead of folding
+  them into "not limited". That string is what the post-fire log line offers as
+  evidence a resume worked, and it read as two healthy sessions when one of them could
+  not be read at all.
 
 ## [0.15.0] — 2026-08-20
 

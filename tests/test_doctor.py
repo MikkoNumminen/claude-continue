@@ -171,6 +171,24 @@ class TestLimitGateCheck(unittest.TestCase):
         self.assertEqual(c.status, WARN)
         self.assertIn("no readable transcript", c.detail)
 
+    def test_a_model_capped_session_is_not_reported_as_all_good(self):
+        # The gate is working exactly as designed here — but that session is stopped
+        # and no reset of ours frees it, so an OK would send the user away from the
+        # one session that needs them by hand.
+        cap = limits.LimitState(known=True, limited=True, kind="model",
+                                reset_at=self.NOW + timedelta(hours=2))
+        c = self._check(Config(), [("app", cap)])
+        self.assertEqual(c.status, WARN)
+        self.assertIn("app", c.detail)
+        self.assertIn("model limit", c.detail)
+
+    def test_an_aged_out_cap_does_not_keep_warning_forever(self):
+        # abandoned, not waiting on anyone: summarise already calls it stale, and a
+        # standing warning for a session nobody is coming back to is just noise.
+        old = limits.LimitState(known=True, limited=True, kind="model",
+                                reset_at=self.NOW - limits.RESUME_WINDOW - timedelta(hours=1))
+        self.assertEqual(self._check(Config(), [("app", old)]).status, OK)
+
     def test_no_sessions_warns(self):
         self.assertEqual(self._check(Config(), []).status, WARN)
 

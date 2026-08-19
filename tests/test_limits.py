@@ -603,7 +603,8 @@ class TestCappedIsNotAWait(unittest.TestCase):
                   ("web", limits.LimitState(known=True, limited=True, kind="session",
                                             reset_at=self.NOW + timedelta(hours=1)))]
         text = limits.summarise(states, self.NOW)
-        self.assertIn("1 model-capped (app)", text)
+        cap_at = self._cap().reset_at.astimezone().strftime("%H:%M")
+        self.assertIn("1 model-capped until %s (app)" % cap_at, text)  # says when it lifts
         self.assertIn("1 waiting until", text)   # the session cap, and only it
         self.assertNotIn("2 waiting", text)
 
@@ -613,6 +614,17 @@ class TestCappedIsNotAWait(unittest.TestCase):
         self.assertIn("1 model-capped", text)
         self.assertNotIn("waiting", text)
         self.assertNotIn("not limited", text)
+
+    def test_an_unreadable_session_is_not_reported_as_not_limited(self):
+        # This string is what the post-fire log line offers as evidence the resume
+        # worked. Folding an unreadable transcript into "not limited" let it report
+        # two healthy sessions when one of them could not be read at all and may
+        # still be stopped.
+        text = limits.summarise([("a", limits.UNKNOWN), ("b", limits.NOT_LIMITED)],
+                                self.NOW)
+        self.assertIn("1 unreadable (a)", text)
+        self.assertIn("1 not limited", text)
+        self.assertNotIn("2 not limited", text)
 
     def test_an_aged_out_cap_reads_as_stale_not_capped(self):
         old = self._cap(reset_at=self.NOW - limits.RESUME_WINDOW - timedelta(hours=1))
