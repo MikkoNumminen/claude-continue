@@ -541,18 +541,21 @@ class TestInstancePanelWithLimitGate(unittest.TestCase):
         self.assertIn("model limit", out)
         self.assertNotIn("will continue", out)
 
-    def test_model_cap_waiting_on_a_reset_still_reads_as_a_model_cap(self):
-        # The reset time is real, but nothing acts on it — `continue` cannot clear a
-        # model cap. Reporting it through the kind-blind "waits for HH:MM" branch made
-        # this row read word for word like the session row beside it, which the watch
-        # really does resume, leaving only the colour to tell them apart.
+    def test_model_cap_waiting_on_a_reset_does_not_read_as_a_queue_position(self):
+        # The reset is real and worth showing — it says when the model comes back —
+        # but it is not a place in a queue: `continue` cannot clear a model cap.
+        # Through the kind-blind "waits for HH:MM" branch this row read word for word
+        # like the session row beside it, which the watch really does resume, leaving
+        # only the colour to tell them apart.
+        reset = self.NOW + timedelta(hours=2)
         states = {"D:\\a": self._state(known=True, limited=True, kind="model",
-                                       reset_at=self.NOW + timedelta(hours=2)),
+                                       reset_at=reset),
                   "D:\\b": self._state(known=True, limited=True, kind="session",
-                                       reset_at=self.NOW + timedelta(hours=2))}
+                                       reset_at=reset)}
         out = format_instances([("claude", "1", "D:\\a"), ("claude", "2", "D:\\b")],
                                "", watching=True, states=states, now=self.NOW)
-        self.assertIn("model limit", out)
+        local = reset.astimezone().strftime("%H:%M")
+        self.assertIn("model cap %s" % local, out)   # the fact, without the promise
         self.assertEqual(out.count("waits for"), 1)  # the session row, and only it
 
     def test_an_abandoned_model_cap_still_ages_out(self):
@@ -658,7 +661,7 @@ class TestMarkAndToneAgree(unittest.TestCase):
                     continue
                 mark = instance_mark(state, now=self.NOW, watching=watching, gated=True)
                 self.assertTrue(
-                    "limit" in mark or "continue" in mark or "waits for" in mark,
+                    any(w in mark for w in ("limit", "cap", "continue", "waits for")),
                     "row painted %r reads %r, which says nothing about a limit"
                     % (tone, mark))
 

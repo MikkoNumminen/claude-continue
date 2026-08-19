@@ -12,10 +12,16 @@ All notable changes to `claude-continue`. Format follows
   session, the same words it puts on a session cap the watch really does resume.
   Only the row colour differed (amber against green), with no legend for it anywhere
   in the window, and the promise itself was empty: `continue` cannot buy credits or
-  switch models, so nothing happens for that row at 19:00 or ever. It now reads
-  "model limit" at every stage, matching the amber it was already painted and what
-  the row already said once the reset had passed. A limit old enough to age out still
-  reads "old limit", model cap or not.
+  switch models, so nothing happens for that row at 19:00 or ever. The row now reads
+  "model cap 19:00" — the reset is worth showing, since it says when the model comes
+  back, but it is not a place in a queue. Once the reset has passed it reads
+  "model limit", and a limit old enough to age out still reads "old limit".
+
+  `claude-continue status` had the identical bug on the one line whose job is to say
+  what the gate *would* touch: a model cap printed as "waiting (until 19:00)" until
+  the reset passed, only then switching to "held". Both surfaces took the reset from
+  the same kind-blind check, which is true for any limit with a future reset, while
+  the resume decision has always excluded model caps.
 
   The row text and the row colour are two views of one decision, so a test now sweeps
   every limit kind, reset position and watch state and fails if any two rows can show

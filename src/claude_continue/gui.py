@@ -269,13 +269,16 @@ def instance_mark(state, *, now, watching, gated) -> str:
         # cleared with /clear, or newly started: no paused work in it to resume
         return "cleared/new"
     if state.kind == "model" and not state.stale(now):
-        # A model cap reads the same at every stage, because nothing about it changes
-        # when its reset lands: `continue` cannot buy credits or switch models, so the
-        # watcher will not touch this session then or ever. Reporting the reset (the
-        # "waits for HH:MM" branch below is kind-blind, and LimitState.waiting() is
-        # true for a model cap with a future reset) made this row read WORD FOR WORD
-        # like a session the watch really does resume, leaving nothing but the colour
-        # to tell them apart — and colour alone is not a thing to hang it on.
+        # A model cap is never the watcher's to act on: `continue` cannot buy credits
+        # or switch models, so nothing happens for this row when its reset lands, then
+        # or ever. The "waits for HH:MM" branch below is kind-blind (LimitState.waiting
+        # is true for any limited state with a future reset), so it used to render this
+        # row WORD FOR WORD like a session the watch really does resume, leaving
+        # nothing but the colour to tell them apart — and colour alone is not a thing
+        # to hang it on. The reset is still worth showing, since it says when the model
+        # comes back; it just must not read as a place in the queue.
+        if state.waiting(now):
+            return "model cap %s" % state.reset_at.astimezone().strftime("%H:%M")
         return "model limit"
     if state.resumable(now):
         return "-> will continue" if watching else "limit spent"
@@ -284,6 +287,9 @@ def instance_mark(state, *, now, watching, gated) -> str:
     if state.limited and state.stale(now):
         return "old limit"
     if state.limited:
+        # No state reaches here today — every limited one is absorbed above. It stays
+        # as the landing spot for a limit kind that doesn't exist yet, so a new one
+        # can't fall through to "not limited", which would be the worst answer of all.
         return "%s limit" % (state.kind or "unknown")
     return "not limited"
 
