@@ -4,7 +4,7 @@ All notable changes to `claude-continue`. Format follows
 [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.15.1] — 2026-08-20
 
 ### Fixed
 - **A model cap no longer blocks a successful resume from confirming.** With an
